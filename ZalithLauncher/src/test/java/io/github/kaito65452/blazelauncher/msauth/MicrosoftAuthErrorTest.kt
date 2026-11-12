@@ -18,6 +18,7 @@ import io.ktor.http.Parameters
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -39,7 +40,7 @@ class MicrosoftAuthErrorTest {
 
     @After
     fun tearDown() {
-        mockWebServer.shutdown()
+        mockWebServer.close()
     }
 
     @Test
@@ -92,10 +93,11 @@ class MicrosoftAuthErrorTest {
         """.trimIndent()
 
         mockWebServer.enqueue(
-            MockResponse()
-                .setResponseCode(400)
-                .setHeader("Content-Type", "application/json")
-                .setBody(mockResponseJson)
+            MockResponse.Builder()
+                .code(400)
+                .addHeader("Content-Type", "application/json")
+                .body(Buffer().writeUtf8(mockResponseJson))
+                .build()
         )
 
         val client = HttpClient(OkHttp) {
