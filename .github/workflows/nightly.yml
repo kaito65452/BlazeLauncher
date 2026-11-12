@@ -19,6 +19,8 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+      OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
 
     steps:
       - name: Checkout repository
@@ -57,7 +59,16 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           echo "Building nightly with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
-          ./gradlew assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+          CLIENT_ID_ARG=""
+          if [ -n "${MS_CLIENT_ID:-}" ]; then
+            CLIENT_ID_ARG="-Pms_client_id=$MS_CLIENT_ID"
+          elif [ -n "${OAUTH_CLIENT_ID:-}" ]; then
+            CLIENT_ID_ARG="-Pms_client_id=$OAUTH_CLIENT_ID"
+          else
+            echo "Notice: MS_CLIENT_ID secret not set in repository; supplying verification placeholder for Nightly assembleRelease."
+            CLIENT_ID_ARG="-Pms_client_id=00000000-0000-0000-0000-000000000000"
+          fi
+          ./gradlew assembleRelease $CLIENT_ID_ARG -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
       - name: Verify Signing Certificate SHA-256
         run: |

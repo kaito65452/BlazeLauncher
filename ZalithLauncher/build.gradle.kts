@@ -27,7 +27,25 @@ val launcherVersionName = (project.findProperty("versionNameOverride") as? Strin
     ?: (project.findProperty("launcher_version_name") as? String
     ?: "2.6_hotfix")
 
-val defaultOAuthClientID = project.findProperty("oauth_client_id") as? String
+val msClientIdProperty = (project.findProperty("ms_client_id") as? String)?.takeIf { it.isNotBlank() }
+    ?: (project.findProperty("oauth_client_id") as? String)?.takeIf { it.isNotBlank() }
+
+val resolvedMsClientId = msClientIdProperty
+    ?: System.getenv("MS_CLIENT_ID")?.takeIf { it.isNotBlank() }
+    ?: System.getenv("OAUTH_CLIENT_ID")?.takeIf { it.isNotBlank() }
+    ?: File(rootDir, ".ms_client_id.txt").takeIf { it.canRead() && it.isFile }?.readText()?.trim()?.takeIf { it.isNotBlank() }
+    ?: File(rootDir, ".oauth_client_id.txt").takeIf { it.canRead() && it.isFile }?.readText()?.trim()?.takeIf { it.isNotBlank() }
+
+val isReleaseTask = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
+if (isReleaseTask && (resolvedMsClientId.isNullOrBlank() || resolvedMsClientId == "xxx")) {
+    throw GradleException(
+        "BUILD FAILED: Microsoft Client ID is missing or blank for release build! " +
+        "Please provide a valid client ID via 'MS_CLIENT_ID' environment variable/GitHub secret, " +
+        "or pass '-Pms_client_id=<id>' (or configure 'ms_client_id=<id>' in gradle.properties). " +
+        "See docs/MS_LOGIN.md for setup instructions."
+    )
+}
+
 val defaultStorePassword = project.findProperty("default_store_password") as? String ?: error("The \"default_store_password\" property is not set in gradle.properties.")
 val defaultKeyPassword = project.findProperty("default_key_password") as? String ?: error("The \"default_key_password\" property is not set in gradle.properties.")
 val defaultCurseForgeApiKey = project.findProperty("curseforge_api_key") as? String
@@ -224,7 +242,8 @@ kotlin {
 }
 
 buildKeys {
-    string("OAUTH_CLIENT_ID", getKeyFromLocal("OAUTH_CLIENT_ID", ".oauth_client_id.txt", defaultOAuthClientID), true)
+    string("OAUTH_CLIENT_ID", resolvedMsClientId ?: "", true)
+    string("MS_CLIENT_ID", resolvedMsClientId ?: "", true)
     string("LAUNCHER_NAME", launcherAPPName, true)
     string("LAUNCHER_IDENTIFIER", launcherName, true)
     string("LAUNCHER_SHORT_NAME", launcherShortName, true)
