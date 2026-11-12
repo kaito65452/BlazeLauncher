@@ -12,8 +12,8 @@ package io.github.kaito65452.blazelauncher.msauth
 
 import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.game.account.CredentialsExpiredException
-import com.movtery.zalithlauncher.game.account.NotPurchasedMinecraftException
 import com.movtery.zalithlauncher.game.account.microsoft.MinecraftProfileException
+import com.movtery.zalithlauncher.game.account.microsoft.NotPurchasedMinecraftException
 import com.movtery.zalithlauncher.game.account.microsoft.XboxLoginException
 import com.movtery.zalithlauncher.ui.AndroidStringText
 import com.movtery.zalithlauncher.ui.androidText
@@ -65,8 +65,9 @@ class MicrosoftLoginException(
      * Formats error message for user-facing dialogs including localized error header and debug details.
      */
     fun toFormattedAndroidText(): AndroidStringText {
-        val baseMessage = when (cause) {
-            is ResponseException -> cause.toLocal()
+        val currentCause = cause
+        val baseMessage = when (currentCause) {
+            is ResponseException -> currentCause.toLocal()
             else -> androidText(R.string.account_logging_in_failed)
         }
 
