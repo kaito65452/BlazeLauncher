@@ -46,4 +46,12 @@ if ! git grep -q 'applicationId = "io.github.kaito65452.blazelauncher"' ZalithLa
 fi
 echo "✓ applicationId is correctly set to io.github.kaito65452.blazelauncher."
 
+# 5. Workflow versionCode run_number check
+echo "Checking workflows for run_number in versionCode..."
+if git grep -E -i 'github\.run_number|GITHUB_RUN_NUMBER' -- .github/workflows/; then
+    echo "ERROR: Workflow passes run_number as versionCode or references GITHUB_RUN_NUMBER!"
+    exit 1
+fi
+echo "✓ Workflows do not reference run_number for versionCode."
+
 echo "=== All Guard Checks Passed ==="

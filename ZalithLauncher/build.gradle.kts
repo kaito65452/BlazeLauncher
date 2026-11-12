@@ -22,7 +22,7 @@ val launcherUrl = project.findProperty("url_home") as? String ?: error("The \"ur
 
 val launcherVersionCode = (project.findProperty("versionCodeOverride") as? String)?.toIntOrNull()
     ?: (project.findProperty("launcher_version_code") as? String)?.toIntOrNull()
-    ?: 1000
+    ?: 1
 val launcherVersionName = (project.findProperty("versionNameOverride") as? String)
     ?: (project.findProperty("launcher_version_name") as? String
     ?: "2.6_hotfix")
