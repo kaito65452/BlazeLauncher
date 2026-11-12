@@ -1466,4 +1466,14 @@
     <string name="fm_property_folders">Folders</string>
     <string name="fm_calculating">Calculating…</string>
     <string name="fm_name_conflict">Name conflicts with an existing entry</string>
+
+    <!-- Rust Edition -->
+    <string name="rust_edition">Rust Edition</string>
+    <string name="rust_engine_status">Engine status: %s</string>
+    <string name="rust_engine_not_installed">not installed</string>
+    <string name="rust_supported_versions">Supported Minecraft Versions</string>
+    <string name="rust_no_supported_versions">No versions currently available</string>
+    <string name="rust_download_assets">Download engine assets</string>
+    <string name="rust_launch">Launch</string>
+    <string name="rust_coming_soon">Coming soon</string>
 </resources>
