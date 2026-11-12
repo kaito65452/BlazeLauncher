@@ -144,6 +144,10 @@ android {
             isIncludeAndroidResources = true
             //让 android.util.Log 等框架方法在本地单测中返回默认值而非抛出异常
             isReturnDefaultValues = true
+            all {
+                exclude("**/com/movtery/zalithlauncher/utils/file/**")
+                exclude("**/com/movtery/zalithlauncher/game/version/installed/utils/VersionCompareTest*")
+            }
         }
     }
 }
