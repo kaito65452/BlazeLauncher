@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Run Guard Scripts
+        run: |
+          chmod +x scripts/guard.sh scripts/scope_guard.sh
+          ./scripts/guard.sh
+          ./scripts/scope_guard.sh main
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          add-job-summary: "on-failure"
+
+      - name: Setup Keystore
+        if: env.KEYSTORE_BASE64 != ''
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/blaze-release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/blaze-release.jks" >> $GITHUB_ENV
+
+      - name: Assemble Release APK
+        run: |
+          chmod +x gradlew
+          RUN_NUM=${GITHUB_RUN_NUMBER:-1}
+          V_CODE=$((1000 + RUN_NUM))
+          V_NAME="${GITHUB_REF_NAME#v}"
+          ./gradlew assembleRelease -PversionCodeOverride="$V_CODE" -PversionNameOverride="$V_NAME" --stacktrace
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd ZalithLauncher/build/outputs/apk/release
+          sha256sum *.apk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        run: |
+          TAG="${GITHUB_REF_NAME:-v2.6.0}"
+          gh release create "$TAG" \
+            ZalithLauncher/build/outputs/apk/release/*.apk \
+            ZalithLauncher/build/outputs/apk/release/SHA256SUMS.txt \
+            --title "Blaze Launcher $TAG" \
+            --generate-notes

@@ -16,6 +16,12 @@ local.properties
 LWJGL/build/
 LWJGL/*/build/
 
+# Keystores & secrets
+*.jks
+*.keystore
+keystore.properties
+passwords.txt
+
 # AI agent
 .zcode/
 .agent/

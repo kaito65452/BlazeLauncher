@@ -1,0 +1,78 @@
+name: Rust Engine
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check if engine directory exists
+        id: engine_check
+        run: |
+          if [ -d "engine" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "engine/ directory not present. Skipping build."
+          fi
+
+      - name: Setup Rust Toolchain
+        if: steps.engine_check.outputs.exists == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - name: Cache Cargo & Target
+        if: steps.engine_check.outputs.exists == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: ${{ runner.os }}-cargo-engine-${{ hashFiles('engine/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-engine-
+
+      - name: Install cargo-ndk
+        if: steps.engine_check.outputs.exists == 'true'
+        run: cargo install cargo-ndk
+
+      - name: Build Engine ABIs
+        if: steps.engine_check.outputs.exists == 'true'
+        run: |
+          cd engine
+          mkdir -p ../ZalithLauncher/src/main/jniLibs/arm64-v8a \
+                   ../ZalithLauncher/src/main/jniLibs/armeabi-v7a \
+                   ../ZalithLauncher/src/main/jniLibs/x86_64 \
+                   ../ZalithLauncher/src/main/jniLibs/x86
+
+          FAILED_TARGETS=""
+          TARGET_MAP="aarch64-linux-android:arm64-v8a armv7-linux-androideabi:armeabi-v7a x86_64-linux-android:x86_64 i686-linux-android:x86"
+
+          for pair in $TARGET_MAP; do
+            RUST_TARGET="${pair%%:*}"
+            ABI="${pair##*:}"
+            echo "=== Building $RUST_TARGET for ABI $ABI ==="
+            if cargo ndk -t "$ABI" build --release; then
+              echo "✓ Success: $RUST_TARGET"
+            else
+              echo "✗ FAILED: $RUST_TARGET"
+              FAILED_TARGETS="$FAILED_TARGETS $RUST_TARGET"
+            fi
+          done
+
+          if [ -n "$FAILED_TARGETS" ]; then
+            echo "ERROR: The following native ABIs failed to build:$FAILED_TARGETS"
+            exit 1
+          fi
