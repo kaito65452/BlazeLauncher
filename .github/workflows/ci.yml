@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -57,11 +58,11 @@ jobs:
       - name: Run Tests and Assemble Release
         run: |
           chmod +x gradlew
-          RUN_NUM=${GITHUB_RUN_NUMBER:-1}
-          V_CODE=$((1000 + RUN_NUM))
-          V_NAME="2.6_hotfix-blaze.${RUN_NUM}"
-          echo "Building with versionCode=$V_CODE versionName=$V_NAME"
-          ./gradlew testDebugUnitTest assembleRelease -PversionCodeOverride="$V_CODE" -PversionNameOverride="$V_NAME" --stacktrace
+          VERSION_CODE=$(( $(date -u +%s) - 1767225600 ))
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
+          echo "Building with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
+          ./gradlew testDebugUnitTest assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
       - name: Verify Signing Certificate SHA-256
         run: |
@@ -73,6 +74,72 @@ jobs:
             "$APKSIGNER" verify --print-certs "$apk"
             echo "======================================================="
           done
+
+      - name: Verify Monotonic versionCode Against Nightly Release
+        run: |
+          PRODUCED_APK=$(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$PRODUCED_APK" ]; then
+            echo "ERROR: No release APK found to inspect!"
+            exit 1
+          fi
+
+          APKANALYZER=$(which apkanalyzer 2>/dev/null || find $ANDROID_HOME -name apkanalyzer 2>/dev/null | sort -V | tail -n 1)
+          AAPT=$(which aapt 2>/dev/null || find $ANDROID_HOME -name aapt 2>/dev/null | sort -V | tail -n 1)
+
+          get_version_code() {
+            local apk="$1"
+            if [ -n "$APKANALYZER" ] && [ -x "$APKANALYZER" ]; then
+              "$APKANALYZER" manifest version-code "$apk"
+            elif [ -n "$AAPT" ] && [ -x "$AAPT" ]; then
+              "$AAPT" dump badging "$apk" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p"
+            else
+              echo "ERROR: Neither apkanalyzer nor aapt found!" >&2
+              exit 1
+            fi
+          }
+
+          PRODUCED_CODE=$(get_version_code "$PRODUCED_APK")
+          echo "======================================================="
+          echo "Produced APK: $PRODUCED_APK"
+          echo "Produced versionCode: $PRODUCED_CODE"
+          echo "======================================================="
+
+          if [ -z "$PRODUCED_CODE" ]; then
+            echo "ERROR: Failed to extract versionCode from produced APK!"
+            exit 1
+          fi
+
+          NIGHTLY_DIR="$RUNNER_TEMP/nightly_asset"
+          mkdir -p "$NIGHTLY_DIR"
+
+          if ! gh release view nightly >/dev/null 2>&1; then
+            echo "No nightly release found; skipping monotonic comparison."
+          else
+            echo "Nightly release found. Downloading nightly APK..."
+            if gh release download nightly --dir "$NIGHTLY_DIR" --pattern "*.apk" --clobber; then
+              NIGHTLY_APK=$(find "$NIGHTLY_DIR" -name "*.apk" | head -n 1)
+              if [ -n "$NIGHTLY_APK" ] && [ -f "$NIGHTLY_APK" ]; then
+                NIGHTLY_CODE=$(get_version_code "$NIGHTLY_APK")
+                echo "Nightly APK: $NIGHTLY_APK"
+                echo "Nightly versionCode: $NIGHTLY_CODE"
+
+                if [ -n "$NIGHTLY_CODE" ]; then
+                  echo "Comparing versionCode: Produced ($PRODUCED_CODE) vs Nightly ($NIGHTLY_CODE)..."
+                  if [ "$PRODUCED_CODE" -le "$NIGHTLY_CODE" ]; then
+                    echo "ERROR: Produced versionCode ($PRODUCED_CODE) is not strictly greater than nightly versionCode ($NIGHTLY_CODE)!"
+                    exit 1
+                  fi
+                  echo "✓ Verification passed: Produced versionCode ($PRODUCED_CODE) > Nightly versionCode ($NIGHTLY_CODE)."
+                else
+                  echo "Warning: Could not read versionCode from nightly APK; skipping comparison."
+                fi
+              else
+                echo "No APK found in nightly release assets; skipping comparison."
+              fi
+            else
+              echo "Could not download nightly APK assets; skipping comparison."
+            fi
+          fi
 
       - name: Upload Signed APK Artifacts
         uses: actions/upload-artifact@v4

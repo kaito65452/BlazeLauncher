@@ -53,17 +53,31 @@ jobs:
       - name: Assemble Release APK
         run: |
           chmod +x gradlew
-          RUN_NUM=${GITHUB_RUN_NUMBER:-1}
-          V_CODE=$((1000 + RUN_NUM))
-          V_NAME="2.6_hotfix-blaze.${RUN_NUM}"
-          ./gradlew assembleRelease -PversionCodeOverride="$V_CODE" -PversionNameOverride="$V_NAME" --stacktrace
+          VERSION_CODE=$(( $(date -u +%s) - 1767225600 ))
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
+          echo "Building nightly with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
+          ./gradlew assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
-      - name: Verify Signing Certificate
+      - name: Verify Signing Certificate SHA-256
         run: |
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk"); do
-            echo "Verifying $apk:"
+            echo "======================================================="
+            echo "Signing certificate verification for: $apk"
             "$APKSIGNER" verify --print-certs "$apk"
+            echo "======================================================="
+          done
+
+      - name: Inspect Produced APK Version
+        run: |
+          APKANALYZER=$(which apkanalyzer 2>/dev/null || find $ANDROID_HOME -name apkanalyzer 2>/dev/null | sort -V | tail -n 1)
+          for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk"); do
+            echo "======================================================="
+            echo "Inspecting: $apk"
+            echo "versionCode: $("$APKANALYZER" manifest version-code "$apk")"
+            echo "versionName: $("$APKANALYZER" manifest version-name "$apk")"
+            echo "======================================================="
           done
 
       - name: Ensure Nightly Pre-release Exists
