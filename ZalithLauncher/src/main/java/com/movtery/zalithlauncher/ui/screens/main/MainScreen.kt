@@ -197,9 +197,7 @@ fun MainScreen(
                         screenKey = NormalNavKey.Multiplayer
                     )
                 },
-                toRustEditionScreen = {
-                    screenBackStackModel.mainScreen.navigateOnce(io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey)
-                },
+                toRustEditionScreen = { screenBackStackModel.mainScreen.navigateOnce(io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey) },
                 openFileManager = {
                     eventViewModel.sendEvent(
                         EventViewModel.Event.OpenFileManager(
@@ -440,13 +438,7 @@ private fun <E: TitledNavKey> TopBar(
                         if (!inSettingsScreen) toSettingsScreen()
                     },
                 )
-
-                TopBarRailItem(
-                    selected = mainScreenKey is io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey,
-                    painter = painterResource(R.drawable.ic_code),
-                    text = stringResource(R.string.rust_edition),
-                    onClick = toRustEditionScreen
-                )
+                TopBarRailItem(selected = mainScreenKey is io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey, painter = painterResource(R.drawable.ic_code), text = stringResource(R.string.rust_edition), onClick = toRustEditionScreen)
             }
         }
     }
@@ -579,9 +571,7 @@ private fun NavigationUI(
                         eventViewModel = eventViewModel
                     )
                 }
-                entry<io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey> {
-                    io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionScreen()
-                }
+                entry<io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionNavKey> { io.github.kaito65452.blazelauncher.rustruntime.ui.RustEditionScreen() }
                 entry<NormalNavKey.VersionsManager> {
                     VersionsManageScreen(
                         backScreenViewModel = screenBackStackModel,
