@@ -123,8 +123,8 @@ fun redactSensitiveData(input: String?): String {
     val xblRegex = Regex("""(?i)XBL3\.0\s+x=[^\s"';,]+""")
     sanitized = xblRegex.replace(sanitized, "XBL3.0 [REDACTED]")
 
-    // Redact non-Bearer Authorization headers if present in text dumps
-    val authHeaderRegex = Regex("""(?im)^(Authorization\s*:)(?![ \t]*(?:Bearer\b|\[REDACTED\]))[ \t]*(.+)$""")
+    // Redact non-Bearer/non-redacted-XBL3.0 Authorization headers if present in text dumps
+    val authHeaderRegex = Regex("""(?im)^(Authorization\s*:)(?![ \t]*(?:Bearer\b|XBL3\.0\s+\[REDACTED\]|\[REDACTED\]))[ \t]*(.+)$""")
     sanitized = authHeaderRegex.replace(sanitized, "$1 [REDACTED]")
 
     return sanitized

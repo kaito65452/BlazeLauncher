@@ -310,8 +310,9 @@ class MicrosoftAuthErrorTest {
             assertEquals("Device Code Request", e.step)
             assertEquals(400, e.statusCode)
             assertNotNull(e.responseBody)
-            assertTrue(e.responseBody!!.contains("AADSTS900144"))
-            assertTrue(e.responseBody!!.contains("invalid_request"))
+            val body = requireNotNull(e.responseBody)
+            assertTrue(body.contains("AADSTS900144"))
+            assertTrue(body.contains("invalid_request"))
 
             val formattedText = e.toFormattedAndroidText()
             assertTrue("Result must be Appended text", formattedText is AndroidStringText.Appended)
