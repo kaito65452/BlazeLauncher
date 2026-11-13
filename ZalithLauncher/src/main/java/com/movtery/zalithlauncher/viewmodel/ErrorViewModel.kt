@@ -26,6 +26,8 @@ import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.ui.AndroidStringText
 import com.movtery.zalithlauncher.ui.theme.showThemed
 import com.movtery.zalithlauncher.ui.toAndroidString
+import com.movtery.zalithlauncher.utils.copyText
+import io.github.kaito65452.blazelauncher.msauth.COPY_LABEL_MS_AUTH_DETAILS
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -51,15 +53,28 @@ class ErrorViewModel : ViewModel() {
     ) {
         withContext(Dispatchers.Main) {
             //展示一个一次性的错误信息对话框
-            MaterialAlertDialogBuilder(context)
+            val builder = MaterialAlertDialogBuilder(context)
                 .setTitle(tm.title.toAndroidString(context))
                 .setMessage(tm.message.toAndroidString(context))
                 .setPositiveButton(R.string.generic_confirm) { dialog, _ ->
                     dialog.dismiss()
-                }.setCancelable(false)
-                .showThemed()
+                }
+                .setCancelable(false)
+
+            val detailsToCopy = tm.copyDetails?.takeIf { it.isNotBlank() }
+            if (detailsToCopy != null) {
+                builder.setNeutralButton(R.string.account_logging_copy_details) { _, _ ->
+                    copyText(COPY_LABEL_MS_AUTH_DETAILS, detailsToCopy, context, showToast = true)
+                }
+            }
+
+            builder.showThemed()
         }
     }
 
-    data class ThrowableMessage(val title: AndroidStringText, val message: AndroidStringText)
+    data class ThrowableMessage(
+        val title: AndroidStringText,
+        val message: AndroidStringText,
+        val copyDetails: String? = null
+    )
 }

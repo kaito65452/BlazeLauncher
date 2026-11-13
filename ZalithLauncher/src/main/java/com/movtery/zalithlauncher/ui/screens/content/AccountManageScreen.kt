@@ -66,6 +66,7 @@ import com.movtery.zalithlauncher.context.COPY_LABEL_ACCOUNT_UUID
 import com.movtery.zalithlauncher.game.account.Account
 import com.movtery.zalithlauncher.game.account.AccountsManager
 import com.movtery.zalithlauncher.game.account.auth_server.data.AuthServer
+import com.movtery.zalithlauncher.game.account.cancelMicrosoftLogin
 import com.movtery.zalithlauncher.game.account.isAuthServerAccount
 import com.movtery.zalithlauncher.game.account.isMicrosoftAccount
 import com.movtery.zalithlauncher.game.account.isMicrosoftLogging
@@ -109,6 +110,8 @@ import com.movtery.zalithlauncher.viewmodel.ErrorViewModel
 import com.movtery.zalithlauncher.viewmodel.EventViewModel
 import com.movtery.zalithlauncher.viewmodel.LocalBackgroundViewModel
 import com.movtery.zalithlauncher.viewmodel.ScreenBackStackViewModel
+import io.github.kaito65452.blazelauncher.msauth.MicrosoftDeviceCodeDialog
+import io.github.kaito65452.blazelauncher.msauth.MicrosoftLoginException
 
 /**
  * 封装账号界面 UI 交互的回调函数
@@ -200,7 +203,13 @@ fun AccountManageScreen(
         viewModel.effect.collect { effect ->
             when (effect) {
                 is AccountManageEffect.ShowError -> {
-                    submitError(ErrorViewModel.ThrowableMessage(effect.title, effect.message))
+                    submitError(
+                        ErrorViewModel.ThrowableMessage(
+                            title = effect.title,
+                            message = effect.message,
+                            copyDetails = effect.copyDetails
+                        )
+                    )
                 }
             }
         }
@@ -456,6 +465,20 @@ private fun MicrosoftLoginOperation(
                     )
                 },
                 openLink = actions.openLink
+            )
+        }
+        is MicrosoftLoginOperation.DeviceCode -> {
+            MicrosoftDeviceCodeDialog(
+                userCode = operation.userCode,
+                verificationUri = operation.verificationUri,
+                onCancel = {
+                    cancelMicrosoftLogin()
+                    actions.onIntent(
+                        AccountManageIntent.UpdateMicrosoftLoginOp(
+                            MicrosoftLoginOperation.None
+                        )
+                    )
+                }
             )
         }
     }
@@ -852,7 +875,8 @@ private fun AccountOperation(
                 actions.submitError(
                     ErrorViewModel.ThrowableMessage(
                         title = androidText(R.string.account_logging_in_failed),
-                        message = actions.formatError(operation.th)
+                        message = actions.formatError(operation.th),
+                        copyDetails = (operation.th as? MicrosoftLoginException)?.toCopyableDetails()
                     )
                 )
                 actions.onIntent(AccountManageIntent.UpdateAccountOp(AccountOperation.None))

@@ -48,6 +48,9 @@ for file in $CHANGED_FILES; do
         ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/microsoft/MicrosoftAuthenticator.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/AccountUtils.kt)
             # Microsoft login error logging and diagnostic enhancement
             ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/viewmodel/ErrorViewModel.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/viewmodel/AccountManageViewModel.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/AccountElements.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/AccountManageScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/LauncherElements.kt)
+            # Microsoft login diagnostics Copy Details dialog & external browser device-code dialog
+            ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores
             ;;

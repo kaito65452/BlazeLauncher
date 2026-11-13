@@ -65,8 +65,10 @@ import com.movtery.zalithlauncher.game.account.Account
 import com.movtery.zalithlauncher.game.account.AccountsManager
 import com.movtery.zalithlauncher.game.account.accountErrorText
 import com.movtery.zalithlauncher.game.account.auth_server.AuthServerHelper
+import com.movtery.zalithlauncher.game.account.cancelMicrosoftLogin
 import com.movtery.zalithlauncher.game.account.isMicrosoftAccount
 import com.movtery.zalithlauncher.game.account.microsoftLogin
+import io.github.kaito65452.blazelauncher.msauth.MicrosoftDeviceCodeDialog
 import com.movtery.zalithlauncher.game.plugin.ApkPlugin
 import com.movtery.zalithlauncher.game.plugin.natives.NativePluginManager
 import com.movtery.zalithlauncher.game.plugin.renderer.RendererPluginManager
@@ -200,6 +202,23 @@ fun LaunchGameOperation(
     checkIfInWebScreen: () -> Boolean = { false }
 ) {
     val launchGameOperation by launchGameViewModel.launchGameOperation.collectAsStateWithLifecycle()
+    var reloginMicrosoftOp by remember {
+        mutableStateOf<MicrosoftLoginOperation>(MicrosoftLoginOperation.None)
+    }
+
+    when (val op = reloginMicrosoftOp) {
+        is MicrosoftLoginOperation.DeviceCode -> {
+            MicrosoftDeviceCodeDialog(
+                userCode = op.userCode,
+                verificationUri = op.verificationUri,
+                onCancel = {
+                    cancelMicrosoftLogin()
+                    reloginMicrosoftOp = MicrosoftLoginOperation.None
+                }
+            )
+        }
+        else -> {}
+    }
 
     when (val operation = launchGameOperation) {
         is LaunchGameOperation.None -> {}
@@ -357,7 +376,11 @@ fun LaunchGameOperation(
                             toWeb = navigateToWeb,
                             backToMain = backToMain,
                             checkIfInWebScreen = checkIfInWebScreen,
-                            updateOperation = {},
+                            updateOperation = { op ->
+                                activity.runOnUiThread {
+                                    reloginMicrosoftOp = op
+                                }
+                            },
                             showToast = { text, duration -> eventViewModel.sendToast(text, duration) },
                             submitError = submitError
                         ) {

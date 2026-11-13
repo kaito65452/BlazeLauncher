@@ -181,6 +181,12 @@ sealed interface MicrosoftLoginOperation {
 
     /** 微软账号相关提示Dialog流程 */
     data object Tip : MicrosoftLoginOperation
+
+    /** 显示微软设备码及验证链接的Dialog流程 */
+    data class DeviceCode(
+        val userCode: String,
+        val verificationUri: String
+    ) : MicrosoftLoginOperation
 }
 
 /**

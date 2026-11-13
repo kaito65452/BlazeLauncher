@@ -102,6 +102,12 @@ private const val MICROSOFT_LOGGING_TASK = "microsoft_logging_task"
  */
 fun isMicrosoftLogging() = TaskSystem.containsTask(MICROSOFT_LOGGING_TASK)
 
+/**
+ * 取消正在进行的微软账号登录任务
+ */
+fun cancelMicrosoftLogin() = TaskSystem.cancelTask(MICROSOFT_LOGGING_TASK)
+
+@Suppress("UNUSED_PARAMETER")
 fun microsoftLogin(
     context: Context,
     toWeb: (url: String) -> Unit,
@@ -120,29 +126,24 @@ fun microsoftLogin(
             task.updateProgress(-1f)
             task.updateMessage(androidText(R.string.account_microsoft_fetch_device_code))
             val deviceCode = fetchDeviceCodeResponse(coroutineContext)
-            Logger.debug(TAG, "Device code received, verification url: ${deviceCode.verificationUrl}, expires in ${deviceCode.expiresIn}s")
-            copyText(COPY_LABEL_DEVICE_CODE, deviceCode.userCode, context, false)
-            showToast(
-                androidText(R.string.account_microsoft_coped_device_code, deviceCode.userCode),
-                Toast.LENGTH_SHORT
+            Logger.info(
+                TAG,
+                "Microsoft device code received: verification_uri=${deviceCode.verificationUrl}, expires_in=${deviceCode.expiresIn}s"
             )
-            toWeb(deviceCode.verificationUrl)
+            copyText(COPY_LABEL_DEVICE_CODE, deviceCode.userCode, context, false)
+            updateOperation(
+                MicrosoftLoginOperation.DeviceCode(
+                    userCode = deviceCode.userCode,
+                    verificationUri = deviceCode.verificationUrl
+                )
+            )
             task.updateProgress(-1f)
             task.updateMessage(androidText(R.string.account_microsoft_get_token, deviceCode.userCode))
-            val tokenResponse = getTokenResponse(deviceCode, coroutineContext) { time ->
-                (!checkIfInWebScreen()).also { exit ->
-                    if (exit && time > 0) {
-                        //如果已退出网页，则视为用户想要退出登录
-                        //弹出提示
-                        Logger.debug(TAG, "User left the web page during device code polling")
-                        showToast(
-                            androidText(R.string.account_microsoft_exit_by_user),
-                            Toast.LENGTH_LONG
-                        )
-                    }
-                }
+            val tokenResponse = getTokenResponse(deviceCode, coroutineContext) {
+                // Users authenticate in their external browser via the device code dialog (no WebView needed)
+                false
             }
-            backToMain()
+            updateOperation(MicrosoftLoginOperation.None)
             val account = microsoftAuth(
                 AuthType.Access,
                 tokenResponse.refreshToken,
@@ -162,6 +163,7 @@ fun microsoftLogin(
             if (th !is CancellationException) {
                 Logger.error(TAG, "Microsoft account login failed", th)
             }
+            val copyDetails = (th as? MicrosoftLoginException)?.toCopyableDetails()
             when (th) {
                 is MicrosoftLoginException -> th.toFormattedAndroidText()
                 is HttpRequestTimeoutException -> androidText(R.string.account_logging_time_out)
@@ -181,7 +183,8 @@ fun microsoftLogin(
                 submitError(
                     ErrorViewModel.ThrowableMessage(
                         title = androidText(R.string.account_logging_in_failed),
-                        message = message
+                        message = message,
+                        copyDetails = copyDetails
                     )
                 )
             }

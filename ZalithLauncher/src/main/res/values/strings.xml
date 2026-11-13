@@ -480,6 +480,7 @@
     <string name="account_logging_xbox_underage">The birthdate on the account indicates the user is under 18. A guardian must add this account to a family group to continue using it.</string>
     <string name="account_logging_frequent">Login attempts are too frequent. Please try again later.</string>
     <string name="account_logging_blocked_ip">The current IP address has been blocked from logging in.</string>
+    <string name="account_logging_copy_details">Copy details</string>
     <string name="account_logging_profile_not_exists">Please create a Minecraft player profile first, then try logging in again!</string>
     <string name="account_logging_not_purchased_minecraft">Minecraft ownership not verified. Please purchase it from Minecraft\'s official website.</string>
     <string name="account_relogin_title">Sign In Required</string>
@@ -548,6 +549,12 @@
     <string name="account_delete_message">Are you sure you want to delete account %s from the launcher?</string>
     <string name="account_microsoft_fetch_device_code">Get Device Code</string>
     <string name="account_microsoft_coped_device_code">Device code copied: %s. Please complete verification in your browser shortly.</string>
+    <string name="account_microsoft_device_code_title">Microsoft Sign-In</string>
+    <string name="account_microsoft_device_code_message">Open the link below in your browser and enter this code to sign in:</string>
+    <string name="account_microsoft_device_code_url_label">Verification URL: %s</string>
+    <string name="account_microsoft_device_code_waiting">Waiting for sign-in in browser…</string>
+    <string name="account_microsoft_copy_code">Copy code</string>
+    <string name="account_microsoft_open_in_browser">Open in browser</string>
     <string name="account_microsoft_get_token">Polling in progress, attempting to obtain token; device code: %s</string>
     <string name="account_microsoft_getting_access_token">Requesting access token</string>
     <string name="account_microsoft_getting_xbl_token">Requesting XBL token</string>

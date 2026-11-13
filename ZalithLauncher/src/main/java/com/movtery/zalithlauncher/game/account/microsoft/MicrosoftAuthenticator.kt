@@ -46,6 +46,7 @@ import com.movtery.zalithlauncher.game.account.yggdrasil.findUsing
 import com.movtery.zalithlauncher.game.account.yggdrasil.getPlayerProfile
 import com.movtery.zalithlauncher.game.account.yggdrasil.getSkinModel
 import com.movtery.zalithlauncher.path.GLOBAL_CLIENT
+import com.movtery.zalithlauncher.path.GLOBAL_JSON
 import com.movtery.zalithlauncher.utils.logging.Logger
 import com.movtery.zalithlauncher.utils.network.httpPostJson
 import com.movtery.zalithlauncher.utils.network.safeBodyAsJson
@@ -58,6 +59,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.Parameters
@@ -74,6 +76,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration.Companion.milliseconds
+import io.github.kaito65452.blazelauncher.msauth.MicrosoftHttpStepException
 import io.github.kaito65452.blazelauncher.msauth.executeMicrosoftAuthStep
 import io.github.kaito65452.blazelauncher.msauth.requireConfiguredOAuthClientId
 
@@ -103,7 +106,7 @@ suspend fun fetchDeviceCodeResponse(
     clientId: String = BuildKeys.OAUTH_CLIENT_ID
 ): DeviceCodeResponse = coroutineScope {
     val configuredClientId = requireConfiguredOAuthClientId(clientId, "Device Code Request")
-    executeMicrosoftAuthStep("Device Code Request") {
+    executeMicrosoftAuthStep("Device Code Request", defaultHost = "login.microsoftonline.com") {
         withRetry {
             submitForm(
                 url = "$MICROSOFT_AUTH_URL$TENANT/oauth2/v2.0/devicecode",
@@ -128,7 +131,7 @@ suspend fun getTokenResponse(
     checkCancelled: suspend (time: Int) -> Boolean
 ): TokenResponse = coroutineScope {
     val configuredClientId = requireConfiguredOAuthClientId(clientId, "Token Polling")
-    executeMicrosoftAuthStep("Token Polling") {
+    executeMicrosoftAuthStep("Token Polling", defaultHost = "login.microsoftonline.com") {
         var pollingInterval = codeResponse.interval * 1000L
         val expireTime = System.currentTimeMillis() + codeResponse.expiresIn * 1000L
 
@@ -169,7 +172,8 @@ suspend fun getTokenResponse(
                 }
                 Logger.warning(TAG, "Token endpoint responded without a Bearer token, continuing to poll")
             } catch (e: ClientRequestException) {
-                when (val error = e.errorCode()) {
+                val (rawBody, error) = e.readOAuthErrorCode()
+                when (error) {
                     // 服务器正常响应，说明网络可用
                     "authorization_pending" -> consecutiveFailures = 0 // 正常情况，继续轮询
                     "slow_down" -> {
@@ -179,7 +183,7 @@ suspend fun getTokenResponse(
                     }
                     else -> {
                         Logger.error(TAG, "Token endpoint rejected the polling request: error = $error", e)
-                        throw e
+                        throw MicrosoftHttpStepException(e, e, rawBody)
                     }
                 }
             } catch (e: CancellationException) {
@@ -213,12 +217,16 @@ suspend fun getTokenResponse(
 }
 
 /**
- * 从 OAuth 错误响应中解析 error 字段
+ * 从 OAuth 错误响应中解析原始文本和 error 字段
  */
-private suspend fun ClientRequestException.errorCode(): String? {
-    return runCatching {
-        response.safeBodyAsJson<JsonObject>()["error"]?.jsonPrimitive?.content
-    }.getOrNull()
+private suspend fun ClientRequestException.readOAuthErrorCode(): Pair<String?, String?> {
+    val rawBody = runCatching { response.bodyAsText() }.getOrNull()
+    val error = rawBody?.let {
+        runCatching {
+            GLOBAL_JSON.decodeFromString<JsonObject>(it)["error"]?.jsonPrimitive?.content
+        }.getOrNull()
+    }
+    return rawBody to error
 }
 
 /**
@@ -278,7 +286,7 @@ private suspend fun refreshAccessToken(
     clientId: String = BuildKeys.OAUTH_CLIENT_ID
 ): Pair<String, String> {
     val configuredClientId = requireConfiguredOAuthClientId(clientId, "Token Refresh")
-    return executeMicrosoftAuthStep("Token Refresh") {
+    return executeMicrosoftAuthStep("Token Refresh", defaultHost = "login.live.com") {
         update(AsyncStatus.GETTING_ACCESS_TOKEN)
 
         withRetry {
@@ -297,16 +305,17 @@ private suspend fun refreshAccessToken(
                     response["refresh_token"]?.jsonPrimitive?.content ?: refreshToken
                 )
             } catch (e: ClientRequestException) {
+                val (rawBody, error) = e.readOAuthErrorCode()
                 //刷新令牌已被撤销或失效，无法自动恢复
-                if (e.errorCode() == "invalid_grant") throw CredentialsExpiredException()
-                throw e
+                if (error == "invalid_grant") throw CredentialsExpiredException()
+                throw MicrosoftHttpStepException(e, e, rawBody)
             }
         }
     }
 }
 
 private suspend fun authenticateXBL(accessToken: String, update: (AsyncStatus) -> Unit): Pair<String, String> =
-    executeMicrosoftAuthStep("Xbox Live (XBL) Authentication") {
+    executeMicrosoftAuthStep("Xbox Live (XBL) Authentication", defaultHost = "user.auth.xboxlive.com") {
         update(AsyncStatus.GETTING_XBL_TOKEN)
 
         suspend fun requestXblToken(rpsTicket: String): Pair<String, String> {
@@ -354,7 +363,7 @@ private suspend fun authenticateXSTS(
     uhs: String,
     update: (AsyncStatus) -> Unit,
     context: CoroutineContext
-): XSTSAuthResult = executeMicrosoftAuthStep("Xbox Security Token Service (XSTS)") {
+): XSTSAuthResult = executeMicrosoftAuthStep("Xbox Security Token Service (XSTS)", defaultHost = "xsts.auth.xboxlive.com") {
     update(AsyncStatus.GETTING_XSTS_TOKEN)
 
     withRetry {
@@ -376,23 +385,26 @@ private suspend fun authenticateXSTS(
         } catch (e: ClientRequestException) {
             // XSTS 对账号类问题统一返回 4xx 及 XErr 错误码，expectSuccess 会提前抛出异常
             // 因此必须从异常响应体中解析 XErr，才能向用户展示真实的失败原因
-            val errorBody = runCatching { e.response.safeBodyAsJson<JsonObject>() }.getOrNull()
+            val rawBody = runCatching { e.response.bodyAsText() }.getOrNull()
+            val errorBody = rawBody?.let {
+                runCatching { GLOBAL_JSON.decodeFromString<JsonObject>(it) }.getOrNull()
+            }
             when (val xErr = errorBody?.get("XErr").text()) {
                 //Reference : https://github.com/PrismarineJS/prismarine-auth/blob/1aef6e1/src/common/Constants.js#L50-L59
-                "2148916227" -> throw XboxLoginException(BANNED)
-                "2148916229" -> throw XboxLoginException(RESTRICTED)
-                "2148916233" -> throw XboxLoginException(UNREGISTERED)
-                "2148916234" -> throw XboxLoginException(NOT_ACCEPTED_SERVICE)
-                "2148916235" -> throw XboxLoginException(BLOCKED_REGION)
-                "2148916236" -> throw XboxLoginException(REQUIRES_PROOF_OF_AGE)
-                "2148916237" -> throw XboxLoginException(REACHED_PLAYTIME_LIMIT)
-                "2148916238" -> throw XboxLoginException(UNDERAGE)
+                "2148916227" -> throw MicrosoftHttpStepException(XboxLoginException(BANNED), e, rawBody)
+                "2148916229" -> throw MicrosoftHttpStepException(XboxLoginException(RESTRICTED), e, rawBody)
+                "2148916233" -> throw MicrosoftHttpStepException(XboxLoginException(UNREGISTERED), e, rawBody)
+                "2148916234" -> throw MicrosoftHttpStepException(XboxLoginException(NOT_ACCEPTED_SERVICE), e, rawBody)
+                "2148916235" -> throw MicrosoftHttpStepException(XboxLoginException(BLOCKED_REGION), e, rawBody)
+                "2148916236" -> throw MicrosoftHttpStepException(XboxLoginException(REQUIRES_PROOF_OF_AGE), e, rawBody)
+                "2148916237" -> throw MicrosoftHttpStepException(XboxLoginException(REACHED_PLAYTIME_LIMIT), e, rawBody)
+                "2148916238" -> throw MicrosoftHttpStepException(XboxLoginException(UNDERAGE), e, rawBody)
                 else -> {
                     Logger.error(
                         TAG,
                         "XSTS authentication failed: status = ${e.response.status}, XErr = $xErr, message = ${errorBody?.get("Message").text()}"
                     )
-                    throw e
+                    throw MicrosoftHttpStepException(e, e, rawBody)
                 }
             }
         }
@@ -403,7 +415,10 @@ private suspend fun authenticateMinecraft(
     xstsResult: XSTSAuthResult,
     update: (AsyncStatus) -> Unit,
     context: CoroutineContext
-): MinecraftAuthResponse = executeMicrosoftAuthStep("Minecraft Services Authentication") {
+): MinecraftAuthResponse = executeMicrosoftAuthStep(
+    step = "Minecraft Services Authentication (login_with_xbox)",
+    defaultHost = "api.minecraftservices.com"
+) {
     update(AsyncStatus.AUTHENTICATE_MINECRAFT)
 
     withRetry {
@@ -416,8 +431,8 @@ private suspend fun authenticateMinecraft(
         }.onFailure { e ->
             if (e is ResponseException) {
                 when (e.response.status.value) {
-                    429 -> throw MinecraftProfileException(FREQUENT)
-                    403 -> throw MinecraftProfileException(BLOCKED_IP)
+                    429 -> throw MicrosoftHttpStepException(MinecraftProfileException(FREQUENT), e)
+                    403 -> throw MicrosoftHttpStepException(MinecraftProfileException(BLOCKED_IP), e)
                 }
             }
         }.getOrThrow()
@@ -425,7 +440,10 @@ private suspend fun authenticateMinecraft(
 }
 
 private suspend fun verifyGameOwnership(accessToken: String, update: (AsyncStatus) -> Unit) =
-    executeMicrosoftAuthStep("Verify Game Ownership") {
+    executeMicrosoftAuthStep(
+        step = "Verify Game Ownership (entitlements)",
+        defaultHost = "api.minecraftservices.com"
+    ) {
         update(AsyncStatus.VERIFY_GAME_OWNERSHIP)
         withRetry {
             val response = GLOBAL_CLIENT.get("$MINECRAFT_SERVICES_URL/entitlements/mcstore") {
@@ -442,7 +460,10 @@ private suspend fun createAccount(
     refreshToken: String,
     uhs: String,
     statusUpdate: (AsyncStatus) -> Unit
-): Account = executeMicrosoftAuthStep("Minecraft Profile Query") {
+): Account = executeMicrosoftAuthStep(
+    step = "Minecraft Profile Query (profile)",
+    defaultHost = "api.minecraftservices.com"
+) {
     statusUpdate(AsyncStatus.GETTING_PLAYER_PROFILE)
 
     val profile = getPlayerProfile(

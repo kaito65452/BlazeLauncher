@@ -179,7 +179,11 @@ sealed interface AccountManageIntent {
  */
 sealed class AccountManageEffect {
     /** 在 UI 层显示错误信息对话框 */
-    data class ShowError(val title: AndroidStringText, val message: AndroidStringText) : AccountManageEffect()
+    data class ShowError(
+        val title: AndroidStringText,
+        val message: AndroidStringText,
+        val copyDetails: String? = null
+    ) : AccountManageEffect()
 }
 
 /**
@@ -423,9 +427,13 @@ class AccountManageViewModel @AssistedInject constructor(
     }
 
     /** 内部方法：发送错误通知 */
-    private fun emitError(title: AndroidStringText, message: AndroidStringText) {
+    private fun emitError(
+        title: AndroidStringText,
+        message: AndroidStringText,
+        copyDetails: String? = null
+    ) {
         viewModelScope.launch(Dispatchers.Main) {
-            _effect.send(AccountManageEffect.ShowError(title, message))
+            _effect.send(AccountManageEffect.ShowError(title, message, copyDetails))
         }
     }
 
@@ -446,7 +454,7 @@ class AccountManageViewModel @AssistedInject constructor(
             intent.checkIfInWebScreen,
             { onIntent(AccountManageIntent.UpdateMicrosoftLoginOp(it)) },
             showToast = ::emitToast,
-            { emitError(it.title, it.message) }
+            { emitError(it.title, it.message, it.copyDetails) }
         )
         onIntent(AccountManageIntent.UpdateMicrosoftLoginOp(MicrosoftLoginOperation.None))
     }
