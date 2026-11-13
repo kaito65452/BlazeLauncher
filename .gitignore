@@ -37,3 +37,7 @@ passwords.txt
 .ampersand/
 
 .vscode/
+
+# Phase 0 Rust engine build artifacts (built dynamically in CI)
+ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
+engine/starling/target/

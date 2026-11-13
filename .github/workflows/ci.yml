@@ -15,7 +15,11 @@ permissions:
   contents: read
 
 jobs:
+  engine:
+    uses: ./.github/workflows/rust-engine.yml
+
   ci:
+    needs: engine
     runs-on: ubuntu-latest
 
     env:
@@ -39,6 +43,22 @@ jobs:
           chmod +x scripts/guard.sh scripts/scope_guard.sh
           ./scripts/guard.sh
           ./scripts/scope_guard.sh main
+
+      - name: Download Rust Engine .so (arm64-v8a)
+        uses: actions/download-artifact@v4
+        with:
+          name: horizon-engine-arm64
+          path: ZalithLauncher/src/main/jniLibs/arm64-v8a
+
+      - name: Verify Rust Engine .so Placement
+        run: |
+          SO_PATH="ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so"
+          if [ ! -s "$SO_PATH" ]; then
+            echo "ERROR: Missing $SO_PATH after artifact download!" >&2
+            exit 1
+          fi
+          ls -lh "$SO_PATH"
+          echo "Engine .so bytes: $(stat -c%s "$SO_PATH")"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -111,6 +131,23 @@ jobs:
           fi
           for apk in $APK_LIST; do
             ./scripts/guard.sh --check-apk "$apk"
+            python3 - "$apk" <<'PY'
+          import os, sys, zipfile
+          apk = sys.argv[1]
+          apk_bytes = os.path.getsize(apk)
+          with zipfile.ZipFile(apk, "r") as zf:
+              matches = [i for i in zf.infolist() if i.filename.endswith("libhorizon_android.so")]
+              print(f"APK size report for {apk}: total={apk_bytes} bytes ({apk_bytes / (1024*1024):.2f} MiB)")
+              if not matches:
+                  print("ERROR: libhorizon_android.so not packaged in APK!", file=sys.stderr)
+                  sys.exit(1)
+              for m in matches:
+                  print(
+                      f"  entry={m.filename} uncompressed={m.file_size} bytes "
+                      f"({m.file_size / (1024*1024):.2f} MiB) compressed={m.compress_size} bytes "
+                      f"({m.compress_size / (1024*1024):.2f} MiB)"
+                  )
+          PY
           done
 
       - name: Verify Signing Certificate SHA-256

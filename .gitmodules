@@ -1,0 +1,4 @@
+[submodule "engine/starling"]
+	path = engine/starling
+	url = https://github.com/starling-client/starling.git
+	branch = android
