@@ -45,6 +45,9 @@ for file in $CHANGED_FILES; do
             ;;
         ZalithLauncher/src/test/java/io/github/kaito65452/blazelauncher/*)
             ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/microsoft/MicrosoftAuthenticator.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/AccountUtils.kt)
+            # Microsoft login error logging and diagnostic enhancement
+            ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores
             ;;

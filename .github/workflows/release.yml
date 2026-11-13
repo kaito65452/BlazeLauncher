@@ -19,6 +19,8 @@ jobs:
       KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
       KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+      OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
 
     steps:
       - name: Checkout repository
@@ -60,7 +62,14 @@ jobs:
             VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           fi
           echo "Building release with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
-          ./gradlew assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+          CLIENT_ID_ARG=""
+          if [ -n "${MS_CLIENT_ID:-}" ]; then
+            CLIENT_ID_ARG="-Pms_client_id=$MS_CLIENT_ID"
+          elif [ -n "${OAUTH_CLIENT_ID:-}" ]; then
+            CLIENT_ID_ARG="-Pms_client_id=$OAUTH_CLIENT_ID"
+          fi
+          # Official release build strictly requires MS_CLIENT_ID to be provided
+          ./gradlew assembleRelease $CLIENT_ID_ARG -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
       - name: Generate SHA-256 Checksums
         run: |
