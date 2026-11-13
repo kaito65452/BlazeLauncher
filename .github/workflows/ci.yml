@@ -102,6 +102,17 @@ jobs:
             ./gradlew testDebugUnitTest assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           fi
 
+      - name: Verify APK License Hygiene
+        run: |
+          APK_LIST=$(find ZalithLauncher/build/outputs/apk -name "*.apk" | sort)
+          if [ -z "$APK_LIST" ]; then
+            echo "ERROR: No APK found under ZalithLauncher/build/outputs/apk!" >&2
+            exit 1
+          fi
+          for apk in $APK_LIST; do
+            ./scripts/guard.sh --check-apk "$apk"
+          done
+
       - name: Verify Signing Certificate SHA-256
         if: steps.oauth_check.outputs.has_client_id == 'true'
         run: |
