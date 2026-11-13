@@ -41,6 +41,8 @@ for file in $CHANGED_FILES; do
             ;;
         ZalithLauncher/src/main/res/values*/strings.xml)
             ;;
+        ZalithLauncher/src/main/assets/THIRD_PARTY_NOTICES.md)
+            ;;
         ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/*)
             ;;
         ZalithLauncher/src/test/java/io/github/kaito65452/blazelauncher/*)
