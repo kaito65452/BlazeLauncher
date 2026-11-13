@@ -81,11 +81,12 @@ class OAuthClientIdGuardTest {
         }
 
         val dummyCodeResponse = DeviceCodeResponse(
-            deviceCode = "dev",
             userCode = "USER",
+            deviceCode = "dev",
             verificationUrl = "https://example.com",
             expiresIn = 60,
-            interval = 5
+            interval = 5,
+            message = "Enter code USER"
         )
         try {
             runBlocking {
