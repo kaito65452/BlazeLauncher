@@ -175,9 +175,10 @@ class MicrosoftAuthErrorTest {
             assertEquals("cloudflare", e.responseHeaders["Server"])
             assertEquals("901234567890abcd-CGK", e.responseHeaders["CF-Ray"])
             assertNotNull(e.responseBody)
-            assertTrue(e.responseBody!!.contains("Access denied from current IP"))
-            assertFalse(e.responseBody!!.contains("leaked_token_should_redact"))
-            assertTrue(e.responseBody!!.contains("[REDACTED]"))
+            val body = requireNotNull(e.responseBody)
+            assertTrue(body.contains("Access denied from current IP"))
+            assertFalse(body.contains("leaked_token_should_redact"))
+            assertTrue(body.contains("[REDACTED]"))
 
             val formatted = e.toFormattedAndroidText() as AndroidStringText.Appended
             val fullText = formatted.texts.joinToString("") { part ->
@@ -243,7 +244,8 @@ class MicrosoftAuthErrorTest {
             assertEquals("Xbox Security Token Service (XSTS)", e.step)
             assertEquals(401, e.statusCode)
             assertEquals("req-xsts-123", e.responseHeaders["X-MS-Request-Id"])
-            assertTrue(e.responseBody!!.contains("2148916235"))
+            val body = requireNotNull(e.responseBody)
+            assertTrue(body.contains("2148916235"))
         } finally {
             client.close()
         }

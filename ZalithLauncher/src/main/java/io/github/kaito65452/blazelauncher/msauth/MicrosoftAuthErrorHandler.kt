@@ -38,22 +38,22 @@ const val COPY_LABEL_MS_AUTH_DETAILS = "BlazeLauncher_MS_AUTH_DETAILS"
 const val ZERO_CLIENT_ID = "00000000-0000-0000-0000-000000000000"
 const val MSG_MS_LOGIN_NOT_CONFIGURED = "Microsoft login is not configured in this build."
 
-private val DIAGNOSTIC_HEADER_NAMES = setOf(
-    "server",
-    "cf-ray",
-    "cf-cache-status",
-    "cf-mitigated",
-    "x-cache",
-    "x-amz-cf-id",
-    "x-amz-cf-pop",
-    "x-request-id",
-    "x-ms-request-id",
-    "request-id",
-    "x-correlation-id",
-    "retry-after",
-    "content-type",
-    "via",
-    "x-served-by"
+private val DIAGNOSTIC_HEADER_DISPLAY_NAMES = mapOf(
+    "server" to "Server",
+    "cf-ray" to "CF-Ray",
+    "cf-cache-status" to "CF-Cache-Status",
+    "cf-mitigated" to "CF-Mitigated",
+    "x-cache" to "X-Cache",
+    "x-amz-cf-id" to "X-Amz-Cf-Id",
+    "x-amz-cf-pop" to "X-Amz-Cf-Pop",
+    "x-request-id" to "X-Request-Id",
+    "x-ms-request-id" to "X-MS-Request-Id",
+    "request-id" to "Request-Id",
+    "x-correlation-id" to "X-Correlation-Id",
+    "retry-after" to "Retry-After",
+    "content-type" to "Content-Type",
+    "via" to "Via",
+    "x-served-by" to "X-Served-By"
 )
 
 private val SENSITIVE_HEADER_NAMES = setOf(
@@ -124,8 +124,8 @@ fun redactSensitiveData(input: String?): String {
     sanitized = xblRegex.replace(sanitized, "XBL3.0 [REDACTED]")
 
     // Redact non-Bearer Authorization headers if present in text dumps
-    val authHeaderRegex = Regex("""(?im)^(Authorization\s*:\s*)(?!Bearer\b|\[REDACTED\])(.+)$""")
-    sanitized = authHeaderRegex.replace(sanitized, "$1[REDACTED]")
+    val authHeaderRegex = Regex("""(?im)^(Authorization\s*:)(?![ \t]*(?:Bearer\b|\[REDACTED\]))[ \t]*(.+)$""")
+    sanitized = authHeaderRegex.replace(sanitized, "$1 [REDACTED]")
 
     return sanitized
 }
@@ -139,12 +139,13 @@ fun extractDiagnosticHeaders(headers: Headers): Map<String, String> {
     headers.entries().forEach { (name, values) ->
         val lower = name.lowercase()
         if (lower in SENSITIVE_HEADER_NAMES) return@forEach
-        val isDiagnostic = lower in DIAGNOSTIC_HEADER_NAMES ||
+        val canonicalName = DIAGNOSTIC_HEADER_DISPLAY_NAMES[lower]
+        val isDiagnostic = canonicalName != null ||
             lower.startsWith("cf-") ||
             lower.startsWith("x-ms-") ||
             lower.startsWith("x-cache")
         if (isDiagnostic && values.isNotEmpty()) {
-            result[name] = redactSensitiveData(values.joinToString(", "))
+            result[canonicalName ?: name] = redactSensitiveData(values.joinToString(", "))
         }
     }
     return result
