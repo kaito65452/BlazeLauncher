@@ -27,22 +27,21 @@ val launcherVersionName = (project.findProperty("versionNameOverride") as? Strin
     ?: (project.findProperty("launcher_version_name") as? String
     ?: "2.6_hotfix")
 
-val msClientIdProperty = (project.findProperty("ms_client_id") as? String)?.takeIf { it.isNotBlank() }
-    ?: (project.findProperty("oauth_client_id") as? String)?.takeIf { it.isNotBlank() }
+val msClientIdProperty = (project.findProperty("oauth_client_id") as? String)?.trim()?.takeIf { it.isNotBlank() }
+    ?: (project.findProperty("ms_client_id") as? String)?.trim()?.takeIf { it.isNotBlank() }
 
 val resolvedMsClientId = msClientIdProperty
-    ?: System.getenv("MS_CLIENT_ID")?.takeIf { it.isNotBlank() }
-    ?: System.getenv("OAUTH_CLIENT_ID")?.takeIf { it.isNotBlank() }
-    ?: File(rootDir, ".ms_client_id.txt").takeIf { it.canRead() && it.isFile }?.readText()?.trim()?.takeIf { it.isNotBlank() }
+    ?: System.getenv("OAUTH_CLIENT_ID")?.trim()?.takeIf { it.isNotBlank() }
+    ?: System.getenv("MS_CLIENT_ID")?.trim()?.takeIf { it.isNotBlank() }
     ?: File(rootDir, ".oauth_client_id.txt").takeIf { it.canRead() && it.isFile }?.readText()?.trim()?.takeIf { it.isNotBlank() }
+    ?: File(rootDir, ".ms_client_id.txt").takeIf { it.canRead() && it.isFile }?.readText()?.trim()?.takeIf { it.isNotBlank() }
 
 val isReleaseTask = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-if (isReleaseTask && (resolvedMsClientId.isNullOrBlank() || resolvedMsClientId == "xxx")) {
+if (isReleaseTask && (resolvedMsClientId.isNullOrBlank() || resolvedMsClientId == "xxx" || resolvedMsClientId == "00000000-0000-0000-0000-000000000000")) {
     throw GradleException(
-        "BUILD FAILED: Microsoft Client ID is missing or blank for release build! " +
-        "Please provide a valid client ID via 'MS_CLIENT_ID' environment variable/GitHub secret, " +
-        "or pass '-Pms_client_id=<id>' (or configure 'ms_client_id=<id>' in gradle.properties). " +
-        "See docs/MS_LOGIN.md for setup instructions."
+        "BUILD FAILED: OAUTH_CLIENT_ID secret is missing, blank, or placeholder for release build! " +
+        "Please configure the 'OAUTH_CLIENT_ID' environment variable/GitHub secret, " +
+        "or pass '-Poauth_client_id=<id>'."
     )
 }
 

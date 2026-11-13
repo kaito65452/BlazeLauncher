@@ -27,6 +27,44 @@ import kotlinx.coroutines.CancellationException
 
 private const val TAG = "MicrosoftAuth"
 
+const val ZERO_CLIENT_ID = "00000000-0000-0000-0000-000000000000"
+const val MSG_MS_LOGIN_NOT_CONFIGURED = "Microsoft login is not configured in this build."
+
+fun isValidOAuthClientId(clientId: String?): Boolean {
+    val trimmed = clientId?.trim().orEmpty()
+    return trimmed.isNotEmpty() && trimmed != ZERO_CLIENT_ID
+}
+
+fun requireConfiguredOAuthClientId(
+    clientId: String?,
+    step: String = "OAuth Client ID Check"
+): String {
+    val trimmed = clientId?.trim().orEmpty()
+    if (trimmed.isEmpty()) {
+        val detail = "BuildKeys.OAUTH_CLIENT_ID is empty."
+        Logger.error(TAG, "$MSG_MS_LOGIN_NOT_CONFIGURED ($detail)")
+        throw MicrosoftLoginException(
+            step = step,
+            statusCode = null,
+            responseBody = null,
+            redactedDetails = detail,
+            userMessage = MSG_MS_LOGIN_NOT_CONFIGURED
+        )
+    }
+    if (trimmed == ZERO_CLIENT_ID) {
+        val detail = "BuildKeys.OAUTH_CLIENT_ID is placeholder zero GUID ($ZERO_CLIENT_ID)."
+        Logger.error(TAG, "$MSG_MS_LOGIN_NOT_CONFIGURED ($detail)")
+        throw MicrosoftLoginException(
+            step = step,
+            statusCode = null,
+            responseBody = null,
+            redactedDetails = detail,
+            userMessage = MSG_MS_LOGIN_NOT_CONFIGURED
+        )
+    }
+    return trimmed
+}
+
 /**
  * Sanitizes and redacts sensitive tokens, credentials, and identifiers from log messages
  * and error details to ensure secrets are never leaked in error dialogs, logs, or reports.
@@ -58,13 +96,24 @@ class MicrosoftLoginException(
     val statusCode: Int?,
     val responseBody: String?,
     val redactedDetails: String,
-    cause: Throwable? = null
+    cause: Throwable? = null,
+    val userMessage: String? = null
 ) : Exception(redactedDetails, cause) {
 
     /**
      * Formats error message for user-facing dialogs including localized error header and debug details.
      */
     fun toFormattedAndroidText(): AndroidStringText {
+        if (userMessage != null) {
+            return buildAppendedText {
+                append(androidText(userMessage))
+                append("\n\n")
+                append("[Debug Details]\n")
+                append("Step: $step\n")
+                append("Detail: $redactedDetails")
+            }
+        }
+
         val currentCause = cause
         val baseMessage = when (currentCause) {
             is ResponseException -> currentCause.toLocal()

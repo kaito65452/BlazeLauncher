@@ -51,6 +51,38 @@ jobs:
         with:
           add-job-summary: "on-failure"
 
+      - name: Verify OAUTH_CLIENT_ID Configuration
+        id: oauth_check
+        run: |
+          CLIENT_ID_TRIMMED=$(printf '%s' "${OAUTH_CLIENT_ID:-}" | tr -d '[:space:]')
+          IS_FORK_PR="false"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.pull_request.head.repo.fork }}" = "true" ]; then
+            IS_FORK_PR="true"
+          fi
+
+          if [ -n "$CLIENT_ID_TRIMMED" ]; then
+            CLIENT_ID_LEN=${#CLIENT_ID_TRIMMED}
+            echo "OAUTH_CLIENT_ID present: yes (length $CLIENT_ID_LEN)"
+            echo "has_client_id=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Secrets & Build Configuration"
+              echo "- OAUTH_CLIENT_ID present: yes (length $CLIENT_ID_LEN)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "OAUTH_CLIENT_ID present: no (length 0)"
+            echo "has_client_id=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Secrets & Build Configuration"
+              echo "- OAUTH_CLIENT_ID present: no (length 0)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$IS_FORK_PR" = "true" ]; then
+              echo "::warning::OAUTH_CLIENT_ID secret is missing or blank on a fork pull request; skipping assembleRelease and running debug/unit tests only."
+            else
+              echo "ERROR: OAUTH_CLIENT_ID secret is missing or blank. Release builds require OAUTH_CLIENT_ID to be configured in repository secrets." >&2
+              exit 1
+            fi
+          fi
+
       - name: Setup Keystore
         if: env.KEYSTORE_BASE64 != ''
         run: |
@@ -64,18 +96,14 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           echo "Building with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
-          CLIENT_ID_ARG=""
-          if [ -n "${MS_CLIENT_ID:-}" ]; then
-            CLIENT_ID_ARG="-Pms_client_id=$MS_CLIENT_ID"
-          elif [ -n "${OAUTH_CLIENT_ID:-}" ]; then
-            CLIENT_ID_ARG="-Pms_client_id=$OAUTH_CLIENT_ID"
+          if [ "${{ steps.oauth_check.outputs.has_client_id }}" = "true" ]; then
+            ./gradlew testDebugUnitTest assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           else
-            echo "Notice: MS_CLIENT_ID secret not set in repository; supplying verification placeholder for CI assembleRelease."
-            CLIENT_ID_ARG="-Pms_client_id=00000000-0000-0000-0000-000000000000"
+            ./gradlew testDebugUnitTest assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           fi
-          ./gradlew testDebugUnitTest assembleRelease $CLIENT_ID_ARG -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
       - name: Verify Signing Certificate SHA-256
+        if: steps.oauth_check.outputs.has_client_id == 'true'
         run: |
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           echo "Using apksigner: $APKSIGNER"
@@ -87,6 +115,7 @@ jobs:
           done
 
       - name: Verify Monotonic versionCode Against Nightly Release
+        if: steps.oauth_check.outputs.has_client_id == 'true'
         run: |
           PRODUCED_APK=$(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | head -n 1)
           if [ -z "$PRODUCED_APK" ]; then
@@ -153,6 +182,7 @@ jobs:
           fi
 
       - name: Upload Signed APK Artifacts
+        if: steps.oauth_check.outputs.has_client_id == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: signed-apks

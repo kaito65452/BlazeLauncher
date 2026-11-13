@@ -46,6 +46,26 @@ jobs:
         with:
           add-job-summary: "on-failure"
 
+      - name: Verify OAUTH_CLIENT_ID Configuration
+        run: |
+          CLIENT_ID_TRIMMED=$(printf '%s' "${OAUTH_CLIENT_ID:-}" | tr -d '[:space:]')
+          if [ -n "$CLIENT_ID_TRIMMED" ]; then
+            CLIENT_ID_LEN=${#CLIENT_ID_TRIMMED}
+            echo "OAUTH_CLIENT_ID present: yes (length $CLIENT_ID_LEN)"
+            {
+              echo "### Secrets & Build Configuration"
+              echo "- OAUTH_CLIENT_ID present: yes (length $CLIENT_ID_LEN)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "OAUTH_CLIENT_ID present: no (length 0)"
+            {
+              echo "### Secrets & Build Configuration"
+              echo "- OAUTH_CLIENT_ID present: no (length 0)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "ERROR: OAUTH_CLIENT_ID secret is missing or blank. Nightly builds require OAUTH_CLIENT_ID to be configured in repository secrets." >&2
+            exit 1
+          fi
+
       - name: Setup Keystore
         if: env.KEYSTORE_BASE64 != ''
         run: |
@@ -59,16 +79,7 @@ jobs:
           SHORT_SHA=$(git rev-parse --short HEAD)
           VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           echo "Building nightly with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
-          CLIENT_ID_ARG=""
-          if [ -n "${MS_CLIENT_ID:-}" ]; then
-            CLIENT_ID_ARG="-Pms_client_id=$MS_CLIENT_ID"
-          elif [ -n "${OAUTH_CLIENT_ID:-}" ]; then
-            CLIENT_ID_ARG="-Pms_client_id=$OAUTH_CLIENT_ID"
-          else
-            echo "Notice: MS_CLIENT_ID secret not set in repository; supplying verification placeholder for Nightly assembleRelease."
-            CLIENT_ID_ARG="-Pms_client_id=00000000-0000-0000-0000-000000000000"
-          fi
-          ./gradlew assembleRelease $CLIENT_ID_ARG -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+          ./gradlew assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
 
       - name: Verify Signing Certificate SHA-256
         run: |
