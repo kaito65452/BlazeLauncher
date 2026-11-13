@@ -77,19 +77,25 @@ jobs:
       - name: Build Engine (arm64-v8a) and Report Sizes
         run: |
           echo "=== Building unoptimized/unstripped baseline (profile=fast) ==="
-          cargo ndk -t arm64-v8a --platform 28 build \
-            --profile fast \
-            --manifest-path engine/starling/Cargo.toml \
-            --package horizon-android
+          (
+            cd engine/starling
+            cargo ndk -t arm64-v8a --platform 28 build \
+              --profile fast \
+              --manifest-path Cargo.toml \
+              --package horizon-android
+          )
 
           FAST_SO="engine/starling/target/aarch64-linux-android/fast/libhorizon_android.so"
           BEFORE_BYTES=$(stat -c%s "$FAST_SO")
 
           echo "=== Building optimized release (lto=fat, codegen-units=1, panic=abort, strip=true, opt-level=3) ==="
-          cargo ndk -t arm64-v8a --platform 28 build \
-            --release \
-            --manifest-path engine/starling/Cargo.toml \
-            --package horizon-android
+          (
+            cd engine/starling
+            cargo ndk -t arm64-v8a --platform 28 build \
+              --release \
+              --manifest-path Cargo.toml \
+              --package horizon-android
+          )
 
           REL_SO="engine/starling/target/aarch64-linux-android/release/libhorizon_android.so"
           AFTER_BYTES=$(stat -c%s "$REL_SO")
