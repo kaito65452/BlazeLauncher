@@ -48,7 +48,12 @@
 - Command in `.github/workflows/rust-engine.yml`:
   `cargo ndk -t arm64-v8a --platform 28 build --release --manifest-path engine/starling/Cargo.toml --package horizon-android`
 - Profile (`Cargo.toml` patched by `0001-runtime-fonts.patch`): `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true` (compared against `--profile fast` with `lto = false`, `codegen-units = 16`, `strip = "none"`).
-- **CI Build Numbers**: _Pending first green CI run (`feat/phase0-spike`)._
+- **CI Build Numbers** (Run [`43472629787`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43472629787) on commit `88ed54ce`):
+  - `libhorizon_android.so` **before** (`--profile fast`, unstripped): `81,403,408 bytes` (`77.63 MiB`, `ls -lh`: `78M`)
+  - `libhorizon_android.so` **after** (`--release`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`): `52,226,136 bytes` (`49.81 MiB`, `ls -lh`: `50M`; `-29,177,272 bytes`, `-35.84%`)
+  - APK entry (`lib/arm64-v8a/libhorizon_android.so`): `52,226,128 bytes` (`49.81 MiB`) uncompressed / `25,615,472 bytes` (`24.43 MiB`) compressed inside `BlazeLauncher-2.6_hotfix-***.d6a1eb87.apk`
+  - **Total APK size**: `380,353,781 bytes` (`362.73 MiB`), compared with local baseline APK `BlazeLauncher-2.6_hotfix-blaze.be1defc0.apk` (`354,454,385 bytes` / `338.03 MiB`): **`+25,899,396 bytes` (`+24.70 MiB`)** total APK growth (`24.43 MiB` compressed engine `.so` + `~0.27 MiB` Geist fonts/notices/classes).
+  - **APK License & Signing Checks**: `guard.sh --check-apk` scanned all `156` `.so` files under `lib/*/*.so` (`0` font markers / `0` SFNT font headers found), `apksigner verify --print-certs` verified V2 SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`, and `versionCode` `27366515 > 27321741` (nightly) passed.
 
 ---
 
