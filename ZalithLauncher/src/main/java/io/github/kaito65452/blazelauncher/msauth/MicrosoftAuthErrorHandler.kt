@@ -120,7 +120,7 @@ fun redactSensitiveData(input: String?): String {
     sanitized = bearerRegex.replace(sanitized, "Bearer [REDACTED]")
 
     // Redact Xbox Live XBL3.0 tokens
-    val xblRegex = Regex("""(?i)XBL3\.0\s+x=[^\s"';,]+""")
+    val xblRegex = Regex("""(?i)XBL3\.0\s+x=[^\s"',]+""")
     sanitized = xblRegex.replace(sanitized, "XBL3.0 [REDACTED]")
 
     // Redact non-Bearer/non-redacted-XBL3.0 Authorization headers if present in text dumps
