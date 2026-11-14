@@ -1,0 +1,57 @@
+name: Parallel Fast Checks
+
+on:
+  push:
+    branches:
+      - 'feat/**'
+      - 'main'
+  pull_request:
+    branches:
+      - 'feat/**'
+      - 'main'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guards-and-self-tests:
+    name: Guards & Self-Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Run Guards, Self-Tests, and Scope Guard
+        run: |
+          chmod +x scripts/guard.sh scripts/scope_guard.sh scripts/test_guards.sh
+          ENGINE_BUILD_ENABLED=1 ./scripts/guard.sh
+          ./scripts/test_guards.sh
+          BASE_BRANCH="${{ github.base_ref || 'main' }}"
+          ./scripts/scope_guard.sh "$BASE_BRANCH"
+
+  jvm-unit-tests:
+    name: JVM Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          add-job-summary: "on-failure"
+
+      - name: Run Debug JVM Unit Tests
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace

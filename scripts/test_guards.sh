@@ -441,6 +441,31 @@ RS
 expect_fail "Check 10 rejects disk save in blaze_diagnostics.rs" "must not write session data to disk" \
     env GUARD_CHECK10_ONLY_DIR="$CASE10_DISK" bash scripts/guard.sh
 
+# Desktop-only launcher/src/{backend,cli,main,mcp}.rs vs Android-shared launcher/src/account.rs (including starling/ prefix fallback)
+CASE10_DESKTOP_ONLY="$TMP_ROOT/check10_desktop_only"
+mkdir -p "$CASE10_DESKTOP_ONLY/launcher/src"
+cat > "$CASE10_DESKTOP_ONLY/launcher/src/backend.rs" <<'RS'
+pub fn desktop_download() { let _ = account::Endpoints::live(); }
+RS
+expect_pass "Check 10 allows desktop-only launcher/src/backend.rs Endpoints::live()" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_DESKTOP_ONLY" bash scripts/guard.sh
+
+CASE10_STARLING_PREFIX="$TMP_ROOT/check10_starling_prefix"
+mkdir -p "$CASE10_STARLING_PREFIX/starling/launcher/src"
+cat > "$CASE10_STARLING_PREFIX/starling/launcher/src/backend.rs" <<'RS'
+pub fn desktop_download() { let _ = account::Endpoints::live(); }
+RS
+expect_pass "Check 10 allows starling/launcher/src/backend.rs when scanning parent dir" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_STARLING_PREFIX" bash scripts/guard.sh
+
+CASE10_ACCOUNT_LIVE="$TMP_ROOT/check10_account_live"
+mkdir -p "$CASE10_ACCOUNT_LIVE/launcher/src"
+cat > "$CASE10_ACCOUNT_LIVE/launcher/src/account.rs" <<'RS'
+pub fn android_account_leak() { let _ = Endpoints::live(); }
+RS
+expect_fail "Check 10 rejects Endpoints::live() in Android-compiled launcher/src/account.rs" "active engine login/refresh call 'Endpoints::live'" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_ACCOUNT_LIVE" bash scripts/guard.sh
+
 # Positive & Negative APK .so scans (Check 10b)
 make_so_marker_apk() {
     local out_apk="$1"

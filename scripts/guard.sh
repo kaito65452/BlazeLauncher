@@ -3,6 +3,12 @@ set -euo pipefail
 
 echo "=== Running Guard Checks ==="
 
+IS_ISOLATED_MODE=0
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+    IS_ISOLATED_MODE=1
+fi
+
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
 # 1. Keystore and password file leak check
 echo "Checking for committed keystores or passwords..."
 LEAKED_FILES=$(git ls-files | grep -E '\.(jks|keystore)$|passwords' || true)
@@ -79,6 +85,7 @@ if [ -n "$DISALLOWED_REPO_FILES" ]; then
     exit 1
 fi
 echo "✓ No disallowed wallpapers, skins, or voicechat icon assets tracked in git."
+fi
 
 # 7. License hygiene: forbid include_bytes!/include_str! font embedding under engine/ (single-line, multi-line, concat!/env!, or fonts/ paths)
 check_engine_font_embeds() {
@@ -469,6 +476,7 @@ FORBIDDEN_CALLS_RE = re.compile(
 )
 
 DESKTOP_ONLY_REL = {
+    "launcher/src/backend.rs",
     "launcher/src/main.rs",
     "launcher/src/cli.rs",
     "launcher/src/mcp.rs",
@@ -499,12 +507,14 @@ for fpath in all_rs_files:
 
 violations = []
 seen_rel = set()
+is_real_workspace = os.path.isfile(os.path.join(root, "Cargo.toml")) and os.path.isdir(os.path.join(root, "crates/horizon-client"))
 
 for fpath, raw, _no_comments, android_src in parsed:
     if os.path.normpath(fpath) in disabled_external:
         continue
     rel = os.path.relpath(fpath, root).replace(os.sep, "/")
-    if rel in DESKTOP_ONLY_REL or "/tests/" in f"/{rel}":
+    desktop_rel = rel[len("starling/"):] if (not is_real_workspace and rel.startswith("starling/")) else rel
+    if desktop_rel in DESKTOP_ONLY_REL or "/tests/" in f"/{rel}":
         continue
     seen_rel.add(rel)
 
@@ -556,7 +566,6 @@ for fpath, raw, _no_comments, android_src in parsed:
         if re.search(r"\buse\s+crate::account\b", code_only):
             violations.append(f"{rel}: android/login.rs still imports crate::account")
 
-is_real_workspace = os.path.isfile(os.path.join(root, "Cargo.toml")) and os.path.isdir(os.path.join(root, "crates/horizon-client"))
 if is_real_workspace:
     for required in (
         "crates/horizon-client/src/android/catalog.rs",
@@ -582,7 +591,7 @@ if [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ]; then
     exit 0
 fi
 
-if [ -d "engine" ]; then
+if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "engine" ]; then
     echo "Checking engine/ for include_bytes!/include_str! font embedding and login neutralization..."
     TEMP_PATCHED_WORKTREE=""
     cleanup_wt() {
@@ -592,15 +601,27 @@ if [ -d "engine" ]; then
     }
     trap cleanup_wt EXIT
 
-    # First check any non-submodule Rust files directly under engine/ (excluding engine/starling if clean+patched below)
+    run_engine_tree_checks() {
+        local starling_root="$1"
+        check_engine_font_embeds "$starling_root"
+        check_engine_login_neutralized "$starling_root"
+        for item in engine/*; do
+            if [ "$item" != "engine/starling" ] && [ -d "$item" ]; then
+                check_engine_font_embeds "$item"
+                check_engine_login_neutralized "$item"
+            fi
+        done
+    }
+
+    # Scan patched starling tree (clean submodule -> temp worktree; dirty/CI in-tree -> engine/starling) plus any sibling dirs
     if [ -d "engine/starling/.git" ] || [ -f "engine/starling/.git" ]; then
         if [ -z "$(git -C engine/starling status --porcelain)" ] && ls engine/patches/*.patch >/dev/null 2>&1; then
             # Submodule working tree is clean upstream pin; verify patches apply cleanly and scan the patched view
             TEMP_PATCHED_WORKTREE=$(mktemp -d)
             git -C engine/starling worktree add --no-checkout --detach "$TEMP_PATCHED_WORKTREE" HEAD >/dev/null 2>&1
-            # Check out only Rust sources, Cargo.toml, and patch-target files to avoid copying unrelated assets
+            # Query tracked paths from main submodule index (--no-checkout worktree has an empty index)
             {
-                git -C "$TEMP_PATCHED_WORKTREE" ls-files 'Cargo.toml' '*.rs'
+                git -C engine/starling ls-files 'Cargo.toml' '*.rs'
                 grep -h '^--- a/' engine/patches/*.patch | sed 's|^--- a/||'
             } | sort -u | xargs -r git -C "$TEMP_PATCHED_WORKTREE" checkout HEAD --
             for p in engine/patches/*.patch; do
@@ -608,20 +629,13 @@ if [ -d "engine" ]; then
                 git -C "$TEMP_PATCHED_WORKTREE" apply --check "$p_abs"
                 git -C "$TEMP_PATCHED_WORKTREE" apply "$p_abs"
             done
-            check_engine_font_embeds "$TEMP_PATCHED_WORKTREE"
-            check_engine_login_neutralized "$TEMP_PATCHED_WORKTREE"
-            # Also check any non-starling Rust files under engine/
-            for item in engine/*; do
-                if [ "$item" != "engine/starling" ] && [ -d "$item" ]; then
-                    check_engine_font_embeds "$item"
-                    check_engine_login_neutralized "$item"
-                fi
-            done
+            run_engine_tree_checks "$TEMP_PATCHED_WORKTREE"
         else
-            # Submodule already patched in-tree (CI build state) or no patches: scan engine/ directly
-            check_engine_font_embeds "engine"
-            check_engine_login_neutralized "engine"
+            # Submodule already patched in-tree (CI build state) or no patches: scan engine/starling explicitly
+            run_engine_tree_checks "engine/starling"
         fi
+    elif [ -d "engine/starling" ]; then
+        run_engine_tree_checks "engine/starling"
     else
         check_engine_font_embeds "engine"
         check_engine_login_neutralized "engine"
@@ -655,7 +669,7 @@ if [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ]; then
 fi
 
 DEV_PKG_DIR="ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/developer"
-if [ -d "$DEV_PKG_DIR" ]; then
+if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "$DEV_PKG_DIR" ]; then
     echo "Checking developer package safety: $DEV_PKG_DIR..."
     check_developer_pkg_safety "$DEV_PKG_DIR"
 fi
