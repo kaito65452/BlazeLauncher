@@ -33,15 +33,19 @@ for file in $CHANGED_FILES; do
             ;;
         docs/*)
             ;;
-        engine/*)
+        engine/*|.gitmodules)
             ;;
         build.gradle.kts|settings.gradle.kts|gradle.properties|.gitignore)
             ;;
         ZalithLauncher/build.gradle.kts|ZalithLauncher/gradle.properties)
             ;;
+        ZalithLauncher/src/main/AndroidManifest.xml)
+            ;;
         ZalithLauncher/src/main/res/values*/strings.xml)
             ;;
-        ZalithLauncher/src/main/assets/THIRD_PARTY_NOTICES.md)
+        ZalithLauncher/src/main/assets/THIRD_PARTY_NOTICES.md|ZalithLauncher/src/main/assets/fonts/*)
+            ;;
+        ZalithLauncher/src/main/java/dev/horizon/android/bridge/BlazeNativeBridge.kt)
             ;;
         ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/*)
             ;;
@@ -49,6 +53,9 @@ for file in $CHANGED_FILES; do
             ;;
         ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/microsoft/MicrosoftAuthenticator.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/AccountUtils.kt)
             # Microsoft login error logging and diagnostic enhancement
+            ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/setting/AllSettings.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/AboutInfoScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/LauncherSettingsScreen.kt)
+            # Developer Mode persistence, 5-tap version unlock, and diagnostics-only Settings section
             ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores

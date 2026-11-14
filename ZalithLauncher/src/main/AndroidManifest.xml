@@ -122,6 +122,18 @@
             android:process=":game"
             android:launchMode="standard"
             android:screenOrientation="sensorLandscape" />
+
+        <activity
+            android:name="io.github.kaito65452.blazelauncher.rustruntime.RustActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|keyboard|navigation"
+            android:exported="false"
+            android:launchMode="standard"
+            android:process=":rust"
+            android:screenOrientation="sensorLandscape">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="horizon_android" />
+        </activity>
         <activity android:name=".ui.activities.ErrorActivity"
             android:configChanges="keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|keyboard|navigation"
             android:screenOrientation="sensorLandscape" />

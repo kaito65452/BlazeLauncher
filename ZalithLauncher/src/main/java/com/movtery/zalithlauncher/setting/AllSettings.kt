@@ -614,4 +614,9 @@ object AllSettings : SettingsRegistry() {
      * 搜索光影的初始搜索平台
      */
     val searchShadersPlatform = enumSetting("searchShadersPlatform", Platform.CURSEFORGE)
+
+    /**
+     * 运行时开发者模式（在“关于”页连续点击启动器版本 5 次后开启）
+     */
+    val developerMode = boolSetting("developerMode", false)
 }

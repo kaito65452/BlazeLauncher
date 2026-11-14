@@ -20,6 +20,8 @@ class RustEditionTest {
         assertTrue("Supported versions must be initially empty", state.supportedVersions.isEmpty())
         assertFalse("Download assets button must be initially disabled", state.canDownloadAssets)
         assertFalse("Launch button must be initially disabled", state.canLaunch)
+        assertFalse("Developer diagnostics must be hidden by default", state.isDeveloperMode)
+        assertFalse("Diagnostics gate must be closed when developer mode is false", state.canShowDiagnostics)
     }
 
     @Test
@@ -28,12 +30,15 @@ class RustEditionTest {
             engineStatus = "ready",
             supportedVersions = listOf("26.3"),
             canDownloadAssets = true,
-            canLaunch = true
+            canLaunch = true,
+            isDeveloperMode = true
         )
         assertEquals("ready", state.engineStatus)
         assertEquals(1, state.supportedVersions.size)
         assertEquals("26.3", state.supportedVersions.first())
         assertTrue(state.canDownloadAssets)
         assertTrue(state.canLaunch)
+        assertTrue(state.isDeveloperMode)
+        assertTrue(state.canShowDiagnostics)
     }
 }

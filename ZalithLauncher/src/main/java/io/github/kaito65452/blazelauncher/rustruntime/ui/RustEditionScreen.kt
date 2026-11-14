@@ -23,19 +23,29 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.movtery.zalithlauncher.R
+import io.github.kaito65452.blazelauncher.developer.DeveloperModeDefaults
+import io.github.kaito65452.blazelauncher.developer.DeveloperModeManager
+import io.github.kaito65452.blazelauncher.developer.ui.DeveloperDiagnosticsButtons
 
 data class RustEditionUiState(
     val engineStatus: String = "not installed",
     val supportedVersions: List<String> = emptyList(),
     val canDownloadAssets: Boolean = false,
-    val canLaunch: Boolean = false
-)
+    val canLaunch: Boolean = false,
+    val isDeveloperMode: Boolean = DeveloperModeDefaults.DEFAULT_ENABLED
+) {
+    val canShowDiagnostics: Boolean
+        get() = DeveloperModeManager.visibility(isDeveloperMode).showDeveloperSection
+}
 
 @Composable
 fun RustEditionScreen(
     modifier: Modifier = Modifier,
-    state: RustEditionUiState = RustEditionUiState()
+    state: RustEditionUiState = RustEditionUiState(
+        isDeveloperMode = DeveloperModeManager.isEnabledState()
+    )
 ) {
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -94,6 +104,10 @@ fun RustEditionScreen(
                     }
                 }
             }
+        }
+
+        if (state.canShowDiagnostics) {
+            DeveloperDiagnosticsButtons()
         }
 
         Row(

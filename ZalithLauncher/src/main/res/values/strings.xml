@@ -1476,4 +1476,13 @@
     <string name="rust_download_assets">Download engine assets</string>
     <string name="rust_launch">Launch</string>
     <string name="rust_coming_soon">Coming soon</string>
+    <string name="developer_section_title">Developer</string>
+    <string name="developer_mode_title">Developer mode</string>
+    <string name="developer_mode_summary">Show diagnostics and experimental Rust runtime tools</string>
+    <string name="developer_capability_report_title">Device Capability Report</string>
+    <string name="developer_capability_report_summary">Inspect Vulkan, supported ABIs, and audio hardware capabilities</string>
+    <string name="developer_rust_spike_title">Launch Rust Edition Spike</string>
+    <string name="developer_rust_spike_summary">Launch the isolated :rust NativeActivity spike</string>
+    <string name="developer_copy_report">Copy report</string>
+    <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
 </resources>

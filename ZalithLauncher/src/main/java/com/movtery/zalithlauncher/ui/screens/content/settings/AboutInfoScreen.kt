@@ -78,6 +78,8 @@ import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SettingsCa
 import com.movtery.zalithlauncher.ui.theme.itemColor
 import com.movtery.zalithlauncher.ui.theme.onItemColor
 
+import io.github.kaito65452.blazelauncher.developer.DeveloperUnlockHost
+
 @Composable
 fun AboutInfoScreen(
     key: NestedNavKey.Settings,
@@ -87,6 +89,9 @@ fun AboutInfoScreen(
     openLicense: (raw: Int) -> Unit,
     openLink: (url: String) -> Unit
 ) {
+    val context = LocalContext.current
+    val developerUnlockTracker = remember { DeveloperUnlockHost.createTracker() }
+
     BaseScreen(
         Triple(key, mainScreenKey, false),
         Triple(NormalNavKey.Settings.AboutInfo, settingsScreenKey, false)
@@ -106,6 +111,9 @@ fun AboutInfoScreen(
                             icon = painterResource(R.drawable.img_launcher),
                             title = BuildKeys.LAUNCHER_NAME,
                             text = stringResource(R.string.about_launcher_version, BuildConfig.VERSION_NAME),
+                            onClick = {
+                                DeveloperUnlockHost.handleTap(context, developerUnlockTracker)
+                            },
                             button = {
                                 Button(
                                     onClick = checkUpdate
@@ -373,13 +381,14 @@ private fun ButtonIconItem(
     button: @Composable RowScope.() -> Unit,
     color: Color = itemColor(),
     contentColor: Color = onItemColor(),
+    onClick: () -> Unit = {},
 ) {
     Surface(
         modifier = modifier,
         color = color,
         contentColor = contentColor,
         shape = MaterialTheme.shapes.large,
-        onClick = {}
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier

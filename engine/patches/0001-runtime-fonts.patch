@@ -1,0 +1,319 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 88e780bec5..117894fbdc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -87,8 +87,10 @@ debug = "line-tables-only"
+ 
+ [profile.release]
+ opt-level = 3
+-lto = "thin"
++lto = "fat"
+ codegen-units = 1
++panic = "abort"
++strip = true
+ 
+ # Optimized but quick-to-link builds for iteration: cargo build --profile fast
+ [profile.fast]
+@@ -96,3 +98,4 @@ inherits = "release"
+ lto = false
+ codegen-units = 16
+ incremental = true
++strip = "none"
+diff --git a/crates/horizon-client-render/src/font.rs b/crates/horizon-client-render/src/font.rs
+index bc0fa4cc69..af52b68f95 100644
+--- a/crates/horizon-client-render/src/font.rs
++++ b/crates/horizon-client-render/src/font.rs
+@@ -1271,7 +1271,12 @@ mod tests {
+                 ("assets/minecraft/font/default.json", def),
+                 (
+                     "assets/minecraft/font/mono.ttf",
+-                    horizon_theme::fonts::GEIST_MONO,
++                    &std::fs::read(
++                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++                            .join("../horizon-theme/fonts")
++                            .join(horizon_theme::fonts::GEIST_MONO_FILE),
++                    )
++                    .unwrap(),
+                 ),
+             ],
+         );
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index d8ef79ea6d..99745d0b9e 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -20577,12 +20577,21 @@ impl Loading {
+             let repaint_stop = stop.clone();
+             std::thread::spawn(move || {
+                 while !repaint_stop.load(std::sync::atomic::Ordering::Relaxed) {
+-                    horizon_threads::boot_paint::paint(
+-                        hwnd,
+-                        horizon_theme::fonts::GEIST_SEMIBOLD,
+-                        horizon_theme::fonts::GEIST_MONO,
+-                        &horizon_client::logging::recent_lines(),
+-                    );
++                    if let (Ok(sb), Ok(mn)) = (
++                        std::fs::read(
++                            std::path::Path::new("fonts").join(horizon_theme::fonts::GEIST_SEMIBOLD_FILE),
++                        ),
++                        std::fs::read(
++                            std::path::Path::new("fonts").join(horizon_theme::fonts::GEIST_MONO_FILE),
++                        ),
++                    ) {
++                        horizon_threads::boot_paint::paint(
++                            hwnd,
++                            &sb,
++                            &mn,
++                            &horizon_client::logging::recent_lines(),
++                        );
++                    }
+                     std::thread::sleep(std::time::Duration::from_millis(300));
+                 }
+             });
+diff --git a/crates/horizon-client/src/ui_theme.rs b/crates/horizon-client/src/ui_theme.rs
+index ca39273707..e74f63a02b 100644
+--- a/crates/horizon-client/src/ui_theme.rs
++++ b/crates/horizon-client/src/ui_theme.rs
+@@ -10,7 +10,7 @@
+ //! `id`. Clicks run the same layout with [`Ui::dry`] and read [`Ui::hit`]: one
+ //! function draws and hit-tests, so they never disagree.
+ use crate::hud::{HudAtlas, HudBatch, Rect};
+-use ab_glyph::{Font as _, FontRef, PxScale, ScaleFont as _};
++use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont as _};
+ use std::{cell::RefCell, collections::HashMap, path::Path};
+ 
+ /// A Horizon-only preference from `horizon.txt` beside `options.txt`
+@@ -149,26 +149,49 @@ pub enum Icon {
+ }
+ 
+ struct Fonts {
+-    faces: [FontRef<'static>; 4],
++    faces: [Option<FontVec>; 4],
++}
++fn load_font_file(filename: &str) -> Option<FontVec> {
++    let mut candidates = Vec::with_capacity(3);
++    candidates.push(Path::new("fonts").join(filename));
++    if let Some(home) = std::env::var_os("HORIZON_HOME") {
++        candidates.push(Path::new(&home).join("fonts").join(filename));
++    }
++    candidates.push(
++        Path::new(env!("CARGO_MANIFEST_DIR"))
++            .join("../horizon-theme/fonts")
++            .join(filename),
++    );
++    for path in candidates {
++        if let Ok(bytes) = std::fs::read(&path) {
++            match FontVec::try_from_vec(bytes) {
++                Ok(font) => return Some(font),
++                Err(err) => log::warn!("Cannot parse runtime font {}: {err}", path.display()),
++            }
++        }
++    }
++    log::warn!("Runtime font {filename} not found; rendering with fontless fallback");
++    None
+ }
+ impl Fonts {
+     fn load() -> Self {
+-        let f = |b: &'static [u8]| FontRef::try_from_slice(b).expect("bundled font");
+         Self {
+             faces: [
+-                f(horizon_theme::fonts::GEIST_REGULAR),
+-                f(horizon_theme::fonts::GEIST_MEDIUM),
+-                f(horizon_theme::fonts::GEIST_SEMIBOLD),
+-                f(horizon_theme::fonts::GEIST_MONO),
++                load_font_file(horizon_theme::fonts::GEIST_REGULAR_FILE),
++                load_font_file(horizon_theme::fonts::GEIST_MEDIUM_FILE),
++                load_font_file(horizon_theme::fonts::GEIST_SEMIBOLD_FILE),
++                load_font_file(horizon_theme::fonts::GEIST_MONO_FILE),
+             ],
+         }
+     }
+-    fn face(&self, f: Face) -> &FontRef<'static> {
+-        &self.faces[f as usize]
++    fn face(&self, f: Face) -> Option<&FontVec> {
++        self.faces[f as usize].as_ref()
+     }
+     /// The ab_glyph scale for an em size in pixels.
+     fn scale(&self, f: Face, px: f32) -> PxScale {
+-        let font = self.face(f);
++        let Some(font) = self.face(f) else {
++            return PxScale::from(px);
++        };
+         let upem = font.units_per_em().unwrap_or(1000.0);
+         PxScale::from(px * font.height_unscaled() / upem)
+     }
+@@ -595,7 +618,7 @@ impl Cache {
+         }
+         let scale = self.fonts.scale(face, f32::from(size) / 4.0);
+         let glyph = id.with_scale_and_position(scale, ab_glyph::point(0.0, 0.0));
+-        let made = match self.fonts.face(face).outline_glyph(glyph) {
++        let made = match self.fonts.face(face).and_then(|f| f.outline_glyph(glyph)) {
+             Some(outline) => {
+                 let b = outline.px_bounds();
+                 let (w, h) = (b.width() as u32, b.height() as u32);
+@@ -841,7 +864,9 @@ impl<'a> Ui<'a> {
+         let px = (size * self.density * 4.0).round() / 4.0;
+         let max_px = width * self.density;
+         with_cache(self.atlas, |cache| {
+-            let font = cache.fonts.face(face);
++            let Some(font) = cache.fonts.face(face) else {
++                return text.to_owned();
++            };
+             let scaled = font.as_scaled(cache.fonts.scale(face, px));
+             let mut total = 0.0;
+             let mut prev = None;
+@@ -1408,7 +1433,9 @@ impl<'a> Ui<'a> {
+     pub fn measure(&self, face: Face, size: f32, text: &str) -> f32 {
+         let px = (size * self.density * 4.0).round() / 4.0;
+         with_cache(self.atlas, |c| {
+-            let font = c.fonts.face(face);
++            let Some(font) = c.fonts.face(face) else {
++                return (text.chars().count() as f32 * px * 0.55) / self.density;
++            };
+             let scaled = font.as_scaled(c.fonts.scale(face, px));
+             let mut w = 0.0;
+             let mut prev = None;
+@@ -1448,9 +1475,12 @@ impl<'a> Ui<'a> {
+         let mut quads = with_cache(atlas, |c| std::mem::take(&mut c.glyph_scratch));
+         quads.clear();
+         let width = with_cache(atlas, |c| {
++            let Some(font_init) = c.fonts.face(face) else {
++                return (text.chars().count() as f32 * px * 0.55) / density;
++            };
+             let scale = c.fonts.scale(face, px);
+             let (ascent, descent) = {
+-                let f = c.fonts.face(face).as_scaled(scale);
++                let f = font_init.as_scaled(scale);
+                 (f.ascent(), f.descent())
+             };
+             let baseline = y0 + ((box_px - (ascent - descent)) / 2.0 + ascent).round();
+@@ -1458,7 +1488,7 @@ impl<'a> Ui<'a> {
+             let mut prev = None;
+             for ch in text.chars() {
+                 let (id, advance, kern) = {
+-                    let font = c.fonts.face(face);
++                    let font = c.fonts.face(face).expect("checked Some above");
+                     let id = font.glyph_id(ch);
+                     let f = font.as_scaled(scale);
+                     (id, f.h_advance(id), prev.map_or(0.0, |p| f.kern(p, id)))
+@@ -2767,7 +2797,11 @@ mod tests {
+         let atlas = HudAtlas::build(Path::new("/nonexistent/horizon-test-assets")).unwrap();
+         reset_atlas();
+         let draw = |cache: &mut Cache| {
+-            let glyph = cache.fonts.face(Face::Regular).glyph_id('A');
++            let glyph = cache
++                .fonts
++                .face(Face::Regular)
++                .expect("test font exists in horizon-theme")
++                .glyph_id('A');
+             assert!(
+                 cache
+                     .glyph(&atlas, Face::Regular, glyph, 16.0)
+diff --git a/crates/horizon-server/src/discord.rs b/crates/horizon-server/src/discord.rs
+index 0e36110878..91c62ee40e 100644
+--- a/crates/horizon-server/src/discord.rs
++++ b/crates/horizon-server/src/discord.rs
+@@ -87,7 +87,7 @@ fn forward(shared: &Shared, settings: &Settings) {
+         .timeout(Duration::from_secs(20))
+         .user_agent(concat!("horizon-server/", env!("CARGO_PKG_VERSION")))
+         .build();
+-    let font = FontRef::try_from_slice(FONT).expect("the bundled font parses");
++    let font = load_font_bytes().and_then(|b| FontRef::try_from_slice(b).ok());
+     let mut glyphs = HashMap::new();
+     let mut cursor = shared.events.lock().unwrap().after(u64::MAX, &wanted).0;
+     let (mut pending, mut skipped, mut since) = (Vec::new(), 0, None::<Instant>);
+@@ -123,7 +123,7 @@ fn forward(shared: &Shared, settings: &Settings) {
+             &agent,
+             settings.webhook.trim(),
+             &pending,
+-            &font,
++            font.as_ref(),
+             &mut glyphs,
+             &mut limiter,
+         ) {
+@@ -295,11 +295,11 @@ fn post(
+     agent: &ureq::Agent,
+     webhook: &str,
+     lines: &[Line],
+-    font: &FontRef,
++    font: Option<&FontRef<'_>>,
+     glyphs: &mut HashMap<char, Glyph>,
+     limiter: &mut Limiter,
+ ) -> Result<(), Failure> {
+-    let picture = render(lines, font, glyphs);
++    let picture = font.and_then(|f| render(lines, f, glyphs));
+     let payload = payload(lines, picture.is_some());
+     let (content_type, body) = match &picture {
+         Some(png) => {
+@@ -391,7 +391,21 @@ fn truncate(text: &str, max: usize) -> String {
+ }
+ 
+ // Drawing, in the picture's pixels: `U` per pixel of the game's GUI (GUI scale 2, like a 1080p window).
+-static FONT: &[u8] = include_bytes!("../../horizon-theme/fonts/PixelifySans-Medium.ttf");
++fn load_font_bytes() -> Option<&'static [u8]> {
++    static BYTES: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
++    BYTES
++        .get_or_init(|| {
++            [
++                std::path::PathBuf::from("fonts").join(horizon_theme::fonts::PIXEL_MEDIUM_FILE),
++                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++                    .join("../horizon-theme/fonts")
++                    .join(horizon_theme::fonts::PIXEL_MEDIUM_FILE),
++            ]
++            .into_iter()
++            .find_map(|p| std::fs::read(p).ok())
++        })
++        .as_deref()
++}
+ const U: usize = 2;
+ /// Font units per pixel of Pixelify Sans's grid, which starts 60 units right of the origin and 12 below the
+ /// baseline. Drawn at `U` picture pixels per grid square, so its half-square accents keep their shape.
+@@ -593,7 +607,7 @@ mod tests {
+ 
+     #[test]
+     fn the_picture_is_the_chat_box() {
+-        let font = FontRef::try_from_slice(FONT).unwrap();
++        let font = FontRef::try_from_slice(load_font_bytes().unwrap()).unwrap();
+         let mut glyphs = HashMap::new();
+         let line = |m: &str| {
+             Line::from_event(&json!({"type": "chat", "name": "Kim0", "message": m})).unwrap()
+diff --git a/crates/horizon-theme/src/lib.rs b/crates/horizon-theme/src/lib.rs
+index bbe3d54900..720acfe9c0 100644
+--- a/crates/horizon-theme/src/lib.rs
++++ b/crates/horizon-theme/src/lib.rs
+@@ -18,23 +18,20 @@ pub mod night;
+ /// Pixelify Sans, bundled under the SIL Open Font License (`fonts/OFL-PixelifySans.txt`).
+ pub const PIXEL: &str = "Pixelify Sans";
+ 
+-/// The bundled font files.
++/// Runtime font asset filenames (packaged under APK `assets/fonts/` cleanly per OFL-1.1).
+ pub mod fonts {
+-    pub const GEIST_REGULAR: &[u8] = include_bytes!("../fonts/Geist-Regular.ttf");
+-    pub const GEIST_MEDIUM: &[u8] = include_bytes!("../fonts/Geist-Medium.ttf");
+-    pub const GEIST_SEMIBOLD: &[u8] = include_bytes!("../fonts/Geist-SemiBold.ttf");
+-    pub const GEIST_MONO: &[u8] = include_bytes!("../fonts/GeistMono-Regular.ttf");
+-    pub const PIXEL_MEDIUM: &[u8] = include_bytes!("../fonts/PixelifySans-Medium.ttf");
+-    pub const PIXEL_SEMIBOLD: &[u8] = include_bytes!("../fonts/PixelifySans-SemiBold.ttf");
+-    pub const PIXEL_BOLD: &[u8] = include_bytes!("../fonts/PixelifySans-Bold.ttf");
+-    /// [`crate::night`]'s faces, cut from upstream's variable font by `tools/bake_bricolage.py`.
+-    pub const BRICOLAGE_REGULAR: &[u8] = include_bytes!("../fonts/BricolageGrotesque-Regular.ttf");
+-    pub const BRICOLAGE_MEDIUM: &[u8] = include_bytes!("../fonts/BricolageGrotesque-Medium.ttf");
+-    pub const BRICOLAGE_SEMIBOLD: &[u8] =
+-        include_bytes!("../fonts/BricolageGrotesque-SemiBold.ttf");
+-    pub const BRICOLAGE_BOLD: &[u8] = include_bytes!("../fonts/BricolageGrotesque-Bold.ttf");
+-    pub const BRICOLAGE_DISPLAY_BOLD: &[u8] =
+-        include_bytes!("../fonts/BricolageGrotesqueDisplay-Bold.ttf");
++    pub const GEIST_REGULAR_FILE: &str = "Geist-Regular.ttf";
++    pub const GEIST_MEDIUM_FILE: &str = "Geist-Medium.ttf";
++    pub const GEIST_SEMIBOLD_FILE: &str = "Geist-SemiBold.ttf";
++    pub const GEIST_MONO_FILE: &str = "GeistMono-Regular.ttf";
++    pub const PIXEL_MEDIUM_FILE: &str = "PixelifySans-Medium.ttf";
++    pub const PIXEL_SEMIBOLD_FILE: &str = "PixelifySans-SemiBold.ttf";
++    pub const PIXEL_BOLD_FILE: &str = "PixelifySans-Bold.ttf";
++    pub const BRICOLAGE_REGULAR_FILE: &str = "BricolageGrotesque-Regular.ttf";
++    pub const BRICOLAGE_MEDIUM_FILE: &str = "BricolageGrotesque-Medium.ttf";
++    pub const BRICOLAGE_SEMIBOLD_FILE: &str = "BricolageGrotesque-SemiBold.ttf";
++    pub const BRICOLAGE_BOLD_FILE: &str = "BricolageGrotesque-Bold.ttf";
++    pub const BRICOLAGE_DISPLAY_BOLD_FILE: &str = "BricolageGrotesqueDisplay-Bold.ttf";
+ }
+ 
+ /// The launcher's pixel icons: Pixelarticons (MIT, `icons/pixel/LICENSE-pixelarticons.txt`), 24

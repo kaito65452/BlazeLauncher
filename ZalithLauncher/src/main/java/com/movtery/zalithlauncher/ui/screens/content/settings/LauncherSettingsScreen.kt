@@ -121,6 +121,8 @@ import com.movtery.zalithlauncher.utils.string.getMessageOrToString
 import com.movtery.zalithlauncher.viewmodel.BackgroundViewModel
 import com.movtery.zalithlauncher.viewmodel.ErrorViewModel
 import com.movtery.zalithlauncher.viewmodel.LocalBackgroundViewModel
+import io.github.kaito65452.blazelauncher.developer.DeveloperModeManager
+import io.github.kaito65452.blazelauncher.developer.ui.DeveloperSettingsSection
 import kotlinx.coroutines.Dispatchers
 import java.io.File
 
@@ -153,6 +155,16 @@ fun LauncherSettingsScreen(
                 .padding(all = 12.dp),
             isVisible = isVisible
         ) { scope ->
+            if (DeveloperModeManager.isEnabledState()) {
+                AnimatedItem(scope) { yOffset ->
+                    DeveloperSettingsSection(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .offset { IntOffset(x = 0, y = yOffset.roundToPx()) }
+                    )
+                }
+            }
+
             AnimatedItem(scope) { yOffset ->
                 SettingsCardColumn(
                     modifier = Modifier
