@@ -22,8 +22,10 @@ import android.app.NativeActivity
 import android.graphics.Color
 import android.os.Bundle
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
@@ -32,17 +34,59 @@ import android.widget.TextView
 import dev.horizon.android.bridge.BlazeNativeBridge
 
 /**
- * Phase 0 throwaway spike hosting the Starling/Horizon NativeActivity engine in `android:process=":rust"`,
- * with a lightweight Kotlin overlay attached via [addContentView].
+ * Phase 0/1a spike hosting the Starling/Horizon NativeActivity engine in `android:process=":rust"`,
+ * with session handoff, synthetic touch probing, and a lightweight Kotlin overlay attached via
+ * [addContentView].
  *
  * Plan A uses winit's `android-native-activity` backend inside `:rust`. Because winit permits only one
  * EventLoop per process, leaving this Activity explicitly terminates the `:rust` child process.
  */
 class RustActivity : NativeActivity() {
+    private var initialProbeDispatched = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        Log.i(TAG, "Starting RustActivity Phase 0 spike in pid=${Process.myPid()}")
+        val pid = Process.myPid()
+        Log.i(TAG, "Starting RustActivity Phase 1a spike in pid=$pid")
+        RustDiagnosticsCollector.recordRustEvent(this, "onCreate pid=$pid")
         super.onCreate(savedInstanceState)
+        val sessionResult = RustSessionHandoff.consumePendingSessionInRustProcess(this)
+        RustDiagnosticsCollector.recordRustEvent(this, "session_handoff: ${sessionResult.summary}")
         attachSpikeOverlay()
+        triggerSyntheticTouchProbe(source = "onCreate_post")
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && !initialProbeDispatched) {
+            initialProbeDispatched = true
+            triggerSyntheticTouchProbe(source = "window_focus")
+        }
+    }
+
+    private fun triggerSyntheticTouchProbe(source: String) {
+        val x = 120f
+        val y = 240f
+        val bridgeStarted = runCatching { BlazeNativeBridge.injectSyntheticTouch(x, y, 0) }
+            .getOrDefault(false)
+        val bridgeEnded = runCatching { BlazeNativeBridge.injectSyntheticTouch(x, y, 2) }
+            .getOrDefault(false)
+        val posted = runCatching {
+            window.decorView.post {
+                val now = SystemClock.uptimeMillis()
+                val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0)
+                val up = MotionEvent.obtain(now, now + 10L, MotionEvent.ACTION_UP, x, y, 0)
+                try {
+                    window.decorView.dispatchTouchEvent(down)
+                    window.decorView.dispatchTouchEvent(up)
+                } finally {
+                    down.recycle()
+                    up.recycle()
+                }
+            }
+        }.getOrDefault(false)
+        val summary = "synthetic_touch($source): bridgeStart=$bridgeStarted bridgeEnd=$bridgeEnded decorPost=$posted"
+        Log.i(TAG, summary)
+        RustDiagnosticsCollector.recordRustEvent(this, summary)
     }
 
     private fun attachSpikeOverlay() {
@@ -64,11 +108,11 @@ class RustActivity : NativeActivity() {
         }
         bar.addView(label)
 
-        val exitButton = Button(this).apply {
-            text = "Exit :rust"
+        val touchProbeButton = Button(this).apply {
+            text = "Touch Probe"
             textSize = 11f
             setOnClickListener {
-                exitRustProcess()
+                triggerSyntheticTouchProbe(source = "overlay_button")
             }
         }
         val btnParams = LinearLayout.LayoutParams(
@@ -76,6 +120,15 @@ class RustActivity : NativeActivity() {
             ViewGroup.LayoutParams.WRAP_CONTENT
         ).apply {
             marginStart = dp(10)
+        }
+        bar.addView(touchProbeButton, btnParams)
+
+        val exitButton = Button(this).apply {
+            text = "Exit :rust"
+            textSize = 11f
+            setOnClickListener {
+                exitRustProcess()
+            }
         }
         bar.addView(exitButton, btnParams)
 
@@ -100,17 +153,21 @@ class RustActivity : NativeActivity() {
     }
 
     private fun exitRustProcess() {
-        Log.i(TAG, "Signaling engine exit and terminating :rust pid=${Process.myPid()}")
+        val pid = Process.myPid()
+        Log.i(TAG, "Signaling engine exit and terminating :rust pid=$pid")
+        RustDiagnosticsCollector.recordRustEvent(this, "exit_requested pid=$pid")
         runCatching { BlazeNativeBridge.signalEngineExit() }
         finishAndRemoveTask()
-        Process.killProcess(Process.myPid())
+        Process.killProcess(pid)
     }
 
     override fun onDestroy() {
+        val pid = Process.myPid()
+        RustDiagnosticsCollector.recordRustEvent(this, "onDestroy finishing=$isFinishing pid=$pid")
         super.onDestroy()
         if (isFinishing) {
-            Log.i(TAG, "RustActivity finishing; terminating :rust pid=${Process.myPid()}")
-            Process.killProcess(Process.myPid())
+            Log.i(TAG, "RustActivity finishing; terminating :rust pid=$pid")
+            Process.killProcess(pid)
         }
     }
 

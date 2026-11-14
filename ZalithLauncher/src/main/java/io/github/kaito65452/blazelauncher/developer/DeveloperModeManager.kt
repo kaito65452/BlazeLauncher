@@ -143,11 +143,16 @@ object DeveloperDiagnosticsStore {
         val capability = DeviceCapabilityReport.format(
             DeviceCapabilityReport.collect(context)
         )
+        val rustDiagnostics = io.github.kaito65452.blazelauncher.rustruntime
+            .RustDiagnosticsCollector
+            .collectRustProcessDiagnostics(context)
         val combined = buildString {
             appendLine(capability.trimEnd())
             appendLine()
             appendLine("=== RustActivity (:rust) Session ===")
             appendLine("Last :rust event: $rustActivityStatus")
+            appendLine()
+            appendLine(rustDiagnostics.trimEnd())
         }
         lastReportOutput = combined
         return combined

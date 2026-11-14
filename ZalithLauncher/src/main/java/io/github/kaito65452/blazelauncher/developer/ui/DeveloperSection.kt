@@ -59,8 +59,10 @@ import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SwitchSett
 import io.github.kaito65452.blazelauncher.developer.DeveloperDiagnosticsStore
 import io.github.kaito65452.blazelauncher.developer.DeveloperModeManager
 import io.github.kaito65452.blazelauncher.rustruntime.RustActivity
+import io.github.kaito65452.blazelauncher.rustruntime.RustSessionHandoff
 
 private fun launchRustSpikeActivity(context: Context) {
+    RustSessionHandoff.prepareSpikeLaunch(context)
     DeveloperDiagnosticsStore.recordRustActivityEvent("Launched RustActivity from Developer menu")
     context.startActivity(Intent(context, RustActivity::class.java))
 }

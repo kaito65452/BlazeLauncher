@@ -230,6 +230,16 @@ object BlazeNativeBridge {
             true
         }
     }
+
+    external fun nativeSetSession(user: String, uuid: String, accessToken: String): Boolean
+
+    fun setSession(user: String, uuid: String, accessToken: String): Boolean =
+        nativeSetSession(user, uuid, accessToken)
+
+    external fun nativeInjectSyntheticTouch(x: Float, y: Float, phase: Int): Boolean
+
+    fun injectSyntheticTouch(x: Float, y: Float, phase: Int): Boolean =
+        nativeInjectSyntheticTouch(x, y, phase)
 }
 
 data class BlazeAccount(

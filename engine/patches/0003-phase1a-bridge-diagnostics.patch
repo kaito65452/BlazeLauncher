@@ -1,0 +1,276 @@
+diff --git a/crates/horizon-client-render/src/auth.rs b/crates/horizon-client-render/src/auth.rs
+index ef322c85b3..283a92575a 100644
+--- a/crates/horizon-client-render/src/auth.rs
++++ b/crates/horizon-client-render/src/auth.rs
+@@ -140,6 +140,26 @@ pub fn clear_current() {
+     *CURRENT.write().unwrap() = None;
+ }
+ 
++#[cfg(target_os = "android")]
++static PENDING_ANDROID: Mutex<Option<(String, u128, String)>> = Mutex::new(None);
++
++/// Stage an authenticated session handed over from the Kotlin launcher (`BlazeNativeBridge.setSession`).
++#[cfg(target_os = "android")]
++pub fn stage_pending_android(name: &str, uuid: u128, access_token: &str) {
++    *PENDING_ANDROID.lock().unwrap_or_else(|e| e.into_inner()) =
++        Some((name.to_owned(), uuid, access_token.to_owned()));
++}
++
++/// Consume and construct any staged Android bridge session without touching persistent disk state.
++#[cfg(target_os = "android")]
++pub fn take_pending_android() -> Option<AuthSession> {
++    let (name, uuid, access_token) = PENDING_ANDROID
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .take()?;
++    Some(AuthSession::new(&name, uuid, &access_token))
++}
++
+ /// Why joining a server through the session service failed, like the
+ /// AuthenticationException subclasses authlib throws.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+diff --git a/crates/horizon-client-render/src/gfx.rs b/crates/horizon-client-render/src/gfx.rs
+index 47adec266f..1a752e61ea 100644
+--- a/crates/horizon-client-render/src/gfx.rs
++++ b/crates/horizon-client-render/src/gfx.rs
+@@ -1377,6 +1377,16 @@ fn describe_adapter(adapter: &wgpu::Adapter) {
+         info.backend,
+         info.device_type
+     );
++    log::info!(
++        "BlazeWgpu: selected backend={:?} adapter=\"{}\" device_type={:?} vendor=0x{:04x} device=0x{:04x} driver=\"{}\" driver_info=\"{}\"",
++        info.backend,
++        info.name,
++        info.device_type,
++        info.vendor,
++        info.device,
++        info.driver,
++        info.driver_info
++    );
+     crate::telemetry::set_gpu(crate::telemetry::Gpu {
+         name: info.name.clone(),
+         vendor: horizon_telemetry::system::gpu_vendor(&info.name, info.vendor).to_owned(),
+@@ -1470,6 +1480,14 @@ async fn open_device_with(
+         std::env::consts::OS,
+         std::env::var_os("WGPU_BACKEND").is_some(),
+     );
++    let candidate_names: Vec<_> = order.iter().copied().map(backends_name).collect();
++    log::info!(
++        "BlazeWgpu: open_device_with api={:?} offscreen={} allow_cpu={} candidates={:?}",
++        api,
++        offscreen,
++        allow_cpu,
++        candidate_names
++    );
+     let mut failures = Vec::new();
+     for (attempt, backends) in order.iter().copied().enumerate() {
+         let name = backends_name(backends);
+@@ -1481,6 +1499,7 @@ async fn open_device_with(
+             Err(e) => failures.push(e),
+         }
+     }
++    log::warn!("BlazeWgpu: no graphics device opened (allow_cpu={allow_cpu}): {:?}", failures);
+     Err(format!("{NO_GPU_DRIVER} ({})", failures.join("; ")).into())
+ }
+ /// Why a backend gave no device: no adapter at all, which a second try with the
+@@ -1537,6 +1556,9 @@ async fn open_backend(
+     allow_cpu: bool,
+ ) -> std::result::Result<Opened, NoDevice> {
+     let name = backends_name(backends);
++    log::info!(
++        "BlazeWgpu: probing backend={name} offscreen={offscreen} allow_nonconformant={allow_nonconformant} allow_cpu={allow_cpu}"
++    );
+     let instance = wgpu::Instance::new(instance_descriptor(
+         backends,
+         Some(window),
+@@ -1648,6 +1670,11 @@ async fn open_backend(
+     };
+     match opened {
+         Ok((device, queue)) => {
++            log::info!(
++                "BlazeWgpu: device opened backend={:?} adapter=\"{}\"",
++                info.backend,
++                info.name
++            );
+             let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+             let lost = device_lost.clone();
+             device.set_device_lost_callback(move |reason, message| {
+diff --git a/crates/horizon-client/src/android/blaze_diagnostics.rs b/crates/horizon-client/src/android/blaze_diagnostics.rs
+new file mode 100644
+index 0000000000..56a1729704
+--- /dev/null
++++ b/crates/horizon-client/src/android/blaze_diagnostics.rs
+@@ -0,0 +1,101 @@
++//! Phase 1a JNI extensions for Blaze Launcher session handoff and synthetic input diagnostics.
++use super::{backend, catalog};
++use jni::{
++    JNIEnv,
++    objects::{JClass, JString},
++    sys::{jboolean, jfloat, jint},
++};
++use std::sync::atomic::{AtomicU64, Ordering};
++
++static SYNTHETIC_TOUCH_COUNT: AtomicU64 = AtomicU64::new(0);
++
++fn jstring_to_string(env: &mut JNIEnv<'_>, js: &JString<'_>) -> Option<String> {
++    if js.is_null() {
++        return None;
++    }
++    env.get_string(js).ok().map(Into::into)
++}
++
++/// Hand over ZL2's authenticated Microsoft session into Starling without launching Starling OAuth.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetSession(
++    mut env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    user_str: JString<'_>,
++    uuid_str: JString<'_>,
++    access_token_str: JString<'_>,
++) -> jboolean {
++    crate::init_logging();
++    let Some(user) = jstring_to_string(&mut env, &user_str) else {
++        log::warn!("BlazeSessionHandoff: missing player profile string");
++        return 0;
++    };
++    let trimmed_user = user.trim();
++    if trimmed_user.is_empty() || trimmed_user.chars().count() > 16 {
++        log::warn!("BlazeSessionHandoff: invalid player profile length ({})", trimmed_user.chars().count());
++        return 0;
++    }
++    let Some(uuid_raw) = jstring_to_string(&mut env, &uuid_str) else {
++        log::warn!("BlazeSessionHandoff: missing UUID string");
++        return 0;
++    };
++    let Some(parsed_uuid) = horizon_client::auth::parse_uuid(uuid_raw.trim()) else {
++        log::warn!("BlazeSessionHandoff: invalid UUID format");
++        return 0;
++    };
++    let Some(token) = jstring_to_string(&mut env, &access_token_str) else {
++        log::warn!("BlazeSessionHandoff: missing token string");
++        return 0;
++    };
++    if token.is_empty() {
++        log::warn!("BlazeSessionHandoff: empty token rejected");
++        return 0;
++    }
++
++    horizon_client::auth::stage_pending_android(trimmed_user, parsed_uuid, &token);
++    horizon_client::auth::set_current(horizon_client::auth::AuthSession::new(
++        trimmed_user,
++        parsed_uuid,
++        &token,
++    ));
++    if let Some(home) = backend::try_data_dir() {
++        let mut config = catalog::Config::load(&home);
++        config.name = trimmed_user.to_string();
++        if let Err(err) = config.save(&home) {
++            log::warn!("BlazeSessionHandoff: could not save profile name to config: {err}");
++        }
++    }
++    log::info!(
++        "BlazeSessionHandoff: staged AuthSession on :rust (uuid={:032x}, token_len={})",
++        parsed_uuid,
++        token.len()
++    );
++    1
++}
++
++/// Minimal synthetic touch probe reaching Starling's Android input tracker over JNI.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectSyntheticTouch(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    x: jfloat,
++    y: jfloat,
++    phase: jint,
++) -> jboolean {
++    crate::init_logging();
++    let phase_name = match phase {
++        0 => "Started",
++        1 => "Moved",
++        2 => "Ended",
++        3 => "Cancelled",
++        _ => "Other",
++    };
++    let seq = SYNTHETIC_TOUCH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
++    let noted = horizon_client::android_runtime::note_input(
++        horizon_client::android_gamepad::InputMode::Touch,
++    );
++    log::info!(
++        "BlazeInput: synthetic touch arrived via BlazeNativeBridge seq={seq} phase={phase_name} ({phase}) pos=({x:.1}, {y:.1}) note_input={noted}"
++    );
++    1
++}
+diff --git a/crates/horizon-client/src/android/launcher.rs b/crates/horizon-client/src/android/launcher.rs
+index 2f0ddbf180..be7eca4909 100644
+--- a/crates/horizon-client/src/android/launcher.rs
++++ b/crates/horizon-client/src/android/launcher.rs
+@@ -731,7 +731,22 @@ impl ApplicationHandler for Launcher {
+                 self.cursor = (position.x, position.y);
+                 Ok(())
+             }
+-            WindowEvent::Touch(touch) => self.touch_event(events, touch),
++            WindowEvent::Touch(touch) => {
++                static FIRST_WINIT_TOUCH: std::sync::atomic::AtomicBool =
++                    std::sync::atomic::AtomicBool::new(false);
++                if !matches!(touch.phase, winit::event::TouchPhase::Moved)
++                    || !FIRST_WINIT_TOUCH.swap(true, std::sync::atomic::Ordering::Relaxed)
++                {
++                    log::info!(
++                        "BlazeInput: winit WindowEvent::Touch arrived on :rust phase={:?} id={} pos=({:.1}, {:.1})",
++                        touch.phase,
++                        touch.id,
++                        touch.location.x,
++                        touch.location.y
++                    );
++                }
++                self.touch_event(events, touch)
++            }
+             WindowEvent::Focused(false) => {
+                 crate::diagnostics::heartbeat("launcher_background", || serde_json::json!({}));
+                 horizon_client::android_runtime::clear_gamepads();
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 46e1aac767..0c20f60b11 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -27,6 +27,8 @@ mod catalog;
+ mod device_preferences;
+ #[path = "android/device_runtime.rs"]
+ mod device_runtime;
++#[path = "android/blaze_diagnostics.rs"]
++pub mod blaze_diagnostics;
+ #[path = "android/diagnostics.rs"]
+ mod diagnostics;
+ #[path = "android/display.rs"]
+@@ -82,6 +84,9 @@ mod backend {
+     pub fn game_mod_api_level() -> Option<u32> {
+         Some(horizon_mods::api_level::LEVEL)
+     }
++    pub fn try_data_dir() -> Option<std::path::PathBuf> {
++        HOME.get().cloned()
++    }
+     pub fn data_dir() -> std::path::PathBuf {
+         HOME.get().expect("android_main sets account home").clone()
+     }
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 99745d0b9e..b4641a2309 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -21183,6 +21183,16 @@ pub(crate) fn android_game(arguments: Vec<String>) -> Result<Box<dyn Application
+     horizon_client::auth::clear_current();
+     ensure_factory_touch_layout();
+     let mut options = Options::read_arguments(arguments)?.ok_or("missing Android options")?;
++    if horizon_client::auth::current().is_none()
++        && let Some(session) = horizon_client::auth::take_pending_android()
++    {
++        log::info!(
++            "BlazeSessionHandoff: restored staged AuthSession for android_game (uuid={:032x})",
++            session.uuid
++        );
++        horizon_client::auth::set_current(session);
++        horizon_client::auth::prepare_chat_keys(true);
++    }
+     if crate::performance::active() {
+         options.spikes = Some(50.0);
+     }
