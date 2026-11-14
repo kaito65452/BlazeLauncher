@@ -250,6 +250,118 @@ expect_fail "Check 5b fails when ENGINE_BUILD_ENABLED=1 and engine/starling is e
     bash -c "cd '$MOCK_REPO' && rm -f .gitmodules && ENGINE_BUILD_ENABLED=1 bash scripts/guard.sh"
 
 echo ""
+echo "=== 4. Check 8b Self-Test (--check-release-apk non-debuggable check) ==="
+
+make_manifest_apk() {
+    local out_apk="$1"
+    local mode="$2" # omitted | explicit_false | true
+    python3 - "$SYNTH_NEG_BASE" "$out_apk" "$mode" <<'PY'
+import struct, sys, zipfile
+
+src, dst, mode = sys.argv[1:4]
+
+def build_axml(dbg_mode: str) -> bytes:
+    strings = ["manifest", "application", "debuggable"]
+    # Encode UTF-8 string pool cleanly
+    pool_entries = bytearray()
+    offsets = []
+    for s in strings:
+        offsets.append(len(pool_entries))
+        b = s.encode("utf-8")
+        pool_entries.extend([len(s), len(b)])
+        pool_entries.extend(b)
+        pool_entries.append(0)
+    while len(pool_entries) % 4 != 0:
+        pool_entries.append(0)
+    str_hdr_size = 28
+    strings_start = str_hdr_size + 4 * len(strings)
+    sp_size = strings_start + len(pool_entries)
+    sp_chunk = (
+        struct.pack("<HHI", 0x0001, str_hdr_size, sp_size)
+        + struct.pack("<IIIII", len(strings), 0, 1 << 8, strings_start, 0)
+        + struct.pack(f"<{len(strings)}I", *offsets)
+        + bytes(pool_entries)
+    )
+    # RES_XML_RESOURCE_MAP_TYPE (assign 0x0101000f to index 2 = "debuggable")
+    res_ids = [0, 0, 0x0101000F]
+    rm_chunk = struct.pack("<HHI", 0x0180, 8, 8 + 4 * len(res_ids)) + struct.pack(f"<{len(res_ids)}I", *res_ids)
+
+    attrs = b""
+    attr_count = 0
+    if dbg_mode in ("explicit_false", "true"):
+        attr_count = 1
+        val = 0 if dbg_mode == "explicit_false" else 0xFFFFFFFF
+        attrs = struct.pack("<iiiHBBI", -1, 2, -1, 8, 0, 0x12, val)
+
+    start_app = (
+        struct.pack("<HHI", 0x0102, 16, 16 + 20 + len(attrs))
+        + struct.pack("<Ii", 1, -1)
+        + struct.pack("<iiHHHHHH", -1, 1, 20, 20, attr_count, 0, 0, 0)
+        + attrs
+    )
+    end_app = struct.pack("<HHIIiii", 0x0103, 16, 24, 1, -1, -1, 1)
+    body = sp_chunk + rm_chunk + start_app + end_app
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(body)) + body
+
+manifest_bytes = build_axml(mode)
+with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_STORED) as zout:
+    for item in zin.infolist():
+        if item.filename == "AndroidManifest.xml":
+            continue
+        zout.writestr(item.filename, zin.read(item.filename))
+    zout.writestr("AndroidManifest.xml", manifest_bytes)
+PY
+}
+
+REL_OMITTED_APK="$TMP_ROOT/rel_omitted.apk"
+make_manifest_apk "$REL_OMITTED_APK" "omitted"
+expect_pass "Check 8b passes release APK without android:debuggable attribute" \
+    bash scripts/guard.sh --check-release-apk "$REL_OMITTED_APK"
+
+REL_FALSE_APK="$TMP_ROOT/rel_false.apk"
+make_manifest_apk "$REL_FALSE_APK" "explicit_false"
+expect_pass "Check 8b passes release APK with android:debuggable=false" \
+    bash scripts/guard.sh --check-release-apk "$REL_FALSE_APK"
+
+REL_TRUE_APK="$TMP_ROOT/rel_true.apk"
+make_manifest_apk "$REL_TRUE_APK" "true"
+expect_fail "Check 8b rejects debuggable=true APK" "android:debuggable=true" \
+    bash scripts/guard.sh --check-release-apk "$REL_TRUE_APK"
+
+echo ""
+echo "=== 5. Check 9 Self-Test (Developer package safety guard) ==="
+
+expect_pass "Check 9 passes on real ZalithLauncher developer package" \
+    env GUARD_CHECK9_ONLY_DIR="ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/developer" bash scripts/guard.sh
+
+BAD_DEV_OFFLINE="$TMP_ROOT/dev_offline"
+mkdir -p "$BAD_DEV_OFFLINE"
+cat > "$BAD_DEV_OFFLINE/BadOffline.kt" <<'KT'
+package io.github.kaito65452.blazelauncher.developer
+fun unlockOffline() { localLogin("OfflinePlayer:test") }
+KT
+expect_fail "Check 9 rejects offline-account creation references in developer package" "Forbidden account/ownership/token reference" \
+    env GUARD_CHECK9_ONLY_DIR="$BAD_DEV_OFFLINE" bash scripts/guard.sh
+
+BAD_DEV_TOKEN="$TMP_ROOT/dev_token"
+mkdir -p "$BAD_DEV_TOKEN"
+cat > "$BAD_DEV_TOKEN/BadToken.kt" <<'KT'
+package io.github.kaito65452.blazelauncher.developer
+data class Leak(val accessToken: String, val refreshToken: String)
+KT
+expect_fail "Check 9 rejects token field references in developer package" "Forbidden account/ownership/token reference" \
+    env GUARD_CHECK9_ONLY_DIR="$BAD_DEV_TOKEN" bash scripts/guard.sh
+
+BAD_DEV_IMPORT="$TMP_ROOT/dev_import"
+mkdir -p "$BAD_DEV_IMPORT"
+cat > "$BAD_DEV_IMPORT/BadImport.kt" <<'KT'
+package io.github.kaito65452.blazelauncher.developer
+import com.movtery.zalithlauncher.game.account.AccountType
+KT
+expect_fail "Check 9 rejects account package import in developer package" "Forbidden account/ownership/token reference" \
+    env GUARD_CHECK9_ONLY_DIR="$BAD_DEV_IMPORT" bash scripts/guard.sh
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

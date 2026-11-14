@@ -54,6 +54,9 @@ for file in $CHANGED_FILES; do
         ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/microsoft/MicrosoftAuthenticator.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/account/AccountUtils.kt)
             # Microsoft login error logging and diagnostic enhancement
             ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/setting/AllSettings.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/AboutInfoScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/LauncherSettingsScreen.kt)
+            # Developer Mode persistence, 5-tap version unlock, and diagnostics-only Settings section
+            ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores
             ;;

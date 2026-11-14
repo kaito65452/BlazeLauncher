@@ -249,20 +249,56 @@ if [ -d "engine" ]; then
     echo "✓ No forbidden include_bytes!/include_str! font embedding found under engine/."
 fi
 
-# 8. Optional APK inspection (--check-apk <apk_path>)
-if [ "${1:-}" = "--check-apk" ]; then
+# 9. Developer package safety guard (must never reference offline-account creation, ownership bypass, or token fields)
+check_developer_pkg_safety() {
+    local dev_dir="$1"
+    if [ ! -d "$dev_dir" ]; then
+        echo "ERROR: Developer package directory missing: $dev_dir" >&2
+        return 1
+    fi
+    local forbidden_re='(localLogin|AccountType\.LOCAL|OfflineYggdrasilServer|OfflinePlayer:|saveAccount|addOtherServer|circumventLimit|verifyGameOwnership|com\.movtery\.zalithlauncher\.game\.account|accessToken|refreshToken|access_token|refresh_token|id_token|microsoftRefreshToken|xboxToken|client_secret|MinecraftAccount|AccountsManager|offlineAccount|bypassOwnership|skipOwnership)'
+    local hits
+    hits=$(grep -rnE "$forbidden_re" "$dev_dir" || true)
+    if [ -n "$hits" ]; then
+        echo "ERROR: Forbidden account/ownership/token reference found in developer package ($dev_dir):" >&2
+        echo "$hits" >&2
+        return 1
+    fi
+    echo "✓ Developer package safety check passed ($dev_dir)."
+}
+
+if [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ]; then
+    echo "Checking custom directory for developer package safety: $GUARD_CHECK9_ONLY_DIR"
+    check_developer_pkg_safety "$GUARD_CHECK9_ONLY_DIR"
+    exit 0
+fi
+
+DEV_PKG_DIR="ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/developer"
+if [ -d "$DEV_PKG_DIR" ]; then
+    echo "Checking developer package safety: $DEV_PKG_DIR..."
+    check_developer_pkg_safety "$DEV_PKG_DIR"
+fi
+
+# 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
+if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+    CHECK_RELEASE_APK=0
+    if [ "${1:-}" = "--check-release-apk" ]; then
+        CHECK_RELEASE_APK=1
+    fi
     APK_PATH="${2:-}"
     if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-        echo "ERROR: --check-apk requires a valid APK file path (got: '$APK_PATH')"
+        echo "ERROR: ${1:-} requires a valid APK file path (got: '$APK_PATH')"
         exit 1
     fi
-    echo "Checking APK license hygiene: $APK_PATH"
-    python3 - "$APK_PATH" <<'PY'
+    echo "Checking APK license hygiene: $APK_PATH (release_check=$CHECK_RELEASE_APK)"
+    python3 - "$APK_PATH" "$CHECK_RELEASE_APK" <<'PY'
 import re
+import struct
 import sys
 import zipfile
 
 apk_path = sys.argv[1]
+check_release = sys.argv[2] == "1"
 disallowed_re = re.compile(
     r"(^|/)(wallpapers|wallpaper_templates)/|(^|/)assets/skin/|(^|/)assets/alex\.png$|voicechat",
     re.IGNORECASE,
@@ -306,6 +342,68 @@ def find_embedded_sfnt(data: bytes):
                 return f"sfnt magic {magic!r} at offset {pos} with tables {found_names}"
     return None
 
+def inspect_axml_debuggable(manifest_bytes: bytes):
+    if len(manifest_bytes) < 8:
+        raise ValueError("AndroidManifest.xml too short")
+    magic, hdr_size, _total_size = struct.unpack_from("<HHI", manifest_bytes, 0)
+    if magic != 0x0003:
+        raise ValueError(f"AndroidManifest.xml is not binary AXML (magic=0x{magic:04x})")
+    pos = hdr_size
+    strings = []
+    res_ids = []
+    seen_application = False
+    debuggable_attr = None
+    while pos + 8 <= len(manifest_bytes):
+        ctype, chdr, csize = struct.unpack_from("<HHI", manifest_bytes, pos)
+        if csize < 8 or pos + csize > len(manifest_bytes):
+            break
+        if ctype == 0x0001:  # RES_STRING_POOL_TYPE
+            scount, _stcount, flags, sstart, _ststart = struct.unpack_from("<IIIII", manifest_bytes, pos + 8)
+            utf8 = bool(flags & (1 << 8))
+            offsets = struct.unpack_from(f"<{scount}I", manifest_bytes, pos + 28)
+            base = pos + sstart
+            for off in offsets:
+                p = base + off
+                if utf8:
+                    if manifest_bytes[p] & 0x80:
+                        p += 2
+                    else:
+                        p += 1
+                    blen = manifest_bytes[p]
+                    if blen & 0x80:
+                        blen = ((blen & 0x7f) << 8) | manifest_bytes[p + 1]
+                        p += 2
+                    else:
+                        p += 1
+                    strings.append(manifest_bytes[p : p + blen].decode("utf-8", errors="replace"))
+                else:
+                    ulen = struct.unpack_from("<H", manifest_bytes, p)[0]
+                    p += 2
+                    if ulen & 0x8000:
+                        ulen = ((ulen & 0x7fff) << 16) | struct.unpack_from("<H", manifest_bytes, p)[0]
+                        p += 2
+                    strings.append(manifest_bytes[p : p + 2 * ulen].decode("utf-16-le", errors="replace"))
+        elif ctype == 0x0180:  # RES_XML_RESOURCE_MAP_TYPE
+            cnt = (csize - chdr) // 4
+            res_ids = list(struct.unpack_from(f"<{cnt}I", manifest_bytes, pos + chdr))
+        elif ctype == 0x0102:  # RES_XML_START_ELEMENT_TYPE
+            _line, _cmt, _ns, name_idx, attr_start, attr_size, attr_count = struct.unpack_from("<IIiiHHH", manifest_bytes, pos + 8)
+            tag_name = strings[name_idx] if 0 <= name_idx < len(strings) else ""
+            if tag_name == "application":
+                seen_application = True
+                attr_base = pos + chdr + attr_start
+                for i in range(attr_count):
+                    ap = attr_base + i * attr_size
+                    if ap + 20 > pos + csize:
+                        break
+                    _a_ns, a_name, _a_raw, _a_sz, _a_r0, a_type, a_data = struct.unpack_from("<iiiHBBI", manifest_bytes, ap)
+                    aname = strings[a_name] if 0 <= a_name < len(strings) else ""
+                    rid = res_ids[a_name] if 0 <= a_name < len(res_ids) else 0
+                    if aname == "debuggable" or rid == 0x0101000f:
+                        debuggable_attr = (a_type, a_data)
+        pos += csize
+    return seen_application, debuggable_attr
+
 with zipfile.ZipFile(apk_path, "r") as zf:
     names = zf.namelist()
     if "assets/THIRD_PARTY_NOTICES.md" not in names:
@@ -344,6 +442,24 @@ with zipfile.ZipFile(apk_path, "r") as zf:
                 file=sys.stderr,
             )
             sys.exit(1)
+
+    if check_release:
+        if "AndroidManifest.xml" not in names:
+            print("ERROR: Release APK check failed: missing AndroidManifest.xml!", file=sys.stderr)
+            sys.exit(1)
+        seen_app, dbg_attr = inspect_axml_debuggable(zf.read("AndroidManifest.xml"))
+        if not seen_app:
+            print("ERROR: Release APK check failed: AndroidManifest.xml missing <application> element!", file=sys.stderr)
+            sys.exit(1)
+        if dbg_attr is not None:
+            a_type, a_data = dbg_attr
+            if a_type != 0x12 or a_data != 0:
+                print(
+                    f"ERROR: APK has android:debuggable=true (or non-false attr type=0x{a_type:02x} data=0x{a_data:08x})!",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        print("✓ Release APK manifest verified non-debuggable (android:debuggable=false).")
 
 print(f"✓ APK license hygiene check passed ({len(so_entries)} .so files scanned).")
 PY

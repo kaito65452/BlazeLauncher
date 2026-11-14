@@ -40,8 +40,9 @@ jobs:
 
       - name: Run Guard Scripts
         run: |
-          chmod +x scripts/guard.sh scripts/scope_guard.sh
+          chmod +x scripts/guard.sh scripts/scope_guard.sh scripts/test_guards.sh
           ./scripts/guard.sh
+          ./scripts/test_guards.sh
           ./scripts/scope_guard.sh main
 
       - name: Download Rust Engine .so (arm64-v8a)
@@ -117,20 +118,40 @@ jobs:
           VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           echo "Building with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
           if [ "${{ steps.oauth_check.outputs.has_client_id }}" = "true" ]; then
-            ./gradlew testDebugUnitTest assembleRelease assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+            ./gradlew testDebugUnitTest assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           else
-            ./gradlew testDebugUnitTest assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+            ./gradlew testDebugUnitTest compileReleaseKotlin -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           fi
 
-      - name: Verify APK License Hygiene
+      - name: Verify No Debug APK Artifacts Built
         run: |
-          APK_LIST=$(find ZalithLauncher/build/outputs/apk -name "*.apk" | sort)
-          if [ -z "$APK_LIST" ]; then
-            echo "ERROR: No APK found under ZalithLauncher/build/outputs/apk!" >&2
+          DEBUG_APKS=$(find ZalithLauncher/build/outputs/apk/debug -name "*.apk" 2>/dev/null || true)
+          if [ -n "$DEBUG_APKS" ]; then
+            echo "ERROR: Debug APKs must not be built for distribution:" >&2
+            echo "$DEBUG_APKS" >&2
             exit 1
           fi
+          echo "✓ Confirmed zero debug APKs exist under ZalithLauncher/build/outputs/apk/debug."
+
+      - name: Verify APK License Hygiene and Non-Debuggable Release
+        if: steps.oauth_check.outputs.has_client_id == 'true'
+        run: |
+          APK_LIST=$(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | sort)
+          if [ -z "$APK_LIST" ]; then
+            echo "ERROR: No release APK found under ZalithLauncher/build/outputs/apk/release!" >&2
+            exit 1
+          fi
+          APKANALYZER=$(which apkanalyzer 2>/dev/null || find $ANDROID_HOME -name apkanalyzer 2>/dev/null | sort -V | tail -n 1)
           for apk in $APK_LIST; do
-            ./scripts/guard.sh --check-apk "$apk"
+            ./scripts/guard.sh --check-release-apk "$apk"
+            if [ -n "$APKANALYZER" ] && [ -x "$APKANALYZER" ]; then
+              DBG_VAL=$("$APKANALYZER" manifest debuggable "$apk")
+              echo "apkanalyzer manifest debuggable ($apk): $DBG_VAL"
+              if [ "$DBG_VAL" != "false" ]; then
+                echo "ERROR: Distributed APK $apk is debuggable ($DBG_VAL)!" >&2
+                exit 1
+              fi
+            fi
             python3 - "$apk" <<'PY'
           import os, sys, zipfile
           apk = sys.argv[1]
@@ -153,12 +174,19 @@ jobs:
       - name: Verify Signing Certificate SHA-256
         if: steps.oauth_check.outputs.has_client_id == 'true'
         run: |
+          EXPECTED_SHA256="5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc"
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           echo "Using apksigner: $APKSIGNER"
           for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk"); do
             echo "======================================================="
             echo "Signing certificate verification for: $apk"
-            "$APKSIGNER" verify --print-certs "$apk"
+            CERT_OUTPUT=$("$APKSIGNER" verify --print-certs "$apk")
+            echo "$CERT_OUTPUT"
+            if ! echo "$CERT_OUTPUT" | grep -qi "$EXPECTED_SHA256"; then
+              echo "ERROR: APK certificate SHA-256 does not match expected $EXPECTED_SHA256!" >&2
+              exit 1
+            fi
+            echo "✓ Signing certificate SHA-256 matched $EXPECTED_SHA256."
             echo "======================================================="
           done
 
@@ -235,11 +263,4 @@ jobs:
         with:
           name: signed-apks
           path: ZalithLauncher/build/outputs/apk/release/*.apk
-          if-no-files-found: error
-
-      - name: Upload Debug APK Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-apks
-          path: ZalithLauncher/build/outputs/apk/debug/*.apk
           if-no-files-found: error

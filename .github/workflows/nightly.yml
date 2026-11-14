@@ -83,11 +83,18 @@ jobs:
 
       - name: Verify Signing Certificate SHA-256
         run: |
+          EXPECTED_SHA256="5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc"
           APKSIGNER=$(find $ANDROID_HOME/build-tools -name apksigner | sort -V | tail -n 1)
           for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk"); do
             echo "======================================================="
             echo "Signing certificate verification for: $apk"
-            "$APKSIGNER" verify --print-certs "$apk"
+            CERT_OUTPUT=$("$APKSIGNER" verify --print-certs "$apk")
+            echo "$CERT_OUTPUT"
+            if ! echo "$CERT_OUTPUT" | grep -qi "$EXPECTED_SHA256"; then
+              echo "ERROR: Nightly APK certificate SHA-256 does not match expected $EXPECTED_SHA256!" >&2
+              exit 1
+            fi
+            echo "✓ Signing certificate SHA-256 matched $EXPECTED_SHA256."
             echo "======================================================="
           done
 
@@ -99,6 +106,13 @@ jobs:
             echo "Inspecting: $apk"
             echo "versionCode: $("$APKANALYZER" manifest version-code "$apk")"
             echo "versionName: $("$APKANALYZER" manifest version-name "$apk")"
+            DBG_VAL=$("$APKANALYZER" manifest debuggable "$apk")
+            echo "debuggable: $DBG_VAL"
+            if [ "$DBG_VAL" != "false" ]; then
+              echo "ERROR: Nightly APK $apk must not be debuggable ($DBG_VAL)!" >&2
+              exit 1
+            fi
+            ./scripts/guard.sh --check-release-apk "$apk"
             echo "======================================================="
           done
 
