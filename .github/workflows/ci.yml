@@ -117,7 +117,7 @@ jobs:
           VERSION_NAME="2.6_hotfix-blaze.${SHORT_SHA}"
           echo "Building with versionCode=$VERSION_CODE versionName=$VERSION_NAME"
           if [ "${{ steps.oauth_check.outputs.has_client_id }}" = "true" ]; then
-            ./gradlew testDebugUnitTest assembleRelease -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
+            ./gradlew testDebugUnitTest assembleRelease assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           else
             ./gradlew testDebugUnitTest assembleDebug -PversionCodeOverride="$VERSION_CODE" -PversionNameOverride="$VERSION_NAME" --stacktrace
           fi
@@ -235,4 +235,11 @@ jobs:
         with:
           name: signed-apks
           path: ZalithLauncher/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload Debug APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apks
+          path: ZalithLauncher/build/outputs/apk/debug/*.apk
           if-no-files-found: error
