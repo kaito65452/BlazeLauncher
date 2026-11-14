@@ -130,4 +130,83 @@ class RustSessionHandoffTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun copyReportOutputExcludesFakeAccessTokenAcrossHandoffAndEngineDiagnostics() {
+        val rootDir = Files.createTempDirectory("blaze_report_redaction_test").toFile()
+        try {
+            val filesDir = rootDir.resolve("files").apply { mkdirs() }
+            val statusDir = rootDir.resolve("no_backup").apply { mkdirs() }
+            val fakeJwtToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJmYWtlLXV1aWQifQ.sig_secret_987"
+            val fakeOpaqueToken = "M.C501_BLZ.FakeAccessTokenValue_777"
+
+            val acceptedHandoff = RustSessionHandoff.handoffSession(
+                user = "Alex",
+                uuid = "12345678-90AB-CDEF-1234-567890ABCDEF",
+                accessToken = fakeJwtToken
+            ) { _, _, _ -> true }
+            val failedHandoff = RustSessionHandoff.handoffSession(
+                user = "Alex",
+                uuid = "12345678-90AB-CDEF-1234-567890ABCDEF",
+                accessToken = fakeOpaqueToken
+            ) { _, _, _ ->
+                throw IllegalStateException("Bearer $fakeOpaqueToken {\"access_token\":\"$fakeOpaqueToken\"}")
+            }
+
+            statusDir.resolve("rust_spike_last_status.txt").writeText(
+                RustDiagnosticsCollector.redactDiagnosticText(
+                    """
+                    [2026-11-14 12:00:00.000] session_handoff: ${acceptedHandoff.summary}
+                    [2026-11-14 12:00:01.000] session_handoff_err: ${failedHandoff.summary}
+                    [2026-11-14 12:00:02.000] raw_leak_guard: Authorization: Bearer $fakeOpaqueToken XBL3.0 x=uhs999;$fakeJwtToken
+                    """.trimIndent()
+                )
+            )
+            val perfDir = filesDir.resolve("performance").apply { mkdirs() }
+            perfDir.resolve("diagnostic.log").writeText(
+                "Horizon: {\"access_token\":\"$fakeOpaqueToken\",\"refresh_token\":\"$fakeJwtToken\"}\n"
+            )
+
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                historicalExits = "2026-11-14 12:00:05.000 pid=42 reason=10 status=0 desc=Bearer $fakeOpaqueToken",
+                logcatProvider = {
+                    "01-01 12:00:00.100 I Horizon: Authorization: Bearer $fakeOpaqueToken\n" +
+                        "01-01 12:00:00.200 I Horizon: {\"access_token\":\"$fakeJwtToken\"}"
+                }
+            )
+
+            assertFalse("Raw JWT fake token must be absent from Copy report output", report.contains(fakeJwtToken))
+            assertFalse("Raw opaque fake token must be absent from Copy report output", report.contains(fakeOpaqueToken))
+            assertTrue(report.contains("=== Engine Data Check ==="))
+            assertTrue(report.contains("Engine data: expected path="))
+            assertTrue(report.contains("engine-data.zip=missing"))
+        } finally {
+            rootDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun engineDataDiagnosisReportsExpectedPathAndFilePresence() {
+        val filesDir = Files.createTempDirectory("blaze_engine_data_diag_test").toFile()
+        try {
+            val missingDiag = RustDiagnosticsCollector.collectEngineDataDiagnosis(filesDir)
+            assertTrue(missingDiag.contains("Engine data: expected path="))
+            assertTrue(missingDiag.contains("engine-data.zip=missing"))
+            assertTrue(missingDiag.contains("horizon-resources.json=missing"))
+            assertTrue(missingDiag.contains("android-downloads-v2.json=missing"))
+
+            filesDir.resolve("engine-data.zip").writeBytes(byteArrayOf(1, 2, 3, 4))
+            val markerDir = filesDir.resolve(".local/horizon-client/26.3").apply { mkdirs() }
+            markerDir.resolve("horizon-resources.json").writeText("{}")
+
+            val partialDiag = RustDiagnosticsCollector.collectEngineDataDiagnosis(filesDir)
+            assertTrue(partialDiag.contains("engine-data.zip=present (4 bytes)"))
+            assertTrue(partialDiag.contains("horizon-resources.json=present"))
+            assertTrue(partialDiag.contains("android-downloads-v2.json=missing"))
+        } finally {
+            filesDir.deleteRecursively()
+        }
+    }
 }

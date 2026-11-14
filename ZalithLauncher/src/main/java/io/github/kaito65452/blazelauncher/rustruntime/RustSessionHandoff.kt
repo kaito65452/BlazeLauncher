@@ -108,11 +108,11 @@ object RustSessionHandoff {
             account.accessToken.isBlank() || account.accessToken == "0" ||
             !isValidPlayerName(account.username)
         ) {
-            target.delete()
+            clearPendingSessionFiles(context)
             return
         }
         val normalizedUuid = normalizeUuidOrNull(account.profileId) ?: run {
-            target.delete()
+            clearPendingSessionFiles(context)
             return
         }
         val payload = JSONObject().apply {
@@ -135,7 +135,7 @@ object RustSessionHandoff {
                 partial.delete()
             }
         }.onFailure { err ->
-            target.delete()
+            clearPendingSessionFiles(context)
             Log.w(
                 TAG,
                 redactSensitiveData(
@@ -145,12 +145,24 @@ object RustSessionHandoff {
         }
     }
 
+    /**
+     * Deletes any temporary cross-process session handoff files left in `noBackupFilesDir`/`filesDir`.
+     * Starling's `nativeSetSession` itself keeps session data strictly in memory.
+     */
+    fun clearPendingSessionFiles(context: Context) {
+        val target = pendingSessionFile(context)
+        val partial = File(target.parentFile, "$PENDING_SESSION_FILE.tmp")
+        runCatching { partial.delete() }
+        runCatching { target.delete() }
+    }
+
     fun consumePendingSessionInRustProcess(
         context: Context,
         bridge: (user: String, uuid: String, accessToken: String) -> Boolean = BlazeNativeBridge::setSession
     ): SessionHandoffResult {
         val target = pendingSessionFile(context)
         if (!target.isFile) {
+            clearPendingSessionFiles(context)
             return SessionHandoffResult(
                 false,
                 "No staged ZL2 Microsoft session (Starling OAuth not invoked)"
@@ -164,7 +176,9 @@ object RustSessionHandoff {
                 redactSensitiveData("Could not read staged session: ${t.message}")
             )
         } finally {
-            target.delete()
+            // Read-once IPC cleanup: wipe both the staging file and any .tmp file before handing
+            // credentials purely in memory across JNI (`setSession` writes nothing to disk).
+            clearPendingSessionFiles(context)
         }
 
         val parsed = runCatching { JSONObject(raw) }.getOrNull()

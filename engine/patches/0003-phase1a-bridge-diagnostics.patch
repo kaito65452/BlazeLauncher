@@ -2,7 +2,7 @@ diff --git a/crates/horizon-client-render/src/auth.rs b/crates/horizon-client-re
 index ef322c85b3..283a92575a 100644
 --- a/crates/horizon-client-render/src/auth.rs
 +++ b/crates/horizon-client-render/src/auth.rs
-@@ -140,6 +140,26 @@ pub fn clear_current() {
+@@ -140,6 +140,32 @@ pub fn clear_current() {
      *CURRENT.write().unwrap() = None;
  }
  
@@ -24,6 +24,12 @@ index ef322c85b3..283a92575a 100644
 +        .unwrap_or_else(|e| e.into_inner())
 +        .take()?;
 +    Some(AuthSession::new(&name, uuid, &access_token))
++}
++
++/// Clear any staged Android bridge session from memory.
++#[cfg(target_os = "android")]
++pub fn clear_pending_android() {
++    *PENDING_ANDROID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 +}
 +
  /// Why joining a server through the session service failed, like the
@@ -100,9 +106,8 @@ new file mode 100644
 index 0000000000..56a1729704
 --- /dev/null
 +++ b/crates/horizon-client/src/android/blaze_diagnostics.rs
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,93 @@
 +//! Phase 1a JNI extensions for Blaze Launcher session handoff and synthetic input diagnostics.
-+use super::{backend, catalog};
 +use jni::{
 +    JNIEnv,
 +    objects::{JClass, JString},
@@ -161,13 +166,6 @@ index 0000000000..56a1729704
 +        parsed_uuid,
 +        &token,
 +    ));
-+    if let Some(home) = backend::try_data_dir() {
-+        let mut config = catalog::Config::load(&home);
-+        config.name = trimmed_user.to_string();
-+        if let Err(err) = config.save(&home) {
-+            log::warn!("BlazeSessionHandoff: could not save profile name to config: {err}");
-+        }
-+    }
 +    log::info!(
 +        "BlazeSessionHandoff: staged AuthSession on :rust (uuid={:032x}, token_len={})",
 +        parsed_uuid,
@@ -243,16 +241,6 @@ index 46e1aac767..0c20f60b11 100644
  #[path = "android/diagnostics.rs"]
  mod diagnostics;
  #[path = "android/display.rs"]
-@@ -82,6 +84,9 @@ mod backend {
-     pub fn game_mod_api_level() -> Option<u32> {
-         Some(horizon_mods::api_level::LEVEL)
-     }
-+    pub fn try_data_dir() -> Option<std::path::PathBuf> {
-+        HOME.get().cloned()
-+    }
-     pub fn data_dir() -> std::path::PathBuf {
-         HOME.get().expect("android_main sets account home").clone()
-     }
 diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
 index 99745d0b9e..b4641a2309 100644
 --- a/crates/horizon-client/src/game.rs

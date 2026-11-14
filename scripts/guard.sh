@@ -206,8 +206,384 @@ if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ]; then
     exit 0
 fi
 
+# 10. Engine login neutralization guard (structurally parses Rust comments, raw strings, #[cfg(...)], concat!, and live call sites)
+check_engine_login_neutralized() {
+    local target_dir="$1"
+    python3 - "$target_dir" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+if not os.path.isdir(root):
+    print(f"ERROR: Check 10 target directory missing: {root}", file=sys.stderr)
+    sys.exit(1)
+
+def skip_char_or_str(src: str, i: int):
+    """If src[i:] starts a Rust string/raw-string/byte-string/char literal, return (end_idx, kind)."""
+    n = len(src)
+    ch = src[i]
+    # Normal or byte string: "..." or b"..."
+    if ch == '"':
+        j = i + 1
+        while j < n:
+            c = src[j]
+            if c == '\\' and j + 1 < n:
+                j += 2
+                continue
+            if c == '"':
+                return j + 1, "str"
+            j += 1
+        return n, "str"
+    if ch == 'b' and i + 1 < n and src[i + 1] == '"':
+        end, _ = skip_char_or_str(src, i + 1)
+        return end, "str"
+    # Raw string: r#*"..."#* or br#*"..."#*
+    if ch == 'r' or (ch == 'b' and i + 1 < n and src[i + 1] == 'r'):
+        prev = src[i - 1] if i > 0 else ""
+        if not (prev.isalnum() or prev == '_'):
+            k = i + (2 if ch == 'b' else 1)
+            hashes = 0
+            while k < n and src[k] == '#':
+                hashes += 1
+                k += 1
+            if k < n and src[k] == '"':
+                j = k + 1
+                closing = '"' + ('#' * hashes)
+                pos = src.find(closing, j)
+                return (n if pos == -1 else pos + len(closing)), "raw_str"
+    # Char/byte literal: 'x', '\n', '\x7f', '\u{...}', b'x' (distinguish from 'lifetime)
+    if ch == "'" or (ch == 'b' and i + 1 < n and src[i + 1] == "'"):
+        q = i + (1 if ch == 'b' else 0)
+        if q + 2 < n and src[q + 1] == '\\':
+            j = q + 2
+            if j < n:
+                j += 1
+                while j < n and j - q <= 12 and src[j] not in ("\n", ";"):
+                    if src[j] == "'":
+                        return j + 1, "char"
+                    j += 1
+        elif q + 2 < n and src[q + 1] not in ("\n", "'", "\\") and src[q + 2] == "'":
+            return q + 3, "char"
+    return None
+
+def strip_rust_comments_preserving_strings(src: str) -> str:
+    out = []
+    i = 0
+    n = len(src)
+    block_depth = 0
+    while i < n:
+        ch = src[i]
+        nxt = src[i:i + 2]
+        if block_depth > 0:
+            if nxt == "/*":
+                block_depth += 1
+                out.append("  ")
+                i += 2
+            elif nxt == "*/":
+                block_depth -= 1
+                out.append("  ")
+                i += 2
+            elif ch == "\n":
+                out.append("\n")
+                i += 1
+            else:
+                out.append(" ")
+                i += 1
+            continue
+        lit = skip_char_or_str(src, i)
+        if lit is not None:
+            end, _ = lit
+            out.append(src[i:end])
+            i = end
+            continue
+        if nxt == "//":
+            while i < n and src[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if nxt == "/*":
+            block_depth = 1
+            out.append("  ")
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+def find_matching_delim(src: str, open_idx: int, open_c: str, close_c: str) -> int:
+    depth = 0
+    i = open_idx
+    n = len(src)
+    while i < n:
+        lit = skip_char_or_str(src, i)
+        if lit is not None:
+            i = lit[0]
+            continue
+        c = src[i]
+        if c == open_c:
+            depth += 1
+        elif c == close_c:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+DISABLED_CFG_RE = re.compile(
+    r'^\#\[\s*cfg\s*\(\s*(?:test|not\s*\(\s*target_os\s*=\s*"android"\s*\))\s*\)\s*\]$'
+)
+CFG_MOD_DECL_RE = re.compile(r'\bmod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;')
+ATTR_PATH_RE = re.compile(r'\#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+
+def prune_non_android_cfg_items(src: str, fpath: str):
+    """Blank out items guarded by #[cfg(test)] or #[cfg(not(target_os = "android"))] while tracking disabled external mods."""
+    disabled_mods = set()
+    chars = list(src)
+    i = 0
+    n = len(src)
+    while i < n:
+        lit = skip_char_or_str(src, i)
+        if lit is not None:
+            i = lit[0]
+            continue
+        if src[i:i + 2] == "#[":
+            attr_end = find_matching_delim(src, i, "[", "]")
+            attr_norm = " ".join(src[i:attr_end].split())
+            if DISABLED_CFG_RE.match(attr_norm):
+                j = attr_end
+                # Consume any stacked attributes (#[derive(...)], #[path = ...], #[allow(...)])
+                while j < n:
+                    while j < n and src[j].isspace():
+                        j += 1
+                    if src[j:j + 2] == "#[":
+                        j = find_matching_delim(src, j, "[", "]")
+                        continue
+                    break
+                # Advance to end of the annotated item (; at depth 0, or matching {...})
+                paren = 0
+                bracket = 0
+                item_end = n
+                while j < n:
+                    lit2 = skip_char_or_str(src, j)
+                    if lit2 is not None:
+                        j = lit2[0]
+                        continue
+                    c = src[j]
+                    if c == '(':
+                        paren += 1
+                    elif c == ')' and paren > 0:
+                        paren -= 1
+                    elif c == '[':
+                        bracket += 1
+                    elif c == ']' and bracket > 0:
+                        bracket -= 1
+                    elif paren == 0 and bracket == 0:
+                        if c == '{':
+                            j = find_matching_delim(src, j, "{", "}")
+                            k = j
+                            while k < n and src[k].isspace():
+                                k += 1
+                            if src[k:k + 4] == "else" and (k + 4 == n or not (src[k + 4].isalnum() or src[k + 4] == '_')):
+                                j = k + 4
+                                continue
+                            if k < n and src[k] == ';':
+                                j = k + 1
+                            item_end = j
+                            break
+                        if c == ';':
+                            item_end = j + 1
+                            break
+                    j += 1
+                removed = src[i:item_end]
+                if "mod " in removed and "{" not in removed:
+                    pm = ATTR_PATH_RE.search(removed)
+                    mm = CFG_MOD_DECL_RE.search(removed)
+                    base = os.path.dirname(fpath)
+                    if pm:
+                        disabled_mods.add(os.path.normpath(os.path.join(base, pm.group(1))))
+                    elif mm:
+                        mod_name = mm.group(1)
+                        stem = os.path.splitext(os.path.basename(fpath))[0]
+                        if stem in ("lib", "main", "mod"):
+                            disabled_mods.add(os.path.normpath(os.path.join(base, f"{mod_name}.rs")))
+                            disabled_mods.add(os.path.normpath(os.path.join(base, mod_name, "mod.rs")))
+                        else:
+                            disabled_mods.add(os.path.normpath(os.path.join(base, stem, f"{mod_name}.rs")))
+                for pos in range(i, item_end):
+                    if chars[pos] != "\n":
+                        chars[pos] = " "
+                i = item_end
+                continue
+        i += 1
+    return "".join(chars), disabled_mods
+
+CONCAT_RE = re.compile(r'\bconcat\s*!\s*\(')
+STR_TOKEN_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
+
+def fold_concat_strings(src: str) -> list[str]:
+    folded = []
+    for m in CONCAT_RE.finditer(src):
+        end = find_matching_delim(src, m.end() - 1, "(", ")")
+        inner = src[m.end():end - 1]
+        parts = STR_TOKEN_RE.findall(inner)
+        if parts:
+            folded.append("".join(parts))
+    return folded
+
+def blank_string_contents(src: str) -> str:
+    out = []
+    i = 0
+    n = len(src)
+    while i < n:
+        lit = skip_char_or_str(src, i)
+        if lit is not None:
+            end, kind = lit
+            newlines = src[i:end].count("\n")
+            if kind in ("str", "raw_str"):
+                out.append('""' + ("\n" * newlines))
+            else:
+                out.append("' '" + ("\n" * newlines))
+            i = end
+            continue
+        out.append(src[i])
+        i += 1
+    return "".join(out)
+
+FORBIDDEN_CLIENT_IDS = ("00000000441cc96b", "00000000402b5328")
+FORBIDDEN_ENDPOINTS_RE = re.compile(
+    r"(login\.microsoftonline\.com"
+    r"|login\.live\.com"
+    r"|oauth20_(?:token|connect|remoteconnect)\.srf"
+    r"|user\.auth\.xboxlive\.com"
+    r"|xsts\.auth\.xboxlive\.com"
+    r"|/authentication/login_with_xbox"
+    r"|/entitlements/mcstore"
+    r"|authserver\.ely\.by(?!/session/join))",
+    re.IGNORECASE,
+)
+FORBIDDEN_CALLS_RE = re.compile(
+    r"\b(?:account\s*::\s*(?:device_code|poll|finish_sign_in|finish_sign_in_with_progress|refresh_ms|write_session_file|legacy_client|session\s*::\s*(?:selected_session|selected_session_with|refresh|refresh_with_progress|renew_for_game)|ely\s*::\s*(?:authenticate|refresh))"
+    r"|SignIn\s*::\s*start"
+    r"|Endpoints\s*::\s*live)\b"
+)
+
+DESKTOP_ONLY_REL = {
+    "launcher/src/main.rs",
+    "launcher/src/cli.rs",
+    "launcher/src/mcp.rs",
+    "launcher/src/owner_page.rs",
+    "launcher/src/switch_page.rs",
+}
+
+all_rs_files = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = sorted(d for d in dirnames if d not in (".git", "target", ".local", "patches"))
+    for fname in sorted(filenames):
+        if fname.endswith(".rs"):
+            all_rs_files.append(os.path.normpath(os.path.join(dirpath, fname)))
+
+# Two-pass scan so external #[cfg(test)] mod <name>; targets are collected before reporting.
+parsed = []
+disabled_external = set()
+for fpath in all_rs_files:
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+            raw = f.read()
+    except OSError:
+        continue
+    no_comments = strip_rust_comments_preserving_strings(raw)
+    android_src, mods = prune_non_android_cfg_items(no_comments, fpath)
+    disabled_external.update(mods)
+    parsed.append((fpath, raw, no_comments, android_src))
+
+violations = []
+seen_rel = set()
+
+for fpath, raw, _no_comments, android_src in parsed:
+    if os.path.normpath(fpath) in disabled_external:
+        continue
+    rel = os.path.relpath(fpath, root).replace(os.sep, "/")
+    if rel in DESKTOP_ONLY_REL or "/tests/" in f"/{rel}":
+        continue
+    seen_rel.add(rel)
+
+    folded = "\n".join(fold_concat_strings(android_src))
+    check_text = android_src + ("\n" + folded if folded else "")
+    code_only = blank_string_contents(android_src)
+
+    for cid in FORBIDDEN_CLIENT_IDS:
+        m = re.search(re.escape(cid), check_text)
+        if m:
+            line_no = check_text[:m.start()].count("\n") + 1
+            violations.append(f"{rel}:{line_no}: embedded Starling/Mojang client ID {cid!r} active in Android build")
+
+    for m in FORBIDDEN_ENDPOINTS_RE.finditer(check_text):
+        line_no = check_text[:m.start()].count("\n") + 1
+        violations.append(f"{rel}:{line_no}: active OAuth/Xbox/Ely login endpoint {m.group(0)!r} in Android build")
+
+    for m in FORBIDDEN_CALLS_RE.finditer(code_only):
+        line_no = code_only[:m.start()].count("\n") + 1
+        violations.append(f"{rel}:{line_no}: active engine login/refresh call {m.group(0)!r} in Android build")
+
+    if "/android/" in f"/{rel}" or rel.endswith(("android_main.rs", "blaze_diagnostics.rs", "jni_bridge.rs")):
+        m = re.search(r"\bAccounts\s*::\s*load\b", code_only)
+        if m:
+            line_no = code_only[:m.start()].count("\n") + 1
+            violations.append(f"{rel}:{line_no}: active Accounts::load call in Android engine module")
+
+    if rel.endswith("blaze_diagnostics.rs"):
+        for disk_pat in (r"\.save\s*\(", r"\bfs\s*::\s*write\b", r"File\s*::\s*(?:create|options)"):
+            m = re.search(disk_pat, code_only)
+            if m:
+                line_no = code_only[:m.start()].count("\n") + 1
+                violations.append(f"{rel}:{line_no}: setSession/diagnostics must not write session data to disk ({m.group(0)!r})")
+
+    if rel.endswith("android/catalog.rs"):
+        if not re.search(r'pub\s+const\s+MICROSOFT_CLIENT_ID\s*:\s*&str\s*=\s*""\s*;', android_src):
+            violations.append(f"{rel}: MICROSOFT_CLIENT_ID is not cleared to empty string")
+        m = re.search(r'"client_id"', android_src)
+        if m:
+            line_no = android_src[:m.start()].count("\n") + 1
+            violations.append(f"{rel}:{line_no}: editable client_id field must be removed")
+
+    if rel.endswith("android/platform.rs"):
+        m = re.search(r"pub\s+fn\s+open_login_url\b[^{]*\{(.*?)\n\}", android_src, re.DOTALL)
+        if not m or "startActivity" in m.group(1) or "Url::parse" in m.group(1):
+            violations.append(f"{rel}: open_login_url must immediately return Err without launching browser")
+
+    if rel.endswith("android/login.rs"):
+        if re.search(r"\buse\s+crate::account\b", code_only):
+            violations.append(f"{rel}: android/login.rs still imports crate::account")
+
+is_real_workspace = os.path.isfile(os.path.join(root, "Cargo.toml")) and os.path.isdir(os.path.join(root, "crates/horizon-client"))
+if is_real_workspace:
+    for required in (
+        "crates/horizon-client/src/android/catalog.rs",
+        "crates/horizon-client/src/android/login.rs",
+        "crates/horizon-client/src/android/launcher.rs",
+        "launcher/src/account.rs",
+    ):
+        if required not in seen_rel:
+            violations.append(f"{required}: expected engine file missing during Check 10 scan")
+
+if violations:
+    print("ERROR: Engine login neutralization guard failed:", file=sys.stderr)
+    for v in violations:
+        print(f"  {v}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+if [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ]; then
+    echo "Checking custom directory for engine login neutralization: $GUARD_CHECK10_ONLY_DIR"
+    check_engine_login_neutralized "$GUARD_CHECK10_ONLY_DIR"
+    echo "✓ Custom Check 10 directory passed."
+    exit 0
+fi
+
 if [ -d "engine" ]; then
-    echo "Checking engine/ for include_bytes!/include_str! font embedding..."
+    echo "Checking engine/ for include_bytes!/include_str! font embedding and login neutralization..."
     TEMP_PATCHED_WORKTREE=""
     cleanup_wt() {
         if [ -n "$TEMP_PATCHED_WORKTREE" ] && [ -d "$TEMP_PATCHED_WORKTREE" ]; then
@@ -222,9 +598,9 @@ if [ -d "engine" ]; then
             # Submodule working tree is clean upstream pin; verify patches apply cleanly and scan the patched view
             TEMP_PATCHED_WORKTREE=$(mktemp -d)
             git -C engine/starling worktree add --no-checkout --detach "$TEMP_PATCHED_WORKTREE" HEAD >/dev/null 2>&1
-            # Check out only Rust sources and patch-target files to avoid copying thousands of unrelated assets
+            # Check out only Rust sources, Cargo.toml, and patch-target files to avoid copying unrelated assets
             {
-                git -C "$TEMP_PATCHED_WORKTREE" ls-files '*.rs'
+                git -C "$TEMP_PATCHED_WORKTREE" ls-files 'Cargo.toml' '*.rs'
                 grep -h '^--- a/' engine/patches/*.patch | sed 's|^--- a/||'
             } | sort -u | xargs -r git -C "$TEMP_PATCHED_WORKTREE" checkout HEAD --
             for p in engine/patches/*.patch; do
@@ -233,20 +609,25 @@ if [ -d "engine" ]; then
                 git -C "$TEMP_PATCHED_WORKTREE" apply "$p_abs"
             done
             check_engine_font_embeds "$TEMP_PATCHED_WORKTREE"
+            check_engine_login_neutralized "$TEMP_PATCHED_WORKTREE"
             # Also check any non-starling Rust files under engine/
             for item in engine/*; do
                 if [ "$item" != "engine/starling" ] && [ -d "$item" ]; then
                     check_engine_font_embeds "$item"
+                    check_engine_login_neutralized "$item"
                 fi
             done
         else
             # Submodule already patched in-tree (CI build state) or no patches: scan engine/ directly
             check_engine_font_embeds "engine"
+            check_engine_login_neutralized "engine"
         fi
     else
         check_engine_font_embeds "engine"
+        check_engine_login_neutralized "engine"
     fi
     echo "✓ No forbidden include_bytes!/include_str! font embedding found under engine/."
+    echo "✓ Engine login/OAuth paths & embedded client IDs verified neutralized."
 fi
 
 # 9. Developer package safety guard (must never reference offline-account creation, ownership bypass, or token fields)
@@ -426,6 +807,20 @@ with zipfile.ZipFile(apk_path, "r") as zf:
 
     so_entries = [n for n in names if re.match(r"^lib/[^/]+/.*\.so$", n)]
     print(f"Scanning {len(so_entries)} shared libraries under lib/*/*.so...")
+    forbidden_so_markers = [
+        b"00000000441cc96b",
+        b"00000000402b5328",
+        b"login.microsoftonline.com",
+        b"login.live.com",
+        b"oauth20_token.srf",
+        b"oauth20_connect.srf",
+        b"oauth20_remoteconnect.srf",
+        b"user.auth.xboxlive.com",
+        b"xsts.auth.xboxlive.com",
+        b"/authentication/login_with_xbox",
+        b"/entitlements/mcstore",
+        b"authserver.ely.by",
+    ]
     for n in so_entries:
         data = zf.read(n)
         for enc, text_marker, raw_marker in ofl_markers:
@@ -442,6 +837,14 @@ with zipfile.ZipFile(apk_path, "r") as zf:
                 file=sys.stderr,
             )
             sys.exit(1)
+        masked_so = data.replace(b"authserver.ely.by/session/join", b"")
+        for marker in forbidden_so_markers:
+            if marker in masked_so:
+                print(
+                    f"ERROR: {n} contains forbidden Starling OAuth/login marker {marker.decode('ascii')!r}!",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
     if check_release:
         if "AndroidManifest.xml" not in names:

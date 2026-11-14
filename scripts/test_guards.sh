@@ -362,6 +362,115 @@ expect_fail "Check 9 rejects account package import in developer package" "Forbi
     env GUARD_CHECK9_ONLY_DIR="$BAD_DEV_IMPORT" bash scripts/guard.sh
 
 echo ""
+echo "=== 6. Check 10 Self-Tests (Engine login neutralization + .so binary markers) ==="
+
+# Positive: comments, #[cfg(test)], #[cfg(not(target_os = "android"))], and /session/join stay allowed
+CASE10_CLEAN="$TMP_ROOT/check10_clean"
+mkdir -p "$CASE10_CLEAN/src"
+cat > "$CASE10_CLEAN/src/lib.rs" <<'RS'
+// Previously used 00000000441cc96b and https://login.microsoftonline.com/consumers/oauth2/v2.0
+/* Nested /* block comment: 00000000402b5328 https://user.auth.xboxlive.com/user/authenticate */
+pub fn ely_server_join() -> &'static str {
+    "https://authserver.ely.by/session/join"
+}
+#[cfg(not(target_os = "android"))]
+pub fn desktop_only_auth() -> (&'static str, &'static str) {
+    ("https://login.microsoftonline.com/consumers/oauth2/v2.0", "https://xsts.auth.xboxlive.com/xsts/authorize")
+}
+#[cfg(test)]
+mod tests {
+    const TEST_ID: &str = "00000000441cc96b";
+}
+RS
+expect_pass "Check 10 allows comments, cfg(test), cfg(not(android)), and ely /session/join" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_CLEAN" bash scripts/guard.sh
+
+# Negative 1: un-gated client ID 00000000441cc96b
+CASE10_CID1="$TMP_ROOT/check10_cid1"
+mkdir -p "$CASE10_CID1/src"
+cat > "$CASE10_CID1/src/lib.rs" <<'RS'
+pub const CLIENT_ID: &str = "00000000441cc96b";
+RS
+expect_fail "Check 10 rejects un-gated 00000000441cc96b" "embedded Starling/Mojang client ID '00000000441cc96b'" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_CID1" bash scripts/guard.sh
+
+# Negative 2: obfuscated/split client ID via concat!
+CASE10_CONCAT="$TMP_ROOT/check10_concat"
+mkdir -p "$CASE10_CONCAT/src"
+cat > "$CASE10_CONCAT/src/lib.rs" <<'RS'
+pub const CLIENT_ID: &str = concat!("00000000", "402b5328");
+RS
+expect_fail "Check 10 rejects concat!-split 00000000402b5328" "embedded Starling/Mojang client ID '00000000402b5328'" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_CONCAT" bash scripts/guard.sh
+
+# Negative 3: URL containing // inside string literal (defeats naive // comment stripping!)
+CASE10_URL="$TMP_ROOT/check10_url_slashes"
+mkdir -p "$CASE10_URL/src"
+cat > "$CASE10_URL/src/lib.rs" <<'RS'
+// Benign comment line before active URL:
+pub const MS_TOKEN_URL: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+RS
+expect_fail "Check 10 catches https://login.microsoftonline.com without naive // truncation" "active OAuth/Xbox/Ely login endpoint 'login\.microsoftonline\.com'" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_URL" bash scripts/guard.sh
+
+# Negative 4: Android-targeted XSTS URL behind #[cfg(target_os = "android")]
+CASE10_ANDROID_CFG="$TMP_ROOT/check10_android_cfg"
+mkdir -p "$CASE10_ANDROID_CFG/src"
+cat > "$CASE10_ANDROID_CFG/src/lib.rs" <<'RS'
+#[cfg(target_os = "android")]
+pub fn xsts() -> &'static str { "https://xsts.auth.xboxlive.com/xsts/authorize" }
+RS
+expect_fail "Check 10 rejects Android-targeted XSTS endpoint" "active OAuth/Xbox/Ely login endpoint 'xsts\.auth\.xboxlive\.com'" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_ANDROID_CFG" bash scripts/guard.sh
+
+# Negative 5: active login call inside Rust code (not just a string literal)
+CASE10_CALL="$TMP_ROOT/check10_call"
+mkdir -p "$CASE10_CALL/src"
+cat > "$CASE10_CALL/src/lib.rs" <<'RS'
+pub fn start_login() { let _ = account::device_code(&ep, "abc"); }
+RS
+expect_fail "Check 10 rejects active account::device_code call" "active engine login/refresh call" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_CALL" bash scripts/guard.sh
+
+# Negative 6: setSession writing to disk in blaze_diagnostics.rs
+CASE10_DISK="$TMP_ROOT/check10_disk"
+mkdir -p "$CASE10_DISK/crates/horizon-client/src/android"
+cat > "$CASE10_DISK/crates/horizon-client/src/android/blaze_diagnostics.rs" <<'RS'
+pub fn set_session_bad(config: &Cfg, home: &Path) { let _ = config.save(home); }
+RS
+expect_fail "Check 10 rejects disk save in blaze_diagnostics.rs" "must not write session data to disk" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_DISK" bash scripts/guard.sh
+
+# Positive & Negative APK .so scans (Check 10b)
+make_so_marker_apk() {
+    local out_apk="$1"
+    local so_payload="$2"
+    python3 - "$SYNTH_NEG_BASE" "$out_apk" "$so_payload" <<'PY'
+import sys, zipfile
+src, dst, payload = sys.argv[1:4]
+with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_STORED) as zout:
+    for item in zin.infolist():
+        zout.writestr(item.filename, zin.read(item.filename))
+    zout.writestr("lib/arm64-v8a/libhorizon_android.so", b"\x7fELF\x00" + payload.encode("ascii") + b"\x00")
+PY
+}
+
+SO_JOIN_OK="$TMP_ROOT/so_ely_join_only.apk"
+make_so_marker_apk "$SO_JOIN_OK" "https://authserver.ely.by/session/join"
+expect_pass "Check 10b allows https://authserver.ely.by/session/join in libhorizon_android.so" \
+    bash scripts/guard.sh --check-apk "$SO_JOIN_OK"
+
+SO_BAD_CID="$TMP_ROOT/so_bad_cid.apk"
+make_so_marker_apk "$SO_BAD_CID" "00000000441cc96b"
+expect_fail "Check 10b rejects 00000000441cc96b in libhorizon_android.so" "Starling OAuth/login marker '00000000441cc96b'" \
+    bash scripts/guard.sh --check-apk "$SO_BAD_CID"
+
+SO_BAD_URL="$TMP_ROOT/so_bad_url.apk"
+make_so_marker_apk "$SO_BAD_URL" "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
+expect_fail "Check 10b rejects login.microsoftonline.com in libhorizon_android.so" "Starling OAuth/login marker 'login\.microsoftonline\.com'" \
+    bash scripts/guard.sh --check-apk "$SO_BAD_URL"
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

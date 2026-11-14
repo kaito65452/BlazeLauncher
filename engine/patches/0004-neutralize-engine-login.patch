@@ -1,0 +1,2504 @@
+diff --git a/crates/horizon-client/src/android/catalog.rs b/crates/horizon-client/src/android/catalog.rs
+index c3938ae13a..8be89d379d 100644
+--- a/crates/horizon-client/src/android/catalog.rs
++++ b/crates/horizon-client/src/android/catalog.rs
+@@ -17,9 +17,8 @@ pub fn source_only_mod(project: &Project) -> bool {
+         && project.loaders.iter().any(|loader| loader == "hnmod")
+ }
+ 
+-/// Temporary dev registration published as Minecraft Nintendo Switch by PrismarineJS.
+-/// Account tokens and client secrets are never bundled.
+-pub const MICROSOFT_CLIENT_ID: &str = "00000000441cc96b";
++/// Disabled in Blaze Launcher builds: Starling's embedded Microsoft client ID is removed.
++pub const MICROSOFT_CLIENT_ID: &str = "";
+ 
+ /// Minecraft player names are at most 16 UTF-16 units; a longer name fails the
+ /// integrated-server handshake with only a generic disconnect.
+@@ -169,9 +168,8 @@ impl Config {
+         if cfg!(target_pointer_width = "32") && value.get("renderer").is_none() {
+             config.renderer = RendererMode::VulkanCompatibility;
+         }
+-        // Ignore saved app registrations while this dev build uses the fixed ID.
+-        config.microsoft_client_id =
+-            crate::account::client_id().unwrap_or_else(|| MICROSOFT_CLIENT_ID.into());
++        // Blaze Launcher owns authentication; clear any saved Microsoft client ID on load.
++        config.microsoft_client_id.clear();
+         if value.get("renderer").is_none() && value["gpu_batching"].as_bool() == Some(true) {
+             config.renderer = RendererMode::Vulkan;
+         }
+@@ -1954,7 +1952,6 @@ impl Catalog {
+             Some("profile_desc") => &mut self.config.custom_profile_desc,
+             Some("server") => &mut self.config.server,
+             Some("render_scale") => &mut self.render_scale_text,
+-            Some("client_id") => &mut self.config.microsoft_client_id,
+             Some("theme_bg") => &mut self.config.theme.custom_bg_hex,
+             Some("theme_surface") => &mut self.config.theme.custom_surface_hex,
+             Some("theme_accent") => &mut self.config.theme.custom_accent_hex,
+diff --git a/crates/horizon-client/src/android/launcher.rs b/crates/horizon-client/src/android/launcher.rs
+index be7eca4909..2f43fdfd2d 100644
+--- a/crates/horizon-client/src/android/launcher.rs
++++ b/crates/horizon-client/src/android/launcher.rs
+@@ -29,11 +29,6 @@ use winit::{
+     window::{Window, WindowId},
+ };
+ 
+-struct PreparedAccount {
+-    key: String,
+-    file: PathBuf,
+-    appearance: crate::skins::cloud::Cache,
+-}
+ pub(super) struct Launcher {
+     home: PathBuf,
+     controller_edges: horizon_client::gamepad::Edges,
+@@ -64,9 +59,6 @@ pub(super) struct Launcher {
+     exit_confirmation: bool,
+     login: login::Login,
+     wardrobe: wardrobe::Wardrobe,
+-    session_worker: Option<mpsc::Receiver<std::result::Result<PreparedAccount, String>>>,
+-    session_ready: bool,
+-    prepared_session: Option<PathBuf>,
+     pub(super) launching: bool,
+     pub(super) launch_pending_tick: bool,
+     pub(super) diagnostics_modal_open: bool,
+@@ -79,11 +71,8 @@ impl Launcher {
+         if self.catalog.page == Page::Skins {
+             self.catalog.scroll = 0.0;
+         }
+-        // The header shows this appearance even when another page is open.
+-        self.wardrobe.open(
+-            &self.catalog.config.name,
+-            &self.catalog.config.microsoft_client_id,
+-        );
++        // The header shows local wardrobe appearance synced for the active session.
++        self.wardrobe.open(&self.catalog.config.name, "");
+     }
+ 
+     fn edit_text(&mut self, output: horizon_client::osk::Output) {
+@@ -175,43 +164,10 @@ impl Launcher {
+                 log::warn!("Cannot write the factory touch layout: {error}");
+             }
+         }
+-        // Pre-warm Microsoft session in background at startup so pressing Play doesn't stall.
+-        let prewarm_session_worker = if crate::account::Accounts::load().selected().is_some() {
+-            let id = catalog.config.microsoft_client_id.clone();
+-            let game_home = catalog.config.game_home(&home);
+-            let wardrobe_home = home.join("wardrobe");
+-            let (tx, rx) = mpsc::channel();
+-            std::thread::spawn(move || {
+-                let res = (|| {
+-                    let (account, secrets) = login::Login::session(&id)?
+-                        .ok_or("The selected account changed. Choose Play again.")?;
+-                    let appearance = crate::skins::cloud::fetch(&account, &secrets, &wardrobe_home)
+-                        .unwrap_or_default();
+-                    let file = crate::account::write_session_file(
+-                        &game_home.join("sessions"),
+-                        &account,
+-                        &secrets,
+-                    )?;
+-                    Ok(PreparedAccount {
+-                        key: account.key(),
+-                        file,
+-                        appearance,
+-                    })
+-                })();
+-                if let Err(unsent) = tx.send(res)
+-                    && let Ok(prepared) = unsent.0
+-                {
+-                    let _ = std::fs::remove_file(prepared.file);
+-                }
+-            });
+-            Some(rx)
+-        } else {
+-            None
+-        };
+-        // Load the selected wardrobe and its last head before the first draw:
+-        // the account pill must have the real face instantly, not after a page visit.
++        // Engine-side session pre-warm / OAuth refresh is disabled; Blaze Launcher hands in
++        // any active AuthSession via BlazeNativeBridge.setSession.
+         let mut wardrobe = wardrobe::Wardrobe::new(&home);
+-        wardrobe.open(&catalog.config.name, &catalog.config.microsoft_client_id);
++        wardrobe.open(&catalog.config.name, "");
+         Self {
+             wardrobe,
+             home,
+@@ -242,9 +198,6 @@ impl Launcher {
+             chooser: None,
+             exit_confirmation: false,
+             login: login::Login::new(),
+-            session_worker: prewarm_session_worker,
+-            session_ready: false,
+-            prepared_session: None,
+             launching: false,
+             launch_pending_tick: false,
+             diagnostics_modal_open: false,
+@@ -267,8 +220,7 @@ impl Launcher {
+         let _ = crate::platform::capture_mouse(false);
+         crate::platform::hide();
+         horizon_client::auth::clear_current();
+-        self.session_ready = false;
+-        self.prepared_session = None;
++        horizon_client::auth::clear_pending_android();
+         self.launching = false;
+         self.launch_pending_tick = false;
+         horizon_client::discord_presence::stop();
+@@ -439,7 +391,6 @@ impl Launcher {
+         if self.exit_confirmation
+             || self.chooser.is_some()
+             || self.worker.is_some()
+-            || self.session_worker.is_some()
+             || self.launch_pending_tick
+         {
+             return Ok(());
+@@ -462,42 +413,6 @@ impl Launcher {
+                 self.launching = true;
+                 self.error = None;
+                 self.catalog.status = "Launching Minecraft 26.3...".into();
+-                let game_home = self.catalog.config.game_home(&self.home);
+-                if !self.session_ready && crate::account::Accounts::load().selected().is_some() {
+-                    let id = self.catalog.config.microsoft_client_id.clone();
+-                    let wardrobe_home = self.home.join("wardrobe");
+-                    let (sender, receiver) = mpsc::channel();
+-                    self.session_worker = Some(receiver);
+-                    self.catalog.status = "Preparing account session and appearance...".into();
+-                    std::thread::spawn(move || {
+-                        let result = (|| {
+-                            let (account, secrets) = login::Login::session(&id)?
+-                                .ok_or("The selected account changed. Choose Play again.")?;
+-                            let appearance =
+-                                crate::skins::cloud::fetch(&account, &secrets, &wardrobe_home)
+-                                    .unwrap_or_default();
+-                            let file = crate::account::write_session_file(
+-                                &game_home.join("sessions"),
+-                                &account,
+-                                &secrets,
+-                            )?;
+-                            Ok(PreparedAccount {
+-                                key: account.key(),
+-                                file,
+-                                appearance,
+-                            })
+-                        })();
+-                        if let Err(unsent) = sender.send(result)
+-                            && let Ok(prepared) = unsent.0
+-                        {
+-                            let _ = std::fs::remove_file(prepared.file);
+-                        }
+-                    });
+-                    if let Some(window) = &self.window {
+-                        window.request_redraw();
+-                    }
+-                    return Ok(());
+-                }
+                 self.launch_pending_tick = true;
+                 if let Some(window) = &self.window {
+                     window.request_redraw();
+@@ -532,44 +447,9 @@ impl Launcher {
+             }
+             self.catalog.config.keypad_controls = false;
+             let game_home = self.catalog.config.game_home(&self.home);
+-            if !self.session_ready && crate::account::Accounts::load().selected().is_some() {
+-                let id = self.catalog.config.microsoft_client_id.clone();
+-                let wardrobe_home = self.home.join("wardrobe");
+-                let (sender, receiver) = mpsc::channel();
+-                self.session_worker = Some(receiver);
+-                self.catalog.status = "Preparing account session and appearance...".into();
+-                std::thread::spawn(move || {
+-                    let result = (|| {
+-                        let (account, secrets) = login::Login::session(&id)?
+-                            .ok_or("The selected account changed. Choose Play again.")?;
+-                        let appearance =
+-                            crate::skins::cloud::fetch(&account, &secrets, &wardrobe_home)
+-                                .unwrap_or_default();
+-                        let file = crate::account::write_session_file(
+-                            &game_home.join("sessions"),
+-                            &account,
+-                            &secrets,
+-                        )?;
+-                        Ok(PreparedAccount {
+-                            key: account.key(),
+-                            file,
+-                            appearance,
+-                        })
+-                    })();
+-                    if let Err(unsent) = sender.send(result)
+-                        && let Ok(prepared) = unsent.0
+-                    {
+-                        let _ = std::fs::remove_file(prepared.file);
+-                    }
+-                });
+-                return Ok(());
+-            }
+-            self.session_ready = false;
+             std::fs::create_dir_all(&game_home)?;
+-            if crate::account::Accounts::load().selected().is_none() {
+-                self.wardrobe
+-                    .prepare_game(&self.catalog.config.name, &game_home)?;
+-            }
++            self.wardrobe
++                .prepare_game(&self.catalog.config.name, &game_home)?;
+             let extra_arguments = if crate::PUBLIC_BUILD {
+                 Vec::new()
+             } else {
+@@ -606,7 +486,7 @@ impl Launcher {
+                     .join(".local/horizon-client")
+                     .join(horizon_core::VANILLA_VERSION),
+                 game_home,
+-                session_file: self.prepared_session.take(),
++                session_file: None,
+                 offline_name: crate::catalog::truncate_player_name(&self.catalog.config.name),
+                 server: self.catalog.config.server.clone(),
+                 control_socket: (!crate::PUBLIC_BUILD).then(|| self.home.join("control.json")),
+@@ -910,72 +790,8 @@ impl ApplicationHandler for Launcher {
+             self.catalog.status = result.unwrap_or_else(|e| format!("File export failed: {e}"));
+         }
+         if self.login.poll() {
+-            self.session_worker = None;
+-            self.prepared_session = None;
+-            self.session_ready = false;
+             self.refresh_wardrobe_account();
+         }
+-        if let Some(result) = self.session_worker.as_ref().and_then(|w| w.try_recv().ok()) {
+-            let launch_pending = self.launching
+-                || self.catalog.status == "Preparing account session and appearance...";
+-            self.session_worker = None;
+-            match result {
+-                Ok(prepared) => {
+-                    // Only the current selection may publish the game handoff.
+-                    if crate::account::Accounts::load()
+-                        .selected()
+-                        .is_none_or(|a| a.key() != prepared.key)
+-                    {
+-                        self.launching = false;
+-                        self.launch_pending_tick = false;
+-                        let _ = std::fs::remove_file(prepared.file);
+-                        self.catalog.status =
+-                            "The selected account changed. Choose Play again.".into();
+-                    } else {
+-                        let root = self.home.join("wardrobe");
+-                        let cloud = prepared.appearance.skin.as_deref().map(|p| {
+-                            (
+-                                p,
+-                                prepared.appearance.slim,
+-                                prepared.appearance.cape.as_deref(),
+-                            )
+-                        });
+-                        let appearance =
+-                            crate::skins::library::Library::load(&root).and_then(|library| {
+-                                library.prepare_game(
+-                                    &root,
+-                                    &prepared.key,
+-                                    &self.catalog.config.game_home(&self.home),
+-                                    cloud,
+-                                )
+-                            });
+-                        match appearance {
+-                            Ok(()) => {
+-                                self.prepared_session = Some(prepared.file);
+-                                self.session_ready = true;
+-                                if launch_pending {
+-                                    self.catalog.status.clear();
+-                                    if let Err(e) = self.action(events) {
+-                                        self.fail(e);
+-                                    }
+-                                }
+-                            }
+-                            Err(error) => {
+-                                let _ = std::fs::remove_file(prepared.file);
+-                                self.fail(error);
+-                            }
+-                        }
+-                    }
+-                }
+-                Err(e) => {
+-                    if launch_pending {
+-                        self.fail(e);
+-                    } else {
+-                        log::warn!("Background session pre-warm notice: {e}");
+-                    }
+-                }
+-            }
+-        }
+ 
+         if self.launch_pending_tick {
+             self.launch_pending_tick = false;
+@@ -991,7 +807,6 @@ impl ApplicationHandler for Launcher {
+         }
+         let frame_ms = if self.worker.is_some()
+             || self.launching
+-            || self.session_worker.is_some()
+             || self.catalog.busy()
+             || self.drag.is_some()
+             || self.login.pending()
+@@ -1019,6 +834,8 @@ impl ApplicationHandler for Launcher {
+         if let Some(game) = &mut self.game {
+             game.exiting(events);
+         }
++        horizon_client::auth::clear_current();
++        horizon_client::auth::clear_pending_android();
+     }
+ }
+ 
+diff --git a/crates/horizon-client/src/android/launcher_pages.rs b/crates/horizon-client/src/android/launcher_pages.rs
+index 7cb0a10166..0ac6d80961 100644
+--- a/crates/horizon-client/src/android/launcher_pages.rs
++++ b/crates/horizon-client/src/android/launcher_pages.rs
+@@ -1103,10 +1103,11 @@ impl Launcher {
+ 
+         // ---- Top Header Bar (brand lockup ... account pill) ----
+         ui.horizon_logo(18.0, 12.0, 28.0);
+-        let account_name = self
+-            .login
+-            .profile
+-            .clone()
++        let active_session = horizon_client::auth::current();
++        let account_name = active_session
++            .as_ref()
++            .map(|s| s.name.clone())
++            .or_else(|| self.login.profile.clone())
+             .unwrap_or_else(|| self.catalog.config.name.clone());
+         let account_text_w = ui.measure(Face::Medium, 13.5, &account_name).min(136.0);
+         let pill_w = (account_text_w + 64.0).clamp(114.0, 204.0);
+@@ -1153,11 +1154,11 @@ impl Launcher {
+             &fitted_version,
+         );
+ 
+-        // Top-right Account Selector Pill with circular avatar head, username, and chevron.
++        // Top-right Account Status Pill (non-interactive; managed by Blaze Launcher).
+         ui.rounded(pill_x, pill_y, pill_w, pill_h, pill_h * 0.5, my3_surface());
+         ui.border(pill_x, pill_y, pill_w, pill_h, pill_h * 0.5, my3_border());
+         ui.avatar_head_2d(pill_x + 6.0, pill_y + 4.0, 28.0, &account_name);
+-        if self.login.signed_in {
++        if active_session.is_some() || self.login.signed_in {
+             ui.rounded(pill_x + 26.0, pill_y + 24.0, 9.0, 9.0, 4.5, my3_bg());
+             ui.rounded(
+                 pill_x + 27.0,
+@@ -1168,7 +1169,7 @@ impl Launcher {
+                 color::hex(0x59D98E, 255),
+             );
+         }
+-        let fitted_acct = ui.fit_text(Face::Medium, 13.5, &account_name, pill_w - 62.0);
++        let fitted_acct = ui.fit_text(Face::Medium, 13.5, &account_name, pill_w - 48.0);
+         ui.text(
+             Face::Medium,
+             13.5,
+@@ -1177,15 +1178,6 @@ impl Launcher {
+             my3_text(),
+             &fitted_acct,
+         );
+-        ui.icon(
+-            Icon::ChevronDown,
+-            pill_x + pill_w - 22.0,
+-            pill_y + 12.0,
+-            12.0,
+-            my3_muted(),
+-        );
+-        self.targets
+-            .push(([pill_x, pill_y, pill_w, pill_h], Action::Account));
+ 
+         // ---- Left Vertical Navigation Rail + Smooth Gliding Active Pill ----
+         let sidebar_w = if w < 560.0 { 136.0 } else { 184.0 };
+@@ -1491,7 +1483,7 @@ impl Launcher {
+                 );
+                 let btn_y = (h - 92.0).max(card_y + card_h + 12.0);
+                 let play_w = content_w.min(256.0);
+-                let is_launching = self.launching || self.session_worker.is_some();
++                let is_launching = self.launching;
+                 if is_launching && installed {
+                     let radius = 19.0;
+                     ui.rounded(content_x, btn_y, play_w, 46.0, radius, my3_accent_soft());
+@@ -2129,18 +2121,11 @@ impl Launcher {
+         }
+         crate::documents::draw_ui(&mut ui);
+         if !self.anim.intro_done {
+-            let session_prog = if self.session_worker.is_some() {
+-                0.30
+-            } else {
+-                0.55
+-            };
+-            let loading_progress = (0.45f32 + session_prog).clamp(0.0, 1.0);
++            let loading_progress = 1.0f32;
+             if loading_progress >= 0.999 && self.anim.intro_elapsed >= 1.55 {
+                 self.anim.intro_done = true;
+             } else {
+-                let intro_status = if self.session_worker.is_some() {
+-                    "Syncing account session & skins..."
+-                } else if self.catalog.search_worker_active() {
++                let intro_status = if self.catalog.search_worker_active() {
+                     "Loading content catalog..."
+                 } else {
+                     ""
+@@ -3800,12 +3785,6 @@ impl Launcher {
+                     "Logs, device info and troubleshooting",
+                     Action::SettingsCat(SettingsCategory::Diagnostics),
+                 ),
+-                (
+-                    Icon::MicrosoftGrid,
+-                    "Account",
+-                    "Microsoft and Xbox sign-in",
+-                    Action::Account,
+-                ),
+             ];
+ 
+             let grid_top = 98.0 + slide_y;
+@@ -5392,9 +5371,6 @@ impl Launcher {
+     }
+ 
+     pub(super) fn activate(&mut self, events: &ActiveEventLoop) -> Result<()> {
+-        if self.session_worker.is_some() && self.chooser.is_none() && !self.exit_confirmation {
+-            return Ok(());
+-        }
+         let (Some(r), Some(gui)) = (&self.renderer, &self.gui) else {
+             return Ok(());
+         };
+@@ -5425,7 +5401,6 @@ impl Launcher {
+                     Action::PauseCatalogDownload
+                         | Action::CancelCatalogDownload
+                         | Action::Page(_)
+-                        | Action::Account
+                 )
+             )
+         {
+@@ -6050,96 +6025,32 @@ impl Launcher {
+                 }
+                 .into();
+             }
+-            Some(Action::Account) => {
+-                self.catalog.editing = None;
+-                crate::platform::hide();
+-                self.login.refresh_status();
+-                self.login.visible = true;
+-                self.login.offline = false;
+-                self.login.ely = false;
+-                if self.login.signed_in {
+-                    // Already signed in: open the selector, with the current
+-                    // Microsoft/Ely.by account called out, instead of asking
+-                    // the player to choose a provider again.
+-                    self.login.providers = false;
+-                    self.login.choosing = true;
+-                    self.login.account_offset = 0;
+-                } else {
+-                    self.login.providers = true;
+-                    self.login.choosing = false;
+-                }
+-            }
+-            Some(Action::AddAccount) => {
+-                self.login.choosing = false;
+-                self.login.providers = true;
+-                self.login.offline = false;
+-                self.login.ely = false;
+-                self.login.visible = true;
+-            }
+-            Some(Action::OfflineAccount | Action::MicrosoftAccount) => {
+-                self.login.providers = false;
+-                self.login.offline = matches!(action, Some(Action::OfflineAccount));
+-                self.login.ely = false;
+-                self.login.choosing = false;
+-                self.login.visible = true;
+-            }
+-            Some(Action::SavedAccounts) => {
+-                self.login.providers = false;
+-                self.login.refresh_status();
+-                self.login.choosing = true;
+-                self.login.ely = false;
+-            }
+-            Some(Action::SavedPage(next)) => {
+-                if next && self.login.account_offset + 3 < self.login.saved_accounts.len() {
+-                    self.login.account_offset += 3;
+-                } else if !next {
+-                    self.login.account_offset = self.login.account_offset.saturating_sub(3);
+-                }
+-            }
+-            Some(Action::SelectAccount(index)) => {
+-                let mut accounts = crate::account::Accounts::load();
+-                if let Some(account) = self.login.saved_accounts.get(index)
+-                    && accounts.accounts.iter().any(|a| a.key() == account.key())
+-                {
+-                    accounts.selected = Some(account.key());
+-                    accounts.save()?;
+-                }
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                self.login.refresh_status();
+-                self.refresh_wardrobe_account();
+-            }
+-            Some(Action::SelectOffline) => {
+-                self.catalog.config.save(&self.home)?;
+-                self.catalog.editing = None;
+-                crate::platform::hide();
+-                self.login.hide();
+-                let mut accounts = crate::account::Accounts::load();
+-                accounts.selected = None;
+-                accounts.save()?;
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                self.login.choosing = false;
+-                self.login.refresh_status();
+-                self.refresh_wardrobe_account();
+-            }
+-            Some(Action::ElySignIn) => {
+-                self.login.providers = false;
++            Some(
++                Action::Account
++                | Action::AddAccount
++                | Action::OfflineAccount
++                | Action::MicrosoftAccount
++                | Action::SavedAccounts
++                | Action::SavedPage(_)
++                | Action::SelectAccount(_)
++                | Action::SelectOffline
++                | Action::ElySignIn
++                | Action::SubmitEly
++                | Action::DeviceSignIn
++                | Action::CopyLoginCode
++                | Action::CancelLogin
++                | Action::ReviewApp
++                | Action::SignIn
++                | Action::SignOut
++                | Action::LoginLink,
++            ) => {
+                 self.login.close();
+-                self.login.ely = true;
+-                self.login.visible = true;
+-            }
+-            Some(Action::SubmitEly) => {
+                 self.catalog.editing = None;
+                 crate::platform::hide();
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                if !self.login.pending() {
+-                    self.login.start_ely();
+-                }
++                self.error = Some(
++                    "In-engine account login and switching are disabled. Manage your account in Blaze Launcher."
++                        .into(),
++                );
+             }
+             Some(Action::CloseLogin) => {
+                 self.login.hide();
+@@ -6147,39 +6058,9 @@ impl Launcher {
+                 self.catalog.editing = None;
+                 self.refresh_wardrobe_account();
+             }
+-            Some(Action::DeviceSignIn) => {
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                self.login
+-                    .start_device(&self.catalog.config.microsoft_client_id);
+-            }
+-            Some(Action::CopyLoginCode) => self.login.copy_code(),
+-            Some(Action::CancelLogin) => {
+-                self.login.close();
+-                self.login.visible = true;
+-            }
+-            Some(Action::ReviewApp) => self.login.review_app(),
+-            Some(Action::SignIn) => {
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                self.login.start(&self.catalog.config.microsoft_client_id);
+-            }
+-            Some(Action::SignOut) => {
+-                self.session_ready = false;
+-                self.prepared_session = None;
+-                self.session_worker = None;
+-                self.login.sign_out();
+-                self.refresh_wardrobe_account();
+-            }
+-            Some(Action::LoginLink) => self.login.open_link(),
+             Some(Action::Page(page)) => {
+                 if page == Page::Skins {
+-                    self.wardrobe.open(
+-                        &self.catalog.config.name,
+-                        &self.catalog.config.microsoft_client_id,
+-                    );
++                    self.wardrobe.open(&self.catalog.config.name, "");
+                 }
+                 self.catalog.editing = None;
+                 self.catalog.project_modal = None;
+@@ -6203,17 +6084,11 @@ impl Launcher {
+             }
+             Some(Action::WardrobeSelect(index)) => self.wardrobe.select(index),
+             Some(Action::WardrobeImport) => self.wardrobe.import(),
+-            Some(Action::WardrobeCloud) => self
+-                .wardrobe
+-                .cloud(&self.catalog.config.microsoft_client_id, None),
+-            Some(Action::WardrobeUpload) => self.wardrobe.cloud(
+-                &self.catalog.config.microsoft_client_id,
+-                Some(wardrobe::CloudAction::Upload),
+-            ),
+-            Some(Action::WardrobeActivateCape(index)) => self.wardrobe.cloud(
+-                &self.catalog.config.microsoft_client_id,
+-                Some(wardrobe::CloudAction::Cape(index)),
+-            ),
++            Some(Action::WardrobeCloud | Action::WardrobeUpload | Action::WardrobeActivateCape(_)) => {
++                self.error = Some(
++                    "Cloud skin sync is disabled; sessions are managed by Blaze Launcher.".into(),
++                );
++            }
+             Some(Action::WardrobeUseCloud) => self.wardrobe.use_cloud(),
+             Some(Action::WardrobeModel) => self.wardrobe.model(),
+             Some(Action::WardrobeRotate(direction)) => {
+@@ -6263,7 +6138,6 @@ impl Launcher {
+                     "profile_desc" => &self.catalog.config.custom_profile_desc,
+                     "server" => &self.catalog.config.server,
+                     "render_scale" => &self.catalog.render_scale_text,
+-                    "client_id" => &self.catalog.config.microsoft_client_id,
+                     "theme_bg" => &self.catalog.config.theme.custom_bg_hex,
+                     "theme_surface" => &self.catalog.config.theme.custom_surface_hex,
+                     "theme_accent" => &self.catalog.config.theme.custom_accent_hex,
+@@ -6329,10 +6203,6 @@ impl Launcher {
+             Some(Action::Dismiss) => {
+                 self.exit_confirmation = false;
+                 self.chooser = None;
+-                if self.session_worker.is_none() {
+-                    self.session_ready = false;
+-                    self.prepared_session = None;
+-                }
+             }
+             Some(Action::Logs) => {
+                 self.catalog.status = crate::diagnostics::summary(&self.home);
+diff --git a/crates/horizon-client/src/android/login.rs b/crates/horizon-client/src/android/login.rs
+index c22ad219d1..32442c3e55 100644
+--- a/crates/horizon-client/src/android/login.rs
++++ b/crates/horizon-client/src/android/login.rs
+@@ -1,14 +1,8 @@
+-//! Native account panel; authentication is shared with the desktop launcher.
++//! Disabled native login panel: authentication is owned exclusively by Blaze Launcher
++//! and handed in over memory (`BlazeNativeBridge.setSession`).
+ use super::pages::{Action, button};
+-use crate::account::{self, Account, Accounts, Secrets, SignIn, SignInState};
+-use horizon_client::ui_theme::{Face, Icon, Ui, color};
++use horizon_client::ui_theme::{Face, Ui, color};
+ 
+-fn login_surface() -> u32 {
+-    horizon_client::ui_theme::active_theme().surface
+-}
+-fn login_surface_high() -> u32 {
+-    horizon_client::ui_theme::active_theme().surface_bright
+-}
+ fn login_border() -> u32 {
+     horizon_client::ui_theme::active_theme().border
+ }
+@@ -18,326 +12,87 @@ fn login_text() -> u32 {
+ fn login_muted() -> u32 {
+     horizon_client::ui_theme::active_theme().text_muted
+ }
+-fn login_accent() -> u32 {
+-    horizon_client::ui_theme::active_theme().accent
+-}
+-fn login_accent_soft() -> u32 {
+-    horizon_client::ui_theme::active_theme().accent_soft
+-}
+ 
+ pub(super) struct Login {
+-    pub choosing: bool,
+-    pub providers: bool,
+-    pub offline: bool,
+-    pub saved_accounts: Vec<Account>,
+-    pub account_offset: usize,
+-    pub ely: bool,
+-    pub username: String,
+-    pub password: String,
+-    pub otp: String,
+     pub visible: bool,
+     pub signed_in: bool,
+     pub profile: Option<String>,
+-    task: Option<SignIn>,
+-    auto_open_device: bool,
+-    state: Option<SignInState>,
+-    message: String,
+ }
++
+ impl Login {
+     pub fn new() -> Self {
+         let mut login = Self {
+-            choosing: false,
+-            providers: false,
+-            offline: false,
+-            saved_accounts: vec![],
+-            account_offset: 0,
+-            ely: false,
+-            username: String::new(),
+-            password: String::new(),
+-            otp: String::new(),
+             visible: false,
+             signed_in: false,
+             profile: None,
+-            task: None,
+-            auto_open_device: false,
+-            state: None,
+-            message: String::new(),
+         };
+         login.refresh_status();
+         login
+     }
++
+     pub(super) fn refresh_status(&mut self) {
+-        let accounts = Accounts::load();
+-        let account = accounts.selected().cloned();
+-        self.saved_accounts = accounts.accounts;
+-        self.profile = account.as_ref().map(|a| a.name.clone());
+-        self.signed_in = account.is_some_and(|a| {
+-            account::store()
+-                .get(&a.key())
+-                .ok()
+-                .flatten()
+-                .is_some_and(|s| serde_json::from_str::<Secrets>(&s).is_ok())
+-        });
+-    }
+-    fn provider_name(&self) -> &'static str {
+-        self.profile
+-            .as_deref()
+-            .and_then(|name| self.saved_accounts.iter().find(|a| a.name == name))
+-            .map(|a| match a.provider {
+-                account::Provider::Ely => "Ely.by",
+-                account::Provider::Microsoft => "Microsoft",
+-            })
+-            .unwrap_or("Microsoft")
++        let active = horizon_client::auth::current();
++        self.profile = active.map(|s| s.name);
++        self.signed_in = self.profile.is_some();
+     }
+ 
+-    pub fn status(&self, offline_name: &str) -> String {
+-        match (&self.profile, self.signed_in) {
+-            (Some(name), true) => {
+-                format!("Already signed in as {name} · {}", self.provider_name())
+-            }
+-            (Some(name), false) => format!("Sign-in required for {name}"),
+-            _ if self.pending() => "Signing in...".into(),
+-            _ if !offline_name.trim().is_empty() => format!("Offline: {offline_name}"),
+-            _ => "Offline / Sign in".into(),
++    pub fn status(&self, _offline_name: &str) -> String {
++        if let Some(name) = &self.profile {
++            format!("Blaze Launcher session: {name}")
++        } else {
++            "Managed by Blaze Launcher".into()
+         }
+     }
+ 
+     pub fn pending(&self) -> bool {
+-        self.task.is_some()
++        false
+     }
++
+     pub fn hide(&mut self) {
+-        self.password.clear();
+-        self.otp.clear();
+         self.visible = false;
+     }
++
+     pub fn close(&mut self) {
+-        self.password.clear();
+-        self.otp.clear();
+-        self.auto_open_device = false;
+-        if let Some(task) = self.task.take() {
+-            task.cancel();
+-        }
+-        self.state = None;
+         self.visible = false;
+     }
+-    pub fn start(&mut self, id: &str) {
+-        self.start_device(id);
+-        self.auto_open_device = true;
+-    }
+-    pub fn start_device(&mut self, id: &str) {
+-        self.close();
+-        self.ely = false;
+-        self.choosing = false;
+-        self.visible = true;
+-        let id = id.trim();
+-        if !account::legacy_client(id)
+-            && (id.len() != 36
+-                || !id.chars().enumerate().all(|(i, c)| {
+-                    if [8, 13, 18, 23].contains(&i) {
+-                        c == '-'
+-                    } else {
+-                        c.is_ascii_hexdigit()
+-                    }
+-                }))
+-        {
+-            self.message =
+-                "Register our Microsoft public client application first, then enter its client ID."
+-                    .into();
+-            return;
+-        }
+-        self.message.clear();
+-        self.task = Some(SignIn::start_with_client_id(Some(id.into())));
+-        self.state = Some(SignInState::Starting);
+-    }
+-    /// Reports completion so views can switch their provider-scoped selection,
+-    /// including when the account panel was closed during browser sign-in.
++
+     pub fn poll(&mut self) -> bool {
+-        let mut completed = false;
+-        if let Some(task) = &self.task {
+-            self.state = Some(task.state());
+-            if let Some(SignInState::Done(result)) = &self.state {
+-                self.message = match result {
+-                    Ok(a) => format!("Signed in as {}", a.name),
+-                    Err(e) => e.clone(),
+-                };
+-                self.task = None;
+-                self.refresh_status();
+-                completed = true;
+-            }
+-        }
+-        if self.auto_open_device && matches!(self.state, Some(SignInState::Code(_))) {
+-            self.auto_open_device = false;
+-            self.open_link();
+-        }
+-        completed
+-    }
+-    pub fn start_ely(&mut self) {
+-        if let Some(task) = self.task.take() {
+-            task.cancel();
+-        }
+-        self.message.clear();
+-        self.task = Some(SignIn::start_ely(
+-            self.username.clone(),
+-            std::mem::take(&mut self.password),
+-            std::mem::take(&mut self.otp),
+-        ));
+-        self.state = Some(SignInState::Starting);
+-    }
+-    pub fn field(&self, name: &str) -> Option<&str> {
+-        match name {
+-            "ely_username" => Some(&self.username),
+-            "ely_password" => Some(&self.password),
+-            "ely_otp" => Some(&self.otp),
+-            _ => None,
+-        }
++        false
+     }
+-    pub fn edit(&mut self, field: Option<&str>, output: &horizon_client::osk::Output) -> bool {
+-        let value = match field {
+-            Some("ely_username") => &mut self.username,
+-            Some("ely_password") => &mut self.password,
+-            Some("ely_otp") => &mut self.otp,
+-            _ => return false,
+-        };
+-        match output {
+-            horizon_client::osk::Output::Text(text) if value.len() + text.len() <= 1024 => {
+-                value.push_str(text);
+-            }
+-            horizon_client::osk::Output::Backspace => {
+-                value.pop();
+-            }
+-            _ => {}
+-        }
+-        true
+-    }
+-    pub fn sign_out(&mut self) {
+-        self.close();
+-        self.visible = true;
+-        let mut accounts = Accounts::load();
+-        if let Some(a) = accounts.selected().cloned() {
+-            self.message = match accounts
+-                .remove_when_idle(account::store(), &a.key())
+-                .and_then(|_| accounts.save())
+-            {
+-                Ok(()) => "Signed out. Offline play is available.".into(),
+-                Err(e) => e,
+-            };
+-        }
+-        self.refresh_status();
+-    }
+-    pub fn copy_code(&mut self) {
+-        if let Some(SignInState::Code(code)) = &self.state {
+-            self.message = if crate::platform::copy_login_code(&code.user_code) {
+-                "Code copied. Paste it on the Microsoft page.".into()
+-            } else {
+-                "Could not copy the code. Try again.".into()
+-            };
+-        }
+-    }
+-    pub fn open_link(&mut self) {
+-        if let Some(SignInState::Code(code)) = &self.state {
+-            let mut url = url::Url::parse(&code.verification_uri).ok();
+-            if let Some(uri) = &mut url {
+-                uri.query_pairs_mut().append_pair("otc", &code.user_code);
+-            }
+-            let url = url
+-                .map(String::from)
+-                .unwrap_or_else(|| code.verification_uri.clone());
+-            self.copy_code();
+-            if let Err(e) = crate::platform::open_login_url(&url) {
+-                self.message = e;
+-            }
+-        }
+-    }
+-    pub fn review_app(&mut self) {
+-        if let Err(e) = crate::platform::open_login_url("https://aka.ms/mce-reviewappid") {
+-            self.message = e;
+-        }
++
++    pub fn field(&self, _name: &str) -> Option<&str> {
++        None
+     }
+-    pub fn session(id: &str) -> Result<Option<(Account, Secrets)>, String> {
+-        account::session::selected_session(id.trim())
++
++    pub fn edit(&mut self, _field: Option<&str>, _output: &horizon_client::osk::Output) -> bool {
++        false
+     }
+-    #[allow(clippy::too_many_arguments)]
+-    fn account_row(
+-        &self,
+-        ui: &mut Ui,
+-        targets: &mut Vec<([f32; 4], Action)>,
+-        rect: [f32; 4],
+-        name: &str,
+-        detail: &str,
+-        current: bool,
+-        action: Action,
+-    ) {
+-        let [x, y, w, h] = rect;
+-        ui.rounded(x, y, w, h, 14.0, login_surface());
+-        ui.border(
+-            x,
+-            y,
+-            w,
+-            h,
+-            14.0,
+-            if current {
+-                login_accent()
+-            } else {
+-                login_border()
+-            },
+-        );
+-        let avatar = (h - 12.0).clamp(30.0, 40.0);
+-        ui.avatar_head_2d(x + 10.0, y + (h - avatar) * 0.5, avatar, name);
+-        let tx = x + avatar + 22.0;
+-        let fitted = ui.fit_text(Face::SemiBold, 14.0, name, (w - avatar - 56.0).max(60.0));
+-        ui.text(Face::SemiBold, 14.0, tx, y + 7.0, login_text(), &fitted);
+-        let detail = if current {
+-            format!("{detail} · Current")
+-        } else {
+-            detail.to_owned()
+-        };
+-        ui.text(
+-            Face::Regular,
+-            11.5,
+-            tx,
+-            y + h - 21.0,
+-            if current {
+-                login_accent()
+-            } else {
+-                login_muted()
+-            },
+-            &detail,
+-        );
+-        if current {
+-            ui.icon(
+-                Icon::Check,
+-                x + w - 30.0,
+-                y + (h - 18.0) * 0.5,
+-                18.0,
+-                login_accent(),
+-            );
+-        }
+-        targets.push(([x, y, w, h], action));
++
++    #[allow(dead_code)]
++    pub fn session(
++        _id: &str,
++    ) -> Result<Option<(crate::account::Account, crate::account::Secrets)>, String> {
++        Err(
++            "In-engine login and token refresh are disabled; re-authenticate in Blaze Launcher."
++                .into(),
++        )
+     }
+ 
+     pub fn draw(
+         &self,
+         ui: &mut Ui,
+         targets: &mut Vec<([f32; 4], Action)>,
+-        offline_name: &str,
+-        editing: Option<&str>,
++        _offline_name: &str,
++        _editing: Option<&str>,
+         modal_anim: f32,
+     ) {
+         targets.clear();
+         let modal_t = modal_anim.clamp(0.2, 1.0);
+         let scale_in = 0.95 + 0.05 * modal_t;
+-        let w = (ui.w - 24.0).min(620.0) * scale_in;
+-        let h = (ui.h - 20.0).min(600.0) * scale_in;
++        let w = (ui.w - 24.0).min(520.0) * scale_in;
++        let h = 240.0 * scale_in;
+         let x = (ui.w - w) * 0.5;
+-        let mut y = (ui.h - h) * 0.5 + (1.0 - modal_t) * 14.0;
+-        if editing.is_some()
+-            && let Some(bottom_px) = crate::native_ime::viewport_bottom()
+-        {
+-            let ime_top_dp = bottom_px as f32 / ui.density;
+-            if ime_top_dp < ui.h - 16.0 {
+-                y = y.min((ime_top_dp - h - 8.0).max(6.0));
+-            }
+-        }
++        let y = (ui.h - h) * 0.5 + (1.0 - modal_t) * 14.0;
+         let theme = horizon_client::ui_theme::active_theme();
+         ui.fill(
+             0.0,
+@@ -346,605 +101,44 @@ impl Login {
+             ui.h,
+             color::with_alpha(theme.bg_solid, 0.65 * modal_t),
+         );
+-        ui.rounded(
+-            x + 2.0,
+-            y + 8.0,
+-            w,
+-            h,
+-            26.0,
+-            color::hex(0x000000, (90.0 * modal_t) as u8),
+-        );
+         ui.rounded(x, y, w, h, 26.0, theme.bg_solid);
+         ui.border(x, y, w, h, 26.0, login_border());
+ 
+-        let (title, subtitle): (&str, String) = if self.providers {
+-            ("Accounts", "Choose how you want to play".into())
+-        } else if self.choosing {
+-            let line = if let Some(name) = &self.profile {
+-                if self.signed_in {
+-                    format!("Signed in as {name} with {}", self.provider_name())
+-                } else {
+-                    format!("Sign in required for {name}")
+-                }
+-            } else {
+-                "Choose an account or play offline".into()
+-            };
+-            ("Your accounts", line)
+-        } else if self.ely {
+-            (
+-                "Ely.by account",
+-                "Credentials go only to authserver.ely.by".into(),
+-            )
+-        } else if self.offline {
+-            (
+-                "Offline profile",
+-                "A local name for single-player and LAN".into(),
+-            )
+-        } else {
+-            let line = if let Some(name) = &self.profile {
+-                if self.signed_in {
+-                    format!("Already signed in as {name}")
+-                } else {
+-                    format!("Sign in to use {name}")
+-                }
+-            } else {
+-                "Xbox and Minecraft profile".into()
+-            };
+-            ("Microsoft account", line)
++        let subtitle = match &self.profile {
++            Some(name) => format!("Active session from Blaze Launcher: {name}"),
++            None => "No active launcher session".into(),
+         };
+-        if !self.providers {
+-            let back = [x + 16.0, y + 16.0, 38.0, 38.0];
+-            ui.rounded(
+-                back[0],
+-                back[1],
+-                back[2],
+-                back[3],
+-                12.0,
+-                login_surface_high(),
+-            );
+-            ui.icon(
+-                Icon::ArrowLeft,
+-                back[0] + 10.0,
+-                back[1] + 10.0,
+-                18.0,
+-                login_text(),
+-            );
+-            targets.push((back, Action::Account));
+-        }
+-        let close = [x + w - 54.0, y + 16.0, 38.0, 38.0];
+-        ui.rounded(
+-            close[0],
+-            close[1],
+-            close[2],
+-            close[3],
+-            12.0,
+-            login_surface_high(),
+-        );
+-        ui.icon(
+-            Icon::Close,
+-            close[0] + 11.0,
+-            close[1] + 11.0,
+-            16.0,
+-            login_text(),
+-        );
+-        targets.push((close, Action::CloseLogin));
+-        let text_x = if self.providers { x + 22.0 } else { x + 64.0 };
+-        ui.text(Face::SemiBold, 20.0, text_x, y + 14.0, login_text(), title);
+-        let fitted = ui.fit_text(
+-            Face::Regular,
+-            12.5,
+-            &subtitle,
+-            (x + w - 70.0 - text_x).max(70.0),
+-        );
+-        ui.text(
+-            Face::Regular,
+-            12.5,
+-            text_x,
+-            y + 42.0,
+-            login_muted(),
+-            &fitted,
+-        );
+-        ui.rounded(x + 20.0, y + 72.0, w - 40.0, 1.0, 0.5, login_border());
+-
+-        let content_y = y + 88.0;
+-        let content_h = (y + h - 20.0 - content_y).max(60.0);
+-        let footer_y = y + h - 58.0;
+-        let gap = 8.0;
+-        let field_h = ((content_h - 116.0) / 3.0 - gap).clamp(42.0, 56.0);
+-
+-        if self.providers {
+-            let gap = 12.0;
+-            let cw = ((w - 40.0 - gap) * 0.5).max(120.0);
+-            let ch = ((content_h - 54.0 - gap) * 0.5).clamp(84.0, 96.0);
+-            for (i, (label, note, action, mark)) in [
+-                (
+-                    "Microsoft",
+-                    "Xbox and Minecraft",
+-                    Action::MicrosoftAccount,
+-                    "M",
+-                ),
+-                ("Ely.by", "Alternative auth", Action::ElySignIn, "E"),
+-                (
+-                    "Offline",
+-                    "Play without signing in",
+-                    Action::OfflineAccount,
+-                    "O",
+-                ),
+-                (
+-                    "Saved accounts",
+-                    "Switch account",
+-                    Action::SavedAccounts,
+-                    "S",
+-                ),
+-            ]
+-            .into_iter()
+-            .enumerate()
+-            {
+-                let cx = x + 20.0 + (i % 2) as f32 * (cw + gap);
+-                let cy = content_y + (i / 2) as f32 * (ch + gap);
+-                ui.rounded(cx, cy, cw, ch, 16.0, login_surface());
+-                ui.border(cx, cy, cw, ch, 16.0, login_border());
+-                ui.rounded(cx + 14.0, cy + 14.0, 34.0, 34.0, 11.0, login_accent_soft());
+-                ui.text(
+-                    Face::SemiBold,
+-                    15.0,
+-                    cx + 23.0,
+-                    cy + 21.0,
+-                    login_accent(),
+-                    mark,
+-                );
+-                ui.text(
+-                    Face::SemiBold,
+-                    15.0,
+-                    cx + 14.0,
+-                    cy + 50.0,
+-                    login_text(),
+-                    label,
+-                );
+-                let note = ui.fit_text(Face::Regular, 11.5, note, cw - 28.0);
+-                ui.text(
+-                    Face::Regular,
+-                    11.5,
+-                    cx + 14.0,
+-                    cy + 68.0,
+-                    login_muted(),
+-                    &note,
+-                );
+-                targets.push(([cx, cy, cw, ch], action));
+-            }
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y, w - 40.0, 42.0],
+-                "Close",
+-                Action::CloseLogin,
+-                false,
+-            );
+-            return;
+-        }
+-
+-        if self.choosing {
+-            let row_h = ((footer_y - content_y - 26.0) / 4.0).clamp(36.0, 56.0);
+-            let offline_current = self.profile.is_none();
+-            let offline_label = if offline_name.trim().is_empty() {
+-                "Offline player"
+-            } else {
+-                offline_name
+-            };
+-            self.account_row(
+-                ui,
+-                targets,
+-                [x + 20.0, content_y, w - 40.0, row_h],
+-                offline_label,
+-                "Offline profile",
+-                offline_current,
+-                Action::SelectOffline,
+-            );
+-            for (row, (index, account)) in self
+-                .saved_accounts
+-                .iter()
+-                .enumerate()
+-                .skip(self.account_offset)
+-                .take(3)
+-                .enumerate()
+-            {
+-                let detail = if account.provider == account::Provider::Ely {
+-                    "Ely.by"
+-                } else {
+-                    "Microsoft"
+-                };
+-                let current = self.profile.as_deref() == Some(account.name.as_str());
+-                let cy = content_y + (row + 1) as f32 * (row_h + 6.0);
+-                self.account_row(
+-                    ui,
+-                    targets,
+-                    [x + 20.0, cy, w - 40.0, row_h],
+-                    &account.name,
+-                    detail,
+-                    current,
+-                    Action::SelectAccount(index),
+-                );
+-            }
+-            let nav = 36.0;
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y, nav, 38.0],
+-                "<",
+-                Action::SavedPage(false),
+-                false,
+-            );
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0 + nav + 6.0, footer_y, nav, 38.0],
+-                ">",
+-                Action::SavedPage(true),
+-                false,
+-            );
+-            let after = x + 20.0 + 2.0 * (nav + 6.0) + 8.0;
+-            let rest = x + w - 20.0 - after;
+-            let add_w = (rest - 8.0) * 0.5;
+-            button(
+-                ui,
+-                targets,
+-                [after, footer_y, add_w, 38.0],
+-                "Add account",
+-                Action::AddAccount,
+-                false,
+-            );
+-            button(
+-                ui,
+-                targets,
+-                [after + add_w + 8.0, footer_y, rest - add_w - 8.0, 38.0],
+-                "Done",
+-                Action::CloseLogin,
+-                true,
+-            );
+-            return;
+-        }
+-
+-        if self.ely {
+-            for (i, (name, label, value, secret, placeholder)) in [
+-                (
+-                    "ely_username",
+-                    "Username or email",
+-                    self.username.as_str(),
+-                    false,
+-                    "Username or email",
+-                ),
+-                (
+-                    "ely_password",
+-                    "Password",
+-                    self.password.as_str(),
+-                    true,
+-                    "Password",
+-                ),
+-                (
+-                    "ely_otp",
+-                    "Two-factor code",
+-                    self.otp.as_str(),
+-                    true,
+-                    "Optional",
+-                ),
+-            ]
+-            .into_iter()
+-            .enumerate()
+-            {
+-                let fy = content_y + i as f32 * (field_h + gap);
+-                let display = if secret {
+-                    "*".repeat(value.chars().count().min(40))
+-                } else {
+-                    value.to_owned()
+-                };
+-                let focused = editing == Some(name);
+-                ui.text_field(
+-                    x + 20.0,
+-                    fy,
+-                    w - 40.0,
+-                    field_h,
+-                    label,
+-                    &display,
+-                    placeholder,
+-                    focused,
+-                );
+-                targets.push(([x + 20.0, fy, w - 40.0, field_h], Action::Field(name)));
+-            }
+-            if editing.is_some_and(|field| field.starts_with("ely_")) {
+-                button(
+-                    ui,
+-                    targets,
+-                    [x + 20.0, footer_y, w - 40.0, 42.0],
+-                    "Done editing",
+-                    Action::FinishNameEdit,
+-                    true,
+-                );
+-                return;
+-            }
+-            let note_y = content_y + 3.0 * (field_h + gap) + 4.0;
+-            if !self.message.is_empty() {
+-                paragraph(
+-                    ui,
+-                    x + 20.0,
+-                    note_y,
+-                    w - 40.0,
+-                    &self.message,
+-                    login_text(),
+-                    2,
+-                );
+-            }
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y, w - 40.0, 42.0],
+-                if self.pending() {
+-                    "Signing in..."
+-                } else {
+-                    "Sign in to Ely.by"
+-                },
+-                Action::SubmitEly,
+-                true,
+-            );
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y - 48.0, w - 40.0, 36.0],
+-                "Back to accounts",
+-                Action::Account,
+-                false,
+-            );
+-            return;
+-        }
+-
+-        if self.offline {
+-            let focused = editing == Some("name");
+-            ui.text_field(
+-                x + 20.0,
+-                content_y,
+-                w - 40.0,
+-                58.0,
+-                "Player name",
+-                offline_name,
+-                "Enter a name",
+-                focused,
+-            );
+-            targets.push(([x + 20.0, content_y, w - 40.0, 58.0], Action::Field("name")));
+-            let count = format!("{}/16 characters", offline_name.chars().count());
+-            ui.text(
+-                Face::Regular,
+-                11.5,
+-                x + 20.0,
+-                content_y + 66.0,
+-                login_muted(),
+-                &count,
+-            );
+-            ui.hint_line(
+-                x + 20.0,
+-                content_y + 88.0,
+-                w - 40.0,
+-                "This name is local; it is not an online identity.",
+-                login_muted(),
+-            );
+-            if focused {
+-                button(
+-                    ui,
+-                    targets,
+-                    [x + 20.0, footer_y, w - 40.0, 42.0],
+-                    "Done editing",
+-                    Action::FinishNameEdit,
+-                    true,
+-                );
+-                return;
+-            }
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y, w - 40.0, 42.0],
+-                "Use offline account",
+-                Action::SelectOffline,
+-                true,
+-            );
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, footer_y - 48.0, w - 40.0, 36.0],
+-                "Back to accounts",
+-                Action::Account,
+-                false,
+-            );
+-            return;
+-        }
+-
+-        // Microsoft
+-        let card_h = 84.0;
+-        let card = [x + 20.0, content_y, w - 40.0, card_h];
+-        ui.rounded(card[0], card[1], card[2], card[3], 16.0, login_surface());
+-        ui.border(card[0], card[1], card[2], card[3], 16.0, login_border());
+-        let display_name = self.profile.as_deref().unwrap_or(offline_name);
+-        ui.avatar_head_2d(card[0] + 14.0, card[1] + 14.0, 56.0, display_name);
+-        let name_x = card[0] + 84.0;
+-        let fitted = ui.fit_text(Face::SemiBold, 17.0, display_name, card[2] - 100.0);
+         ui.text(
+             Face::SemiBold,
+-            17.0,
+-            name_x,
+-            card[1] + 14.0,
++            20.0,
++            x + 24.0,
++            y + 24.0,
+             login_text(),
+-            &fitted,
++            "Account Managed by Blaze Launcher",
+         );
+-        let status = self.status(offline_name);
+-        let fitted = ui.fit_text(Face::Regular, 12.5, &status, card[2] - 100.0);
+         ui.text(
+             Face::Regular,
+-            12.5,
+-            name_x,
+-            card[1] + 40.0,
+-            if self.signed_in {
+-                login_accent()
+-            } else {
+-                login_muted()
+-            },
+-            &fitted,
++            13.0,
++            x + 24.0,
++            y + 56.0,
++            login_muted(),
++            &subtitle,
+         );
+         ui.text(
+             Face::Regular,
+-            11.0,
+-            name_x,
+-            card[1] + 60.0,
++            12.5,
++            x + 24.0,
++            y + 92.0,
+             login_muted(),
+-            if self.signed_in {
+-                "Microsoft · Connected"
+-            } else {
+-                "Microsoft · Not connected"
+-            },
+-        );
+-
+-        let mut row_y = content_y + card_h + 12.0;
+-        if let Some(SignInState::Code(code)) = &self.state {
+-            let code_h = 84.0;
+-            ui.rounded(
+-                x + 20.0,
+-                row_y,
+-                w - 40.0,
+-                code_h,
+-                14.0,
+-                login_surface_high(),
+-            );
+-            ui.border(x + 20.0, row_y, w - 40.0, code_h, 14.0, login_border());
+-            ui.text(
+-                Face::Regular,
+-                11.0,
+-                x + 34.0,
+-                row_y + 12.0,
+-                login_muted(),
+-                "SIGN-IN CODE",
+-            );
+-            ui.text(
+-                Face::SemiBold,
+-                28.0,
+-                x + 34.0,
+-                row_y + 30.0,
+-                login_text(),
+-                &code.user_code,
+-            );
+-            row_y += code_h + 10.0;
+-            let half = (w - 52.0) * 0.5;
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, row_y, half, 38.0],
+-                "Copy code",
+-                Action::CopyLoginCode,
+-                false,
+-            );
+-            button(
+-                ui,
+-                targets,
+-                [x + 32.0 + half, row_y, half, 38.0],
+-                "Open browser",
+-                Action::LoginLink,
+-                false,
+-            );
+-            row_y += 46.0;
+-        } else {
+-            let text = if self.signed_in {
+-                "Your account is saved on this device. Sessions renew automatically."
+-            } else {
+-                "You sign in inside Microsoft's browser; this app never sees your password."
+-            };
+-            row_y = paragraph(ui, x + 20.0, row_y, w - 40.0, text, login_muted(), 2) + 8.0;
+-        }
+-        let message = if matches!(&self.state, Some(SignInState::Starting)) {
+-            "Requesting a sign-in code..."
+-        } else {
+-            self.message.as_str()
+-        };
+-        if !message.is_empty() {
+-            row_y = paragraph(ui, x + 20.0, row_y, w - 40.0, message, login_text(), 2) + 4.0;
+-        }
+-        if self.message.contains("not approved by Mojang") && row_y + 30.0 < footer_y - 54.0 {
+-            button(
+-                ui,
+-                targets,
+-                [x + 20.0, row_y, w - 40.0, 30.0],
+-                "Request Minecraft API approval",
+-                Action::ReviewApp,
+-                false,
+-            );
+-        }
+-        let (label, action) = if matches!(&self.state, Some(SignInState::Code(_))) {
+-            ("Copy code and open browser", Action::LoginLink)
+-        } else if self.pending() {
+-            ("Restart browser sign-in", Action::SignIn)
+-        } else if self.signed_in {
+-            ("Switch Microsoft account", Action::SignIn)
+-        } else {
+-            ("Sign in with browser", Action::SignIn)
+-        };
+-        button(
+-            ui,
+-            targets,
+-            [x + 20.0, footer_y, w - 40.0, 42.0],
+-            label,
+-            action,
+-            true,
+-        );
+-        let half = (w - 52.0) * 0.5;
+-        button(
+-            ui,
+-            targets,
+-            [x + 20.0, footer_y - 48.0, half, 38.0],
+-            "Device code",
+-            Action::DeviceSignIn,
+-            false,
++            "In-engine Microsoft login, token refresh, and account switching are disabled.",
+         );
+-        let (second_label, second_action) = if self.pending() {
+-            ("Cancel", Action::CancelLogin)
+-        } else if self.profile.is_some() {
+-            ("Sign out", Action::SignOut)
+-        } else {
+-            ("Back", Action::Account)
+-        };
+         button(
+             ui,
+             targets,
+-            [x + 32.0 + half, footer_y - 48.0, half, 38.0],
+-            second_label,
+-            second_action,
++            [x + 24.0, y + h - 58.0, w - 48.0, 38.0],
++            "Close",
++            Action::CloseLogin,
+             false,
+         );
+     }
+ }
+-
+-impl Drop for Login {
+-    fn drop(&mut self) {
+-        if let Some(task) = &self.task {
+-            task.cancel();
+-        }
+-    }
+-}
+-
+-fn paragraph(ui: &mut Ui, x: f32, y: f32, w: f32, text: &str, tone: u32, max_lines: usize) -> f32 {
+-    let limit = (w / 6.8).max(16.0) as usize;
+-    let mut line = String::new();
+-    let mut row = 0usize;
+-    for word in text.split_whitespace() {
+-        if !line.is_empty() && line.len() + word.len() + 1 > limit {
+-            ui.text(Face::Regular, 12.5, x, y + row as f32 * 18.0, tone, &line);
+-            row += 1;
+-            line.clear();
+-            if row >= max_lines {
+-                break;
+-            }
+-        }
+-        if !line.is_empty() {
+-            line.push(' ');
+-        }
+-        line.push_str(word);
+-    }
+-    if row < max_lines && !line.is_empty() {
+-        ui.text(Face::Regular, 12.5, x, y + row as f32 * 18.0, tone, &line);
+-        row += 1;
+-    }
+-    y + row as f32 * 18.0
+-}
+diff --git a/crates/horizon-client/src/android/platform.rs b/crates/horizon-client/src/android/platform.rs
+index 6c11dcba04..e88933fda9 100644
+--- a/crates/horizon-client/src/android/platform.rs
++++ b/crates/horizon-client/src/android/platform.rs
+@@ -533,106 +533,9 @@ pub fn field_at(p: [f32; 2]) -> bool {
+     })
+ }
+ 
+-/// Only Microsoft's device-code verification pages can be opened by the login panel.
+-pub fn open_login_url(url: &str) -> Result<(), String> {
+-    let fixed = [
+-        "https://www.microsoft.com/link",
+-        "https://microsoft.com/link",
+-        "https://microsoft.com/devicelogin",
+-        "https://www.microsoft.com/devicelogin",
+-        "https://aka.ms/mce-reviewappid",
+-    ]
+-    .contains(&url);
+-    let verification = url::Url::parse(url).is_ok_and(|u| {
+-        let pairs = u.query_pairs().collect::<Vec<_>>();
+-        u.scheme() == "https"
+-            && matches!(u.host_str(), Some("microsoft.com" | "www.microsoft.com"))
+-            && matches!(u.path(), "/link" | "/devicelogin")
+-            && u.username().is_empty()
+-            && u.password().is_none()
+-            && u.port_or_known_default() == Some(443)
+-            && u.fragment().is_none()
+-            && pairs.len() == 1
+-            && pairs[0].0 == "otc"
+-            && pairs[0].1.len() <= 32
+-            && pairs[0]
+-                .1
+-                .chars()
+-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+-    });
+-    let authorize = url::Url::parse(url).is_ok_and(|u| {
+-        u.scheme() == "https"
+-            && u.host_str() == Some("login.microsoftonline.com")
+-            && u.port_or_known_default() == Some(443)
+-            && u.username().is_empty()
+-            && u.password().is_none()
+-            && u.path() == "/consumers/oauth2/v2.0/authorize"
+-            && u.fragment().is_none()
+-    });
+-    if !fixed && !authorize && !verification {
+-        return Err("Unexpected Microsoft sign-in URL.".into());
+-    }
+-    crate::APP.with(|slot| {
+-        let app = slot.borrow();
+-        let app = app.as_ref().ok_or("Android activity unavailable")?;
+-        let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+-        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+-        env.with_local_frame(16, |env| -> jni::errors::Result<()> {
+-            let url = JObject::from(env.new_string(url)?);
+-            let uri = env
+-                .call_static_method(
+-                    "android/net/Uri",
+-                    "parse",
+-                    "(Ljava/lang/String;)Landroid/net/Uri;",
+-                    &[JValue::Object(&url)],
+-                )?
+-                .l()?;
+-            let action = JObject::from(env.new_string("android.intent.action.VIEW")?);
+-            let intent = env.new_object(
+-                "android/content/Intent",
+-                "(Ljava/lang/String;Landroid/net/Uri;)V",
+-                &[JValue::Object(&action), JValue::Object(&uri)],
+-            )?;
+-            // The documented Custom Tabs intent protocol uses a nullable session
+-            // binder. Unsupported browsers fall back to ordinary ACTION_VIEW.
+-            let extras = env.new_object("android/os/Bundle", "()V", &[])?;
+-            let session =
+-                JObject::from(env.new_string("android.support.customtabs.extra.SESSION")?);
+-            let null = JObject::null();
+-            env.call_method(
+-                &extras,
+-                "putBinder",
+-                "(Ljava/lang/String;Landroid/os/IBinder;)V",
+-                &[JValue::Object(&session), JValue::Object(&null)],
+-            )?;
+-            env.call_method(
+-                &intent,
+-                "putExtras",
+-                "(Landroid/os/Bundle;)Landroid/content/Intent;",
+-                &[JValue::Object(&extras)],
+-            )?;
+-            let title =
+-                JObject::from(env.new_string("android.support.customtabs.extra.TITLE_VISIBILITY")?);
+-            env.call_method(
+-                &intent,
+-                "putExtra",
+-                "(Ljava/lang/String;I)Landroid/content/Intent;",
+-                &[JValue::Object(&title), JValue::Int(1)],
+-            )?;
+-            let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+-            env.call_method(
+-                &activity,
+-                "startActivity",
+-                "(Landroid/content/Intent;)V",
+-                &[JValue::Object(&intent)],
+-            )?;
+-            Ok(())
+-        })
+-        .map_err(|e| {
+-            let _ = env.exception_clear();
+-            e.to_string()
+-        })
+-    })
++/// Disabled in Blaze Launcher builds: Microsoft login and external auth URLs are handled by the launcher.
++pub fn open_login_url(_url: &str) -> Result<(), String> {
++    Err("In-engine login is disabled; sign in through Blaze Launcher.".into())
+ }
+ 
+ /// Poll only at a low rate; Android sends no NativeActivity disconnect callback.
+diff --git a/crates/horizon-client/src/android/wardrobe.rs b/crates/horizon-client/src/android/wardrobe.rs
+index 4d403ba982..fb069affdd 100644
+--- a/crates/horizon-client/src/android/wardrobe.rs
++++ b/crates/horizon-client/src/android/wardrobe.rs
+@@ -1,10 +1,7 @@
+-//! Thin native view over the shared account and wardrobe APIs.
+-use super::{
+-    login::Login,
+-    pages::{Action, button},
+-};
++//! Thin native view over the shared wardrobe APIs (cloud/account sync disabled in Blaze builds).
++use super::pages::{Action, button};
+ use crate::{
+-    account::{Accounts, Provider},
++    account::Provider,
+     skins::{
+         self, Model, cloud,
+         library::{Kind, Library},
+@@ -140,26 +137,23 @@ impl Wardrobe {
+             let _ = tx.send(result);
+         });
+     }
+-    pub fn open(&mut self, offline: &str, client_id: &str) {
++    pub fn open(&mut self, offline: &str, _client_id: &str) {
+         self.ensure_default_skin();
+-        let account = Accounts::load().selected().cloned();
+-        let name = account
++        let active = horizon_client::auth::current();
++        let name = active
+             .as_ref()
+-            .map(|a| a.name.clone())
++            .map(|s| s.name.clone())
+             .unwrap_or_else(|| offline.to_owned());
+-        let key = account
++        let key = active
+             .as_ref()
+-            .map(|a| a.key())
++            .map(|s| format!("blaze:{:032x}", s.uuid))
+             .unwrap_or_else(|| format!("offline:{}", offline.to_ascii_lowercase()));
+         if self.key != key {
+-            // A previous provider's in-flight result must not delay this profile's cloud load.
+             self.worker = None;
+             self.fingers.clear();
+             self.key = key.clone();
+-            self.provider = account.map(|a| a.provider);
++            self.provider = None;
+             self.cache = Default::default();
+-            // The last head is on disk: show it on the first frame, then let
+-            // the local selection or cloud sync replace it.
+             self.head = self.read_head(&key);
+         }
+         self.name = name;
+@@ -167,9 +161,6 @@ impl Wardrobe {
+             skin_head::remember(&self.name, head);
+         }
+         self.reload();
+-        if self.provider.is_some() && self.worker.is_none() {
+-            self.cloud(client_id, None);
+-        }
+         self.preview();
+     }
+     pub fn reload(&mut self) {
+@@ -312,83 +303,12 @@ impl Wardrobe {
+         selection.hide_cape = !selection.hide_cape;
+         self.save();
+     }
+-    pub fn cloud(&mut self, client_id: &str, action: Option<CloudAction>) {
+-        if self.worker.is_some() {
+-            return;
+-        }
+-        let Some(provider) = self.provider else {
+-            self.note = "Offline appearance is local to this installation.".into();
+-            return;
+-        };
+-        if provider == Provider::Ely && action.is_some() {
+-            self.note =
+-                "Ely.by cloud skins are managed at ely.by. Custom capes can be applied locally."
+-                    .into();
+-            if let Err(error) = crate::platform::open_login_url("https://ely.by/skins") {
+-                self.note = error;
+-            }
+-            return;
+-        }
+-        let key = self.key.clone();
+-        let root = self.root.clone();
+-        let id = client_id.to_owned();
+-        let selection = self
+-            .library
+-            .selections
+-            .get(&key)
+-            .cloned()
+-            .unwrap_or_default();
+-        let cape = match &action {
+-            Some(CloudAction::Cape(index)) => {
+-                self.cache.snapshot.capes.get(*index).map(|c| c.id.clone())
+-            }
+-            _ => None,
+-        };
+-        if matches!(action, Some(CloudAction::Upload)) && selection.skin.is_none() {
+-            self.note = "Select a local skin before uploading to your Microsoft profile.".into();
+-            return;
+-        }
+-        if matches!(action, Some(CloudAction::Cape(_))) && cape.is_none() {
+-            return;
+-        }
+-        let (sender, receiver) = mpsc::channel();
+-        self.worker = Some(receiver);
+-        self.note = "Contacting account service...".into();
+-        std::thread::spawn(move || {
+-            let result = (|| {
+-                let (account, secrets) = Login::session(&id)?
+-                    .ok_or("Sign in before synchronizing your cloud appearance.")?;
+-                if account.key() != key {
+-                    return Err("The selected account changed. Open the gallery again.".into());
+-                }
+-                match action {
+-                    Some(CloudAction::Upload) => {
+-                        let path = Library::image(
+-                            &root,
+-                            selection.skin.as_deref().ok_or("Select a skin first.")?,
+-                        )?;
+-                        cloud::upload_skin(
+-                            &account,
+-                            &secrets,
+-                            &skins::read_file(&path)?,
+-                            selection.model,
+-                        )?;
+-                    }
+-                    Some(CloudAction::Cape(_)) => {
+-                        cloud::activate_cape(&account, &secrets, cape.as_deref())?
+-                    }
+-                    None => {}
+-                }
+-                cloud::fetch(&account, &secrets, &root)
+-                    .map(|cache| (cache, matches!(action, Some(CloudAction::Cape(_)))))
+-            })();
+-            let _ = sender.send((key, result));
+-        });
++    pub fn cloud(&mut self, _client_id: &str, _action: Option<CloudAction>) {
++        self.note = "Cloud skin sync is disabled; account sessions are managed by Blaze Launcher.".into();
+     }
+     pub fn prepare_game(&mut self, offline: &str, game: &Path) -> Result<(), String> {
+-        let key = Accounts::load()
+-            .selected()
+-            .map(|a| a.key())
++        let key = horizon_client::auth::current()
++            .map(|s| format!("blaze:{:032x}", s.uuid))
+             .unwrap_or_else(|| format!("offline:{}", offline.to_ascii_lowercase()));
+         let cloud = if key == self.key {
+             self.cache
+@@ -1149,66 +1069,22 @@ impl Wardrobe {
+             row += 68.0;
+         }
+ 
+-        // Account & Reset Action Buttons
+-        if self.provider.is_none() {
+-            if row >= list_start - 4.0 && row + 34.0 <= bottom + 4.0 {
+-                button(
+-                    ui,
+-                    targets,
+-                    [lx, row, lw, 34.0],
+-                    if self.capes {
+-                        "Clear Local Cape Override"
+-                    } else {
+-                        "Reset to Default Appearance Locally"
+-                    },
+-                    Action::WardrobeUseCloud,
+-                    false,
+-                );
+-            }
+-            row += 42.0;
+-        } else {
+-            let half_w = (lw - 8.0) * 0.5;
+-            if row >= list_start - 4.0 && row + 34.0 <= bottom + 4.0 {
+-                button(
+-                    ui,
+-                    targets,
+-                    [lx, row, half_w, 34.0],
+-                    "Use Cloud Appearance",
+-                    Action::WardrobeUseCloud,
+-                    false,
+-                );
+-                button(
+-                    ui,
+-                    targets,
+-                    [lx + half_w + 8.0, row, half_w, 34.0],
+-                    if self.worker.is_some() {
+-                        "Syncing Cloud..."
+-                    } else {
+-                        "Refresh Cloud Profile"
+-                    },
+-                    Action::WardrobeCloud,
+-                    false,
+-                );
+-            }
+-            row += 42.0;
+-            if !self.capes {
+-                if row >= list_start - 4.0 && row + 34.0 <= bottom + 4.0 {
+-                    button(
+-                        ui,
+-                        targets,
+-                        [lx, row, lw, 34.0],
+-                        if self.provider == Some(Provider::Microsoft) {
+-                            "Upload Selected Skin to Microsoft Profile"
+-                        } else {
+-                            "Manage Ely.by Cloud Skin on Website"
+-                        },
+-                        Action::WardrobeUpload,
+-                        false,
+-                    );
+-                }
+-                row += 42.0;
+-            }
++        // Local Appearance Reset Action Button (cloud sync/upload disabled in Blaze builds)
++        if row >= list_start - 4.0 && row + 34.0 <= bottom + 4.0 {
++            button(
++                ui,
++                targets,
++                [lx, row, lw, 34.0],
++                if self.capes {
++                    "Clear Local Cape Override"
++                } else {
++                    "Reset to Default Appearance Locally"
++                },
++                Action::WardrobeUseCloud,
++                false,
++            );
+         }
++        row += 42.0;
+ 
+         self.view = [list_start, bottom, (row + scroll + 38.0 - bottom).max(0.0)];
+ 
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 481c023839..80c98a0bfc 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -304,6 +304,8 @@ fn android_main(app: AndroidApp) {
+     // this process cached after Quit, making the next launch fail. run_app's
+     // exiting callback has completed the world save before we get here.
+     drop(launcher);
++    horizon_client::auth::clear_current();
++    horizon_client::auth::clear_pending_android();
+     diagnostics::finish();
+     platform::finish();
+     APP.with(|slot| *slot.borrow_mut() = None);
+diff --git a/launcher/src/account.rs b/launcher/src/account.rs
+index 2bbec5538c..02bb052009 100644
+--- a/launcher/src/account.rs
++++ b/launcher/src/account.rs
+@@ -43,14 +43,22 @@ const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
+ /// The Minecraft token is renewed when it has less than this left.
+ const RENEW_BEFORE: u64 = 3600;
+ 
++/// In Blaze Launcher Android builds, no embedded or runtime Azure app client ID is active.
++#[cfg(target_os = "android")]
++pub fn client_id() -> Option<String> {
++    None
++}
++
+ /// The configured Azure app, if any: the run-time variable wins over the build-time one, and an
+ /// empty value means none.
++#[cfg(not(target_os = "android"))]
+ pub fn client_id() -> Option<String> {
+     configured_client_id(
+         std::env::var("HORIZON_MSA_CLIENT_ID").ok(),
+         option_env!("HORIZON_MSA_CLIENT_ID"),
+     )
+ }
++#[cfg(not(target_os = "android"))]
+ fn configured_client_id(runtime: Option<String>, compiled: Option<&str>) -> Option<String> {
+     runtime
+         .or_else(|| compiled.map(str::to_owned))
+@@ -59,6 +67,7 @@ fn configured_client_id(runtime: Option<String>, compiled: Option<&str>) -> Opti
+ }
+ 
+ /// Where the requests go: the real services, or a mock in tests.
++#[cfg(not(target_os = "android"))]
+ #[derive(Clone, Debug)]
+ pub struct Endpoints {
+     /// The OAuth 2.0 v2 endpoints for personal accounts (`…/devicecode`, `…/token`).
+@@ -69,6 +78,7 @@ pub struct Endpoints {
+     pub minecraft: String,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ impl Endpoints {
+     pub fn live() -> Self {
+         // Development builds only: `HORIZON_MSA_MICROSOFT_ENDPOINT` points the device-code and
+@@ -181,9 +191,11 @@ fn now() -> u64 {
+ }
+ 
+ /// Older public Live registrations use a different Microsoft token endpoint.
++#[cfg(not(target_os = "android"))]
+ pub fn legacy_client(client_id: &str) -> bool {
+     client_id.len() == 16 && client_id.bytes().all(|c| c.is_ascii_hexdigit())
+ }
++#[cfg(not(target_os = "android"))]
+ fn microsoft_endpoint(ep: &Endpoints, client_id: &str, token: bool) -> String {
+     if legacy_client(client_id)
+         && ep.microsoft == "https://login.microsoftonline.com/consumers/oauth2/v2.0"
+@@ -204,6 +216,7 @@ fn microsoft_endpoint(ep: &Endpoints, client_id: &str, token: bool) -> String {
+         )
+     }
+ }
++#[cfg(not(target_os = "android"))]
+ fn microsoft_scope(client_id: &str) -> &'static str {
+     if legacy_client(client_id) {
+         "service::user.auth.xboxlive.com::MBI_SSL"
+@@ -215,6 +228,7 @@ fn microsoft_scope(client_id: &str) -> &'static str {
+ // ----- The device-code flow ----------------------------------------------------------------------
+ 
+ /// What the player types at the verification page.
++#[cfg(not(target_os = "android"))]
+ #[derive(Clone, PartialEq)]
+ pub struct DeviceCode {
+     pub user_code: String,
+@@ -225,6 +239,7 @@ pub struct DeviceCode {
+     cookies: String,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ impl std::fmt::Debug for DeviceCode {
+     // The device code can be traded for tokens once the player approves: never shown.
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+@@ -236,18 +251,21 @@ impl std::fmt::Debug for DeviceCode {
+ }
+ 
+ /// The Microsoft tokens; the access token only lasts for the Xbox step.
++#[cfg(not(target_os = "android"))]
+ pub struct MsTokens {
+     legacy: bool,
+     access: String,
+     refresh: String,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ impl std::fmt::Debug for MsTokens {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.write_str("MsTokens(<hidden>)")
+     }
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub enum Poll {
+     Pending,
+     /// The server asked to poll less often: wait 5 s more.
+@@ -256,6 +274,7 @@ pub enum Poll {
+     Done(MsTokens),
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String> {
+     let mut fields = vec![
+         ("client_id", client_id),
+@@ -305,6 +324,7 @@ pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String
+ }
+ 
+ /// The OAuth error codes as messages for the player.
++#[cfg(not(target_os = "android"))]
+ fn oauth_error(v: &Value) -> String {
+     match v.get("error").and_then(Value::as_str) {
+         Some("authorization_declined") => "Sign-in was declined in the browser.".into(),
+@@ -320,6 +340,7 @@ fn oauth_error(v: &Value) -> String {
+ }
+ 
+ /// One poll of the token endpoint while the player signs in.
++#[cfg(not(target_os = "android"))]
+ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
+     let body = Body::Form(vec![
+         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+@@ -360,6 +381,7 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll,
+     })
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn ms_tokens(status: u16, v: &Value) -> Result<MsTokens, String> {
+     match (
+         status,
+@@ -377,6 +399,7 @@ fn ms_tokens(status: u16, v: &Value) -> Result<MsTokens, String> {
+ 
+ /// Wait for the player to finish in the browser, polling as asked, until the code expires or
+ /// `cancelled` says stop.
++#[cfg(not(target_os = "android"))]
+ pub fn wait_for_sign_in(
+     ep: &Endpoints,
+     client_id: &str,
+@@ -413,6 +436,7 @@ pub fn wait_for_sign_in(
+     }
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens, String> {
+     let (status, v) = send(
+         request_to("POST", &microsoft_endpoint(ep, client_id, true)),
+@@ -433,6 +457,7 @@ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens
+ // ----- Xbox Live, XSTS, Minecraft ----------------------------------------------------------------
+ 
+ /// The XSTS `XErr` codes, as the official launcher explains them.
++#[cfg(not(target_os = "android"))]
+ fn xsts_error(code: u64) -> String {
+     match code {
+         2148916233 => "This Microsoft account has no Xbox profile yet. Sign in once at xbox.com to create one, then try again.".into(),
+@@ -444,12 +469,14 @@ fn xsts_error(code: u64) -> String {
+ }
+ 
+ /// The Minecraft access token from the Microsoft one, through Xbox Live and XSTS.
++#[cfg(not(target_os = "android"))]
+ struct Minecraft {
+     token: String,
+     expires_at: u64,
+     xuid: Option<String>,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn minecraft_login(
+     ep: &Endpoints,
+     ms_access: &str,
+@@ -507,6 +534,7 @@ fn minecraft_login(
+ /// joining an online-mode server answers "Profile not found" (found and diagnosed by
+ /// martipops). `login_with_xbox` stays the fallback, so a sign-in that worked before still does
+ /// when the other refuses.
++#[cfg(not(target_os = "android"))]
+ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), String> {
+     let lifetime = |v: &Value| v.get("expires_in").and_then(Value::as_u64).unwrap_or(86400);
+     let launcher = send(
+@@ -543,11 +571,13 @@ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), String
+     }
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn bearer(request: ureq::Request, token: &str) -> ureq::Request {
+     request.set("Authorization", &format!("Bearer {token}"))
+ }
+ 
+ /// Whether the account owns Minecraft: Java Edition (Game Pass included).
++#[cfg(not(target_os = "android"))]
+ fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, String> {
+     let (status, v) = send(
+         bearer(
+@@ -605,6 +635,7 @@ impl Account {
+ }
+ 
+ /// The profile; none when the account has none (it doesn't own the game, or never made one).
++#[cfg(not(target_os = "android"))]
+ fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
+     let (status, v) = send(
+         bearer(
+@@ -673,10 +704,12 @@ impl std::fmt::Debug for Secrets {
+ }
+ 
+ /// From Microsoft tokens to a ready account: Xbox, XSTS, Minecraft, ownership, profile.
++#[cfg(not(target_os = "android"))]
+ pub fn finish_sign_in(ep: &Endpoints, ms: MsTokens) -> Result<(Account, Secrets), String> {
+     finish_sign_in_with_progress(ep, ms, &|_| {})
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub fn finish_sign_in_with_progress(
+     ep: &Endpoints,
+     ms: MsTokens,
+@@ -699,6 +732,7 @@ impl Secrets {
+     pub(crate) fn game_token(&self) -> &str {
+         &self.minecraft_token
+     }
++    #[cfg(not(target_os = "android"))]
+     fn new(refresh_token: String, mc: Minecraft) -> Self {
+         Self {
+             provider: Provider::Microsoft,
+@@ -713,6 +747,7 @@ impl Secrets {
+ }
+ 
+ /// What asking the Minecraft services again found for one account.
++#[cfg(not(target_os = "android"))]
+ enum Check {
+     /// It owns the game: its profile as it is now (the name may have changed) and its tokens.
+     Owns(Account, Secrets),
+@@ -724,10 +759,12 @@ enum Check {
+ 
+ /// Asks whether `account` owns the game, with a Minecraft token renewed through the refresh token
+ /// first when it has less than an hour left. The secrets come back renewed whatever the answer.
++#[cfg(not(target_os = "android"))]
+ fn check(ep: &Endpoints, client_id: Option<&str>, account: &Account, secrets: Secrets) -> Check {
+     check_with(ep, client_id, account, secrets, false, &|_| {})
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn check_with(
+     ep: &Endpoints,
+     client_id: Option<&str>,
+@@ -814,7 +851,7 @@ fn check_with(
+ 
+ /// Android's session adapter preserves a still-valid token without a network request.
+ /// Renewal uses the same ownership/profile checks as the desktop launcher.
+-#[cfg(any(target_os = "android", test))]
++#[cfg(not(target_os = "android"))]
+ pub fn fresh(
+     ep: &Endpoints,
+     client_id: &str,
+@@ -1594,6 +1631,7 @@ pub fn take_unsaved() -> Option<String> {
+ /// the answer in the keychain. An account that gets no answer (no network) keeps its last one, so
+ /// being offline never blocks a player who passed before, while "doesn't own" blocks at once.
+ /// The caller saves `accounts` (renewed names and skins).
++#[cfg(not(target_os = "android"))]
+ pub fn launch(
+     ep: &Endpoints,
+     client_id: Option<&str>,
+@@ -1675,6 +1713,7 @@ pub fn launch(
+ /// (`backend::Settings::dev_offline`, `offline_without_owner`) no owner is no refusal: the game
+ /// starts offline, without a session and without an `owner`. Downloads never come through here:
+ /// `backend::download_for_owner` asks [`launch`] itself, so the option never downloads the game.
++#[cfg(not(target_os = "android"))]
+ pub fn launch_for_game(
+     ep: &Endpoints,
+     client_id: Option<&str>,
+@@ -1690,6 +1729,7 @@ pub fn launch_for_game(
+ 
+ /// Write the session for the game, readable by this user only, in a fresh file it deletes
+ /// when it reads it.
++#[cfg(not(target_os = "android"))]
+ pub fn write_session_file(
+     dir: &Path,
+     account: &Account,
+@@ -1735,6 +1775,7 @@ pub fn write_session_file(
+ 
+ /// Called under the account-operation lock, after the final profile is known. Rejected or
+ /// cancelled sign-ins must not save a credential, add another identity, or change selection.
++#[cfg(not(target_os = "android"))]
+ fn accept_sign_in(
+     accounts: &mut Accounts,
+     store: &dyn SecretStore,
+@@ -1768,6 +1809,7 @@ fn accept_sign_in(
+ }
+ 
+ /// Where a background sign-in is (the window and the MCP server show it).
++#[cfg(not(target_os = "android"))]
+ #[derive(Clone, Debug, PartialEq)]
+ pub enum SignInState {
+     Starting,
+@@ -1778,11 +1820,13 @@ pub enum SignInState {
+ }
+ 
+ /// A sign-in on its own thread, from the code to the saved account.
++#[cfg(not(target_os = "android"))]
+ pub struct SignIn {
+     state: std::sync::Arc<Mutex<SignInState>>,
+     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ impl SignIn {
+     pub fn start_ely(username: String, password: String, otp: String) -> Self {
+         use std::sync::atomic::Ordering;
+@@ -1870,6 +1914,7 @@ impl SignIn {
+ /// The owner gate for the game about to start, then the selected account's session in a file
+ /// for it: the file (none: offline) and why the account plays offline this time, if it does.
+ /// `offline_without_owner`: see [`launch_for_game`].
++#[cfg(not(target_os = "android"))]
+ pub fn session_for_game(
+     game_home: &Path,
+     offline_without_owner: bool,
+@@ -1890,6 +1935,7 @@ pub fn session_for_game(
+ /// plays changes for this launch only, so several games can play as several accounts at once
+ /// (#4952). What the services renewed (tokens, names, skins) is still kept; which account
+ /// `account select` picked is not touched.
++#[cfg(not(target_os = "android"))]
+ pub fn session_for_game_as(
+     game_home: &Path,
+     who: &Player,
+@@ -1907,6 +1953,7 @@ pub fn session_for_game_as(
+ }
+ 
+ /// The owner gate as `who`, on `accounts`, which keeps its choice of player.
++#[cfg(not(target_os = "android"))]
+ fn launch_as(
+     ep: &Endpoints,
+     client_id: Option<&str>,
+@@ -1931,6 +1978,7 @@ fn launch_as(
+ }
+ 
+ /// The game's session file for a launch that passed the gate, or why it plays offline.
++#[cfg(not(target_os = "android"))]
+ fn session_file(game_home: &Path, pass: Launch) -> (Option<PathBuf>, Option<String>) {
+     let Some((account, secrets)) = pass.session else {
+         return (None, pass.offline);
+diff --git a/launcher/src/account/ely.rs b/launcher/src/account/ely.rs
+index bbc616a06f..9e7c7398be 100644
+--- a/launcher/src/account/ely.rs
++++ b/launcher/src/account/ely.rs
+@@ -1,12 +1,16 @@
+ //! Ely.by's documented Yggdrasil API. Passwords are used for one request only;
+ //! the existing SecretStore holds the access token and launcher client token.
+ //! https://docs.ely.by/en/minecraft-auth.html
++#[cfg(not(target_os = "android"))]
+ use super::*;
+ 
++#[cfg(not(target_os = "android"))]
+ const AUTH: &str = "https://authserver.ely.by";
++#[cfg(not(target_os = "android"))]
+ pub(super) const REFUSED: &str =
+     "Ely.by sign-in was refused. Check your credentials or sign in again.";
+ 
++#[cfg(not(target_os = "android"))]
+ fn exchange(endpoint: &str, body: Value) -> Result<Value, String> {
+     let (status, value) = send(
+         request_to("POST", endpoint),
+@@ -24,6 +28,7 @@ fn exchange(endpoint: &str, body: Value) -> Result<Value, String> {
+     }
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn decode(value: &Value, client: &str) -> Result<(Account, Secrets), String> {
+     let profile = &value["selectedProfile"];
+     let uuid = str_field(profile, "id")
+@@ -70,6 +75,7 @@ fn decode(value: &Value, client: &str) -> Result<(Account, Secrets), String> {
+ 
+ /// Direct login supports Ely.by's documented password:OTP convention. Neither
+ /// password nor OTP is persisted, included in errors, or passed to the game.
++#[cfg(not(target_os = "android"))]
+ pub fn authenticate(
+     username: &str,
+     password: &str,
+@@ -79,6 +85,7 @@ pub fn authenticate(
+     update_textures(&mut account);
+     Ok((account, secrets))
+ }
++#[cfg(not(target_os = "android"))]
+ fn authenticate_with(
+     base: &str,
+     username: &str,
+@@ -108,11 +115,13 @@ fn authenticate_with(
+     decode(&value, &client)
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub(super) fn refresh(account: &Account, secrets: &Secrets) -> Result<(Account, Secrets), String> {
+     let (mut account, secrets) = refresh_with(AUTH, account, secrets)?;
+     update_textures(&mut account);
+     Ok((account, secrets))
+ }
++#[cfg(not(target_os = "android"))]
+ fn refresh_with(
+     base: &str,
+     account: &Account,
+@@ -132,6 +141,7 @@ fn refresh_with(
+     Ok((renewed, secrets))
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ fn update_textures(account: &mut Account) {
+     let url = format!("https://skinsystem.ely.by/textures/{}", account.name);
+     if let Ok((200, value)) = send(request_to("GET", &url), None, "Ely.by skins") {
+diff --git a/launcher/src/account/session.rs b/launcher/src/account/session.rs
+index 3c511197b8..fc92bcaa6f 100644
+--- a/launcher/src/account/session.rs
++++ b/launcher/src/account/session.rs
+@@ -225,13 +225,23 @@ fn status_within(
+     result.unwrap_or_else(|e| Status::failed(&e))
+ }
+ 
++/// In Blaze Launcher Android builds, the engine never loads or refreshes sessions on its own.
++#[cfg(target_os = "android")]
++#[allow(dead_code)]
++pub fn selected_session(_client_id: &str) -> Result<Option<(Account, Secrets)>, String> {
++    Err(
++        "In-engine login and token refresh are disabled; sign in through Blaze Launcher."
++            .into(),
++    )
++}
++
+ /// Prepare the currently selected provider session without selecting an identity or
+ /// rewriting accounts.json. A concurrent UI switch cannot be undone by a late refresh.
+-#[cfg(any(target_os = "android", test))]
++#[cfg(not(target_os = "android"))]
+ pub fn selected_session(client_id: &str) -> Result<Option<(Account, Secrets)>, String> {
+     selected_session_with(&Endpoints::live(), client_id, store(), &Accounts::path())
+ }
+-#[cfg(any(target_os = "android", test))]
++#[cfg(not(target_os = "android"))]
+ pub(super) fn selected_session_with(
+     ep: &Endpoints,
+     client_id: &str,
+@@ -261,10 +271,12 @@ pub(super) fn selected_session_with(
+ /// Force a renewal even when the access token is fresh. Does not select an account, change
+ /// the public account list, or return a token. A future IPC handler can call this same API,
+ /// then use write_session_file for an explicit game-session handoff.
++#[cfg(not(target_os = "android"))]
+ pub fn refresh(who: &str) -> Result<Status, String> {
+     refresh_with_progress(who, &|_| {})
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub fn refresh_with_progress(who: &str, progress: &dyn Fn(Phase)) -> Result<Status, String> {
+     let account = Accounts::load()
+         .find(who)
+@@ -292,6 +304,7 @@ pub(super) fn refresh_with(
+ }
+ 
+ /// `accounts`: the accounts.json a renewed name or skin is saved to (`Accounts::path()`).
++#[cfg(not(target_os = "android"))]
+ pub(super) fn refresh_account(
+     ep: &Endpoints,
+     client_id: Option<&str>,
+@@ -354,6 +367,7 @@ pub(super) fn refresh_account(
+ /// Renew `who` for a game already running (a server refused its session, or a splitscreen
+ /// player joins one) and hand it over as at launch: a fresh read-once file in `dir`. No file
+ /// unless the renewal left the account ready; the status then says why (sign in again, retry).
++#[cfg(not(target_os = "android"))]
+ pub fn renew_for_game(dir: &Path, who: &str) -> Result<PathBuf, Status> {
+     let account = Accounts::load()
+         .find(who)
+@@ -369,6 +383,7 @@ pub fn renew_for_game(dir: &Path, who: &str) -> Result<PathBuf, Status> {
+     )
+ }
+ 
++#[cfg(not(target_os = "android"))]
+ pub(super) fn renew_for_game_with(
+     ep: &Endpoints,
+     client_id: Option<&str>,

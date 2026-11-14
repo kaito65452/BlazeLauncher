@@ -62,22 +62,54 @@ object RustDiagnosticsCollector {
     fun collectRustProcessDiagnostics(
         context: Context,
         logcatProvider: () -> String = { readSameUidLogcat() }
+    ): String = collectRustDiagnosticsFromDirs(
+        filesDir = context.filesDir,
+        statusDir = statusDir(context),
+        historicalExits = readHistoricalRustExits(context),
+        logcatProvider = logcatProvider
+    )
+
+    internal fun collectEngineDataDiagnosis(filesDir: File): String {
+        val zipFile = File(filesDir, "engine-data.zip")
+        val partialFile = File(filesDir, "engine-data.partial")
+        val horizonVerDir = File(filesDir, ".local/horizon-client/26.3")
+        val resJson = File(horizonVerDir, "horizon-resources.json")
+        val dlJson = File(horizonVerDir, "android-downloads-v2.json")
+        val audioJson = File(horizonVerDir, "audio-complete.json")
+        val zipState = if (zipFile.isFile) "present (${zipFile.length()} bytes)" else "missing"
+        val partialState = if (partialFile.isFile) "present (${partialFile.length()} bytes)" else "missing"
+        val resState = if (resJson.isFile) "present" else "missing"
+        val dlState = if (dlJson.isFile) "present" else "missing"
+        val audioState = if (audioJson.isFile) "present" else "missing"
+        return "Engine data: expected path=${zipFile.absolutePath} (and extracted markers under ${horizonVerDir.absolutePath}), " +
+            "what was found=engine-data.zip=$zipState, engine-data.partial=$partialState, " +
+            "horizon-resources.json=$resState, android-downloads-v2.json=$dlState, audio-complete.json=$audioState"
+    }
+
+    internal fun collectRustDiagnosticsFromDirs(
+        filesDir: File,
+        statusDir: File,
+        historicalExits: String = "",
+        logcatProvider: () -> String = { readSameUidLogcat() }
     ): String = buildString {
         appendLine("=== :rust Process Status Trace ===")
         val statusText = runCatching {
-            val file = statusFile(context)
+            val file = File(statusDir, STATUS_FILE)
             if (file.isFile) redactDiagnosticText(file.readText().trim()) else ""
         }.getOrDefault("")
         appendLine(statusText.ifBlank { "No :rust lifecycle trace recorded yet." })
 
-        val exitInfo = readHistoricalRustExits(context)
-        if (exitInfo.isNotBlank()) {
+        appendLine()
+        appendLine("=== Engine Data Check ===")
+        appendLine(redactDiagnosticText(collectEngineDataDiagnosis(filesDir)))
+
+        if (historicalExits.isNotBlank()) {
             appendLine()
             appendLine("=== :rust Historical Process Exits ===")
-            appendLine(redactDiagnosticText(exitInfo))
+            appendLine(redactDiagnosticText(historicalExits))
         }
 
-        val engineDiag = readStarlingDiagnosticTail(context.filesDir)
+        val engineDiag = readStarlingDiagnosticTail(filesDir)
         if (engineDiag.isNotBlank()) {
             appendLine()
             appendLine("=== Starling Diagnostic Log Tail (Redacted) ===")
@@ -147,10 +179,11 @@ object RustDiagnosticsCollector {
         output.takeLast(MAX_LOGCAT_LINES).joinToString("\n")
     }.getOrDefault("")
 
-    private fun statusFile(context: Context): File {
-        val dir = runCatching { context.noBackupFilesDir }.getOrNull() ?: context.filesDir
-        return File(dir, STATUS_FILE)
-    }
+    private fun statusDir(context: Context): File =
+        runCatching { context.noBackupFilesDir }.getOrNull() ?: context.filesDir
+
+    private fun statusFile(context: Context): File =
+        File(statusDir(context), STATUS_FILE)
 
     private fun formatTimestamp(ms: Long): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(ms))

@@ -157,6 +157,7 @@ class RustActivity : NativeActivity() {
         Log.i(TAG, "Signaling engine exit and terminating :rust pid=$pid")
         RustDiagnosticsCollector.recordRustEvent(this, "exit_requested pid=$pid")
         runCatching { BlazeNativeBridge.signalEngineExit() }
+        RustSessionHandoff.clearPendingSessionFiles(this)
         finishAndRemoveTask()
         Process.killProcess(pid)
     }
@@ -166,7 +167,9 @@ class RustActivity : NativeActivity() {
         RustDiagnosticsCollector.recordRustEvent(this, "onDestroy finishing=$isFinishing pid=$pid")
         super.onDestroy()
         if (isFinishing) {
-            Log.i(TAG, "RustActivity finishing; terminating :rust pid=$pid")
+            Log.i(TAG, "RustActivity finishing; clearing session & terminating :rust pid=$pid")
+            runCatching { BlazeNativeBridge.signalEngineExit() }
+            RustSessionHandoff.clearPendingSessionFiles(this)
             Process.killProcess(pid)
         }
     }
