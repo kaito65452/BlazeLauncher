@@ -754,7 +754,7 @@ index 0000000000..d35e23ec72
 +) -> jstring {
 +    let session = horizon_client::auth::current();
 +    let (active_name, active_type, active_uuid) = match session {
-+        Some(s) => (s.name, "blaze".to_string(), Some(format!("{:032x}", s.uuid))),
++        Some(s) => (s.name.clone(), "blaze".to_string(), Some(format!("{:032x}", s.uuid))),
 +        None => ("Player".to_string(), "disabled".to_string(), None),
 +    };
 +

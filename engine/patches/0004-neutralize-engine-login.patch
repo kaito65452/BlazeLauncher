@@ -339,7 +339,7 @@ index be7eca4909..2f43fdfd2d 100644
  }
  
 diff --git a/crates/horizon-client/src/android/launcher_pages.rs b/crates/horizon-client/src/android/launcher_pages.rs
-index 7cb0a10166..0ac6d80961 100644
+index 7cb0a10166..24500f6776 100644
 --- a/crates/horizon-client/src/android/launcher_pages.rs
 +++ b/crates/horizon-client/src/android/launcher_pages.rs
 @@ -1103,10 +1103,11 @@ impl Launcher {
@@ -427,6 +427,15 @@ index 7cb0a10166..0ac6d80961 100644
                      "Loading content catalog..."
                  } else {
                      ""
+@@ -3769,7 +3754,7 @@ impl Launcher {
+                 "Settings",
+             );
+ 
+-            let cards: [(Icon, &str, &str, Action); 6] = [
++            let cards: [(Icon, &str, &str, Action); 5] = [
+                 (
+                     Icon::Monitor,
+                     "Video Settings",
 @@ -3800,12 +3785,6 @@ impl Launcher {
                      "Logs, device info and troubleshooting",
                      Action::SettingsCat(SettingsCategory::Diagnostics),
@@ -662,7 +671,7 @@ index 7cb0a10166..0ac6d80961 100644
              Some(Action::Logs) => {
                  self.catalog.status = crate::diagnostics::summary(&self.home);
 diff --git a/crates/horizon-client/src/android/login.rs b/crates/horizon-client/src/android/login.rs
-index c22ad219d1..32442c3e55 100644
+index c22ad219d1..7e65a935ec 100644
 --- a/crates/horizon-client/src/android/login.rs
 +++ b/crates/horizon-client/src/android/login.rs
 @@ -1,14 +1,8 @@
@@ -760,7 +769,7 @@ index c22ad219d1..32442c3e55 100644
 -            })
 -            .unwrap_or("Microsoft")
 +        let active = horizon_client::auth::current();
-+        self.profile = active.map(|s| s.name);
++        self.profile = active.map(|s| s.name.clone());
 +        self.signed_in = self.profile.is_some();
      }
  
@@ -2030,10 +2039,21 @@ index 481c023839..80c98a0bfc 100644
      platform::finish();
      APP.with(|slot| *slot.borrow_mut() = None);
 diff --git a/launcher/src/account.rs b/launcher/src/account.rs
-index 2bbec5538c..02bb052009 100644
+index 2bbec5538c..8c2f7f7e2b 100644
 --- a/launcher/src/account.rs
 +++ b/launcher/src/account.rs
-@@ -43,14 +43,22 @@ const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
+@@ -16,7 +16,9 @@ pub mod ely;
+ #[path = "account/session.rs"]
+ pub mod session;
+ 
+-use serde_json::{json, Value};
++use serde_json::Value;
++#[cfg(not(target_os = "android"))]
++use serde_json::json;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
+ use std::sync::{Mutex, OnceLock};
+@@ -43,14 +45,22 @@ const SIGN_IN_AGAIN: &str = "Your Microsoft sign-in expired. Sign in again.";
  /// The Minecraft token is renewed when it has less than this left.
  const RENEW_BEFORE: u64 = 3600;
  
@@ -2056,7 +2076,7 @@ index 2bbec5538c..02bb052009 100644
  fn configured_client_id(runtime: Option<String>, compiled: Option<&str>) -> Option<String> {
      runtime
          .or_else(|| compiled.map(str::to_owned))
-@@ -59,6 +67,7 @@ fn configured_client_id(runtime: Option<String>, compiled: Option<&str>) -> Opti
+@@ -59,6 +69,7 @@ fn configured_client_id(runtime: Option<String>, compiled: Option<&str>) -> Opti
  }
  
  /// Where the requests go: the real services, or a mock in tests.
@@ -2064,7 +2084,7 @@ index 2bbec5538c..02bb052009 100644
  #[derive(Clone, Debug)]
  pub struct Endpoints {
      /// The OAuth 2.0 v2 endpoints for personal accounts (`…/devicecode`, `…/token`).
-@@ -69,6 +78,7 @@ pub struct Endpoints {
+@@ -69,6 +80,7 @@ pub struct Endpoints {
      pub minecraft: String,
  }
  
@@ -2072,7 +2092,7 @@ index 2bbec5538c..02bb052009 100644
  impl Endpoints {
      pub fn live() -> Self {
          // Development builds only: `HORIZON_MSA_MICROSOFT_ENDPOINT` points the device-code and
-@@ -181,9 +191,11 @@ fn now() -> u64 {
+@@ -181,9 +193,11 @@ fn now() -> u64 {
  }
  
  /// Older public Live registrations use a different Microsoft token endpoint.
@@ -2084,7 +2104,7 @@ index 2bbec5538c..02bb052009 100644
  fn microsoft_endpoint(ep: &Endpoints, client_id: &str, token: bool) -> String {
      if legacy_client(client_id)
          && ep.microsoft == "https://login.microsoftonline.com/consumers/oauth2/v2.0"
-@@ -204,6 +216,7 @@ fn microsoft_endpoint(ep: &Endpoints, client_id: &str, token: bool) -> String {
+@@ -204,6 +218,7 @@ fn microsoft_endpoint(ep: &Endpoints, client_id: &str, token: bool) -> String {
          )
      }
  }
@@ -2092,7 +2112,7 @@ index 2bbec5538c..02bb052009 100644
  fn microsoft_scope(client_id: &str) -> &'static str {
      if legacy_client(client_id) {
          "service::user.auth.xboxlive.com::MBI_SSL"
-@@ -215,6 +228,7 @@ fn microsoft_scope(client_id: &str) -> &'static str {
+@@ -215,6 +230,7 @@ fn microsoft_scope(client_id: &str) -> &'static str {
  // ----- The device-code flow ----------------------------------------------------------------------
  
  /// What the player types at the verification page.
@@ -2100,7 +2120,7 @@ index 2bbec5538c..02bb052009 100644
  #[derive(Clone, PartialEq)]
  pub struct DeviceCode {
      pub user_code: String,
-@@ -225,6 +239,7 @@ pub struct DeviceCode {
+@@ -225,6 +241,7 @@ pub struct DeviceCode {
      cookies: String,
  }
  
@@ -2108,7 +2128,7 @@ index 2bbec5538c..02bb052009 100644
  impl std::fmt::Debug for DeviceCode {
      // The device code can be traded for tokens once the player approves: never shown.
      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-@@ -236,18 +251,21 @@ impl std::fmt::Debug for DeviceCode {
+@@ -236,18 +253,21 @@ impl std::fmt::Debug for DeviceCode {
  }
  
  /// The Microsoft tokens; the access token only lasts for the Xbox step.
@@ -2130,7 +2150,7 @@ index 2bbec5538c..02bb052009 100644
  pub enum Poll {
      Pending,
      /// The server asked to poll less often: wait 5 s more.
-@@ -256,6 +274,7 @@ pub enum Poll {
+@@ -256,6 +276,7 @@ pub enum Poll {
      Done(MsTokens),
  }
  
@@ -2138,7 +2158,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String> {
      let mut fields = vec![
          ("client_id", client_id),
-@@ -305,6 +324,7 @@ pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String
+@@ -305,6 +326,7 @@ pub fn device_code(ep: &Endpoints, client_id: &str) -> Result<DeviceCode, String
  }
  
  /// The OAuth error codes as messages for the player.
@@ -2146,7 +2166,7 @@ index 2bbec5538c..02bb052009 100644
  fn oauth_error(v: &Value) -> String {
      match v.get("error").and_then(Value::as_str) {
          Some("authorization_declined") => "Sign-in was declined in the browser.".into(),
-@@ -320,6 +340,7 @@ fn oauth_error(v: &Value) -> String {
+@@ -320,6 +342,7 @@ fn oauth_error(v: &Value) -> String {
  }
  
  /// One poll of the token endpoint while the player signs in.
@@ -2154,7 +2174,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll, String> {
      let body = Body::Form(vec![
          ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-@@ -360,6 +381,7 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll,
+@@ -360,6 +383,7 @@ pub fn poll(ep: &Endpoints, client_id: &str, code: &DeviceCode) -> Result<Poll,
      })
  }
  
@@ -2162,7 +2182,7 @@ index 2bbec5538c..02bb052009 100644
  fn ms_tokens(status: u16, v: &Value) -> Result<MsTokens, String> {
      match (
          status,
-@@ -377,6 +399,7 @@ fn ms_tokens(status: u16, v: &Value) -> Result<MsTokens, String> {
+@@ -377,6 +401,7 @@ fn ms_tokens(status: u16, v: &Value) -> Result<MsTokens, String> {
  
  /// Wait for the player to finish in the browser, polling as asked, until the code expires or
  /// `cancelled` says stop.
@@ -2170,7 +2190,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn wait_for_sign_in(
      ep: &Endpoints,
      client_id: &str,
-@@ -413,6 +436,7 @@ pub fn wait_for_sign_in(
+@@ -413,6 +438,7 @@ pub fn wait_for_sign_in(
      }
  }
  
@@ -2178,7 +2198,7 @@ index 2bbec5538c..02bb052009 100644
  fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens, String> {
      let (status, v) = send(
          request_to("POST", &microsoft_endpoint(ep, client_id, true)),
-@@ -433,6 +457,7 @@ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens
+@@ -433,6 +459,7 @@ fn refresh_ms(ep: &Endpoints, client_id: &str, refresh: &str) -> Result<MsTokens
  // ----- Xbox Live, XSTS, Minecraft ----------------------------------------------------------------
  
  /// The XSTS `XErr` codes, as the official launcher explains them.
@@ -2186,7 +2206,7 @@ index 2bbec5538c..02bb052009 100644
  fn xsts_error(code: u64) -> String {
      match code {
          2148916233 => "This Microsoft account has no Xbox profile yet. Sign in once at xbox.com to create one, then try again.".into(),
-@@ -444,12 +469,14 @@ fn xsts_error(code: u64) -> String {
+@@ -444,12 +471,14 @@ fn xsts_error(code: u64) -> String {
  }
  
  /// The Minecraft access token from the Microsoft one, through Xbox Live and XSTS.
@@ -2201,7 +2221,7 @@ index 2bbec5538c..02bb052009 100644
  fn minecraft_login(
      ep: &Endpoints,
      ms_access: &str,
-@@ -507,6 +534,7 @@ fn minecraft_login(
+@@ -507,6 +536,7 @@ fn minecraft_login(
  /// joining an online-mode server answers "Profile not found" (found and diagnosed by
  /// martipops). `login_with_xbox` stays the fallback, so a sign-in that worked before still does
  /// when the other refuses.
@@ -2209,7 +2229,7 @@ index 2bbec5538c..02bb052009 100644
  fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), String> {
      let lifetime = |v: &Value| v.get("expires_in").and_then(Value::as_u64).unwrap_or(86400);
      let launcher = send(
-@@ -543,11 +571,13 @@ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), String
+@@ -543,11 +573,13 @@ fn minecraft_token(ep: &Endpoints, xtoken: &str) -> Result<(String, u64), String
      }
  }
  
@@ -2223,7 +2243,7 @@ index 2bbec5538c..02bb052009 100644
  fn owns_game(ep: &Endpoints, token: &str) -> Result<bool, String> {
      let (status, v) = send(
          bearer(
-@@ -605,6 +635,7 @@ impl Account {
+@@ -605,6 +637,7 @@ impl Account {
  }
  
  /// The profile; none when the account has none (it doesn't own the game, or never made one).
@@ -2231,7 +2251,7 @@ index 2bbec5538c..02bb052009 100644
  fn profile(ep: &Endpoints, token: &str) -> Result<Option<Account>, String> {
      let (status, v) = send(
          bearer(
-@@ -673,10 +704,12 @@ impl std::fmt::Debug for Secrets {
+@@ -673,10 +706,12 @@ impl std::fmt::Debug for Secrets {
  }
  
  /// From Microsoft tokens to a ready account: Xbox, XSTS, Minecraft, ownership, profile.
@@ -2244,7 +2264,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn finish_sign_in_with_progress(
      ep: &Endpoints,
      ms: MsTokens,
-@@ -699,6 +732,7 @@ impl Secrets {
+@@ -699,6 +734,7 @@ impl Secrets {
      pub(crate) fn game_token(&self) -> &str {
          &self.minecraft_token
      }
@@ -2252,7 +2272,7 @@ index 2bbec5538c..02bb052009 100644
      fn new(refresh_token: String, mc: Minecraft) -> Self {
          Self {
              provider: Provider::Microsoft,
-@@ -713,6 +747,7 @@ impl Secrets {
+@@ -713,6 +749,7 @@ impl Secrets {
  }
  
  /// What asking the Minecraft services again found for one account.
@@ -2260,7 +2280,7 @@ index 2bbec5538c..02bb052009 100644
  enum Check {
      /// It owns the game: its profile as it is now (the name may have changed) and its tokens.
      Owns(Account, Secrets),
-@@ -724,10 +759,12 @@ enum Check {
+@@ -724,10 +761,12 @@ enum Check {
  
  /// Asks whether `account` owns the game, with a Minecraft token renewed through the refresh token
  /// first when it has less than an hour left. The secrets come back renewed whatever the answer.
@@ -2273,7 +2293,7 @@ index 2bbec5538c..02bb052009 100644
  fn check_with(
      ep: &Endpoints,
      client_id: Option<&str>,
-@@ -814,7 +851,7 @@ fn check_with(
+@@ -814,7 +853,7 @@ fn check_with(
  
  /// Android's session adapter preserves a still-valid token without a network request.
  /// Renewal uses the same ownership/profile checks as the desktop launcher.
@@ -2282,7 +2302,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn fresh(
      ep: &Endpoints,
      client_id: &str,
-@@ -1594,6 +1631,7 @@ pub fn take_unsaved() -> Option<String> {
+@@ -1594,6 +1633,7 @@ pub fn take_unsaved() -> Option<String> {
  /// the answer in the keychain. An account that gets no answer (no network) keeps its last one, so
  /// being offline never blocks a player who passed before, while "doesn't own" blocks at once.
  /// The caller saves `accounts` (renewed names and skins).
@@ -2290,7 +2310,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn launch(
      ep: &Endpoints,
      client_id: Option<&str>,
-@@ -1675,6 +1713,7 @@ pub fn launch(
+@@ -1675,6 +1715,7 @@ pub fn launch(
  /// (`backend::Settings::dev_offline`, `offline_without_owner`) no owner is no refusal: the game
  /// starts offline, without a session and without an `owner`. Downloads never come through here:
  /// `backend::download_for_owner` asks [`launch`] itself, so the option never downloads the game.
@@ -2298,7 +2318,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn launch_for_game(
      ep: &Endpoints,
      client_id: Option<&str>,
-@@ -1690,6 +1729,7 @@ pub fn launch_for_game(
+@@ -1690,6 +1731,7 @@ pub fn launch_for_game(
  
  /// Write the session for the game, readable by this user only, in a fresh file it deletes
  /// when it reads it.
@@ -2306,7 +2326,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn write_session_file(
      dir: &Path,
      account: &Account,
-@@ -1735,6 +1775,7 @@ pub fn write_session_file(
+@@ -1735,6 +1777,7 @@ pub fn write_session_file(
  
  /// Called under the account-operation lock, after the final profile is known. Rejected or
  /// cancelled sign-ins must not save a credential, add another identity, or change selection.
@@ -2314,7 +2334,7 @@ index 2bbec5538c..02bb052009 100644
  fn accept_sign_in(
      accounts: &mut Accounts,
      store: &dyn SecretStore,
-@@ -1768,6 +1809,7 @@ fn accept_sign_in(
+@@ -1768,6 +1811,7 @@ fn accept_sign_in(
  }
  
  /// Where a background sign-in is (the window and the MCP server show it).
@@ -2322,7 +2342,7 @@ index 2bbec5538c..02bb052009 100644
  #[derive(Clone, Debug, PartialEq)]
  pub enum SignInState {
      Starting,
-@@ -1778,11 +1820,13 @@ pub enum SignInState {
+@@ -1778,11 +1822,13 @@ pub enum SignInState {
  }
  
  /// A sign-in on its own thread, from the code to the saved account.
@@ -2336,7 +2356,7 @@ index 2bbec5538c..02bb052009 100644
  impl SignIn {
      pub fn start_ely(username: String, password: String, otp: String) -> Self {
          use std::sync::atomic::Ordering;
-@@ -1870,6 +1914,7 @@ impl SignIn {
+@@ -1870,6 +1916,7 @@ impl SignIn {
  /// The owner gate for the game about to start, then the selected account's session in a file
  /// for it: the file (none: offline) and why the account plays offline this time, if it does.
  /// `offline_without_owner`: see [`launch_for_game`].
@@ -2344,7 +2364,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn session_for_game(
      game_home: &Path,
      offline_without_owner: bool,
-@@ -1890,6 +1935,7 @@ pub fn session_for_game(
+@@ -1890,6 +1937,7 @@ pub fn session_for_game(
  /// plays changes for this launch only, so several games can play as several accounts at once
  /// (#4952). What the services renewed (tokens, names, skins) is still kept; which account
  /// `account select` picked is not touched.
@@ -2352,7 +2372,7 @@ index 2bbec5538c..02bb052009 100644
  pub fn session_for_game_as(
      game_home: &Path,
      who: &Player,
-@@ -1907,6 +1953,7 @@ pub fn session_for_game_as(
+@@ -1907,6 +1955,7 @@ pub fn session_for_game_as(
  }
  
  /// The owner gate as `who`, on `accounts`, which keeps its choice of player.
@@ -2360,7 +2380,7 @@ index 2bbec5538c..02bb052009 100644
  fn launch_as(
      ep: &Endpoints,
      client_id: Option<&str>,
-@@ -1931,6 +1978,7 @@ fn launch_as(
+@@ -1931,6 +1980,7 @@ fn launch_as(
  }
  
  /// The game's session file for a launch that passed the gate, or why it plays offline.
