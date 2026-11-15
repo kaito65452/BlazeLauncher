@@ -45,6 +45,12 @@ jobs:
           ./scripts/test_guards.sh
           ./scripts/scope_guard.sh main
 
+      - name: Apply Engine Pin Refresh Patch to Bundled Lock
+        run: |
+          git -C engine/starling apply --check "$PWD/engine/patches/0007-pin-refresh-26.3.patch"
+          git -C engine/starling apply "$PWD/engine/patches/0007-pin-refresh-26.3.patch"
+          echo "✓ Applied engine/patches/0007-pin-refresh-26.3.patch for APK assets/research-lock.json packaging"
+
       - name: Download Rust Engine .so (arm64-v8a)
         uses: actions/download-artifact@v4
         with:
@@ -191,6 +197,18 @@ jobs:
               if len(parity_java) != 26:
                   print(f"ERROR: Expected 26 MIT parity .java sources in APK, found {len(parity_java)}", file=sys.stderr)
                   sys.exit(1)
+              import json
+              lock_json = json.loads(zf.read("assets/research-lock.json"))
+              mc_pin = lock_json.get("minecraft", {})
+              for req_manifest in ("9f67e10ed013deeaad20ac3c800652765d493408",):
+                  if req_manifest not in mc_pin.get("accepted_manifest_sha1", []):
+                      print(f"ERROR: APK assets/research-lock.json missing refreshed manifest pin {req_manifest}!", file=sys.stderr)
+                      sys.exit(1)
+              for req_idx in ("e99f9973047785b5a9d52eaf72020b97545053c9",):
+                  if req_idx not in mc_pin.get("accepted_asset_index_sha1", []):
+                      print(f"ERROR: APK assets/research-lock.json missing refreshed asset index pin {req_idx}!", file=sys.stderr)
+                      sys.exit(1)
+              print("  verified bundled assets/research-lock.json includes 26.3 local pin refresh hashes")
           PY
           done
 

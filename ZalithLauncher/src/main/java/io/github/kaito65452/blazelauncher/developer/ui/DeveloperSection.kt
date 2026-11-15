@@ -83,7 +83,7 @@ private fun copyTextWithToast(context: Context, label: String, text: String, toa
 }
 
 private fun formatPrepareSummary(context: Context, state: PrepareUiState): String {
-    return when {
+    val base = when {
         state.running -> listOf(state.phase, state.detail)
             .filter { it.isNotBlank() }
             .joinToString(" — ")
@@ -95,6 +95,11 @@ private fun formatPrepareSummary(context: Context, state: PrepareUiState): Strin
         state.completedSummary != null -> state.completedSummary
         state.prepared -> context.getString(R.string.developer_prepare_ready)
         else -> context.getString(R.string.developer_prepare_summary)
+    }
+    return if (state.warnings.isNotEmpty() && !state.running) {
+        "$base\nWarning: ${state.warnings.joinToString("; ")}"
+    } else {
+        base
     }
 }
 
@@ -154,7 +159,7 @@ fun DeveloperSettingsSection(
             }
         )
 
-        if (prepareState.running || prepareState.redactedError != null) {
+        if (prepareState.running || prepareState.redactedError != null || prepareState.warnings.isNotEmpty()) {
             PrepareActionStrip(
                 state = prepareState,
                 onCancel = { EngineDataPreparer.cancel(context) },
@@ -220,6 +225,13 @@ private fun PrepareActionStrip(
             .padding(horizontal = 16.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
+        if (state.warnings.isNotEmpty()) {
+            Text(
+                text = "Warning: ${state.warnings.joinToString("\n")}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
         if (state.running) {
             val frac = state.progressFraction
             if (frac != null) {
@@ -329,7 +341,7 @@ fun DeveloperDiagnosticsButtons(
             }
         }
 
-        if (prepareState.running || prepareState.redactedError != null || prepareState.completedSummary != null) {
+        if (prepareState.running || prepareState.redactedError != null || prepareState.completedSummary != null || prepareState.warnings.isNotEmpty()) {
             Text(
                 text = formatPrepareSummary(context, prepareState),
                 style = MaterialTheme.typography.bodySmall,

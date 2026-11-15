@@ -56,7 +56,8 @@ data class PrepareUiState(
     val peakRssKb: Long = 0L,
     val prepared: Boolean = false,
     val completedSummary: String? = null,
-    val redactedError: String? = null
+    val redactedError: String? = null,
+    val warnings: List<String> = emptyList()
 )
 
 class EngineDataPrepareException(
@@ -198,7 +199,8 @@ object EngineDataPreparer {
         val metrics = EngineDataPrepareTelemetry.load(context.filesDir)
         _uiState.value = _uiState.value.copy(
             prepared = prepared,
-            peakRssKb = metrics?.peakRssKb ?: _uiState.value.peakRssKb
+            peakRssKb = metrics?.peakRssKb ?: _uiState.value.peakRssKb,
+            warnings = metrics?.safeWarnings() ?: _uiState.value.warnings
         )
     }
 
@@ -318,6 +320,7 @@ object EngineDataPreparer {
         val totalStartNs = System.nanoTime()
         val timings = linkedMapOf<String, Long>()
         var peakRssKb = 0L
+        var prepareWarnings: List<String> = emptyList()
 
         fun updateProgress(phase: String, detail: String = "", fraction: Float? = null, rssKb: Long = peakRssKb) {
             peakRssKb = maxOf(peakRssKb, rssKb)
@@ -327,7 +330,8 @@ object EngineDataPreparer {
                 detail = detail,
                 progressFraction = fraction,
                 peakRssKb = peakRssKb,
-                prepared = isPreparedFallback(context.filesDir)
+                prepared = isPreparedFallback(context.filesDir),
+                warnings = prepareWarnings
             )
             onStatusUpdate?.invoke(phase, fraction)
         }
@@ -386,6 +390,7 @@ object EngineDataPreparer {
                             phaseTimingsMs = timings,
                             peakRssKb = maxOf(peakRssKb, env.peakRssKb),
                             lastError = details,
+                            warnings = prepareWarnings,
                             updatedAtMs = System.currentTimeMillis()
                         )
                     )
@@ -400,6 +405,18 @@ object EngineDataPreparer {
         }
         timings["rust_phase1"] = phase1.elapsedMs
         peakRssKb = maxOf(peakRssKb, phase1.peakRssKb, BlazePrepareNative.nativePeakRssKb())
+        @Suppress("USELESS_ELVIS")
+        prepareWarnings = (phase1.warnings ?: emptyList())
+            .filter { it.isNotBlank() }
+            .map { RustDiagnosticsCollector.redactDiagnosticText(it) }
+        if (prepareWarnings.isNotEmpty()) {
+            updateProgress(
+                phase = "Warning: ${prepareWarnings.first()}",
+                detail = prepareWarnings.joinToString("; "),
+                fraction = 0.41f,
+                rssKb = peakRssKb
+            )
+        }
 
         // Ensure OpenJDK 25 (Internal-25) is unpacked for datagen & parity compilation
         updateProgress("Checking OpenJDK 25 runtime", Jre.JRE_25.jreName, 0.42f)
@@ -447,6 +464,7 @@ object EngineDataPreparer {
                             phaseTimingsMs = timings,
                             peakRssKb = maxOf(peakRssKb, env.peakRssKb),
                             lastError = details,
+                            warnings = prepareWarnings,
                             updatedAtMs = System.currentTimeMillis()
                         )
                     )
@@ -475,6 +493,7 @@ object EngineDataPreparer {
                 filesReused = phase1.downloadStats.filesReused,
                 filesDownloaded = phase1.downloadStats.filesDownloaded,
                 engineDataEntries = phase2.engineDataEntries,
+                warnings = prepareWarnings,
                 updatedAtMs = System.currentTimeMillis()
             )
         )
@@ -485,7 +504,8 @@ object EngineDataPreparer {
             progressFraction = 1.0f,
             peakRssKb = peakRssKb,
             prepared = true,
-            completedSummary = summary
+            completedSummary = summary,
+            warnings = prepareWarnings
         )
         phase2
     }

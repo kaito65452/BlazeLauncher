@@ -96,6 +96,8 @@ pub struct Phase1Output {
     pub worldgen_maps_written: u64,
     pub elapsed_ms: u64,
     pub peak_rss_kb: u64,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,7 +393,7 @@ pub fn run_phase1(
 
     on_progress("Checking Mojang 26.3 manifest", 0, 1);
     let game_home = cfg.game_home.as_deref();
-    let manifest = resolve_version_manifest(
+    let resolved_manifest = resolve_version_manifest(
         &fetcher,
         &lock,
         &work_dir,
@@ -399,7 +401,13 @@ pub fn run_phase1(
         catalog_url,
         &mut stats,
     )?;
-    on_progress("Checking Mojang 26.3 manifest", 1, 1);
+    let manifest = resolved_manifest.manifest;
+    let warnings = resolved_manifest.warnings;
+    if !warnings.is_empty() {
+        on_progress(&format!("Warning: {}", warnings.join("; ")), 1, 1);
+    } else {
+        on_progress("Checking Mojang 26.3 manifest", 1, 1);
+    }
 
     let artifact_plan = build_artifact_plan(&manifest, &lock.minecraft, &work_dir, game_home)?;
     let jar_stats = fetch_batch_parallel(
@@ -606,6 +614,7 @@ pub fn run_phase1(
         worldgen_maps_written,
         elapsed_ms: started.elapsed().as_millis() as u64,
         peak_rss_kb: peak_rss_kb(),
+        warnings,
     })
 }
 

@@ -270,3 +270,73 @@ pub fn peak_rss_kb() -> u64 {
     }
     0
 }
+
+fn is_hex_byte(b: u8) -> bool {
+    b.is_ascii_hexdigit()
+}
+
+/// Redacts credentials/tokens and truncates any full UUID (dashed or 32-hex) to first 8 chars,
+/// while leaving 40-hex SHA-1 and 64-hex SHA-256 digests intact.
+pub fn redact_sensitive(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let lower_tail = input[i..].to_ascii_lowercase();
+        if let Some(key) = ["access_token=", "refresh_token=", "client_secret=", "token="]
+            .iter()
+            .find(|k| lower_tail.starts_with(*k))
+        {
+            out.push_str(&input[i..i + key.len()]);
+            out.push_str("<redacted>");
+            i += key.len();
+            while i < bytes.len() && !matches!(bytes[i], b'&' | b' ' | b'\n' | b'\r' | b'\t' | b'"' | b'\'') {
+                i += 1;
+            }
+            continue;
+        }
+        if lower_tail.starts_with("bearer ") {
+            out.push_str("Bearer <redacted>");
+            i += "bearer ".len();
+            while i < bytes.len() && !matches!(bytes[i], b' ' | b'\n' | b'\r' | b'\t' | b'"' | b'\'') {
+                i += 1;
+            }
+            continue;
+        }
+        let prev_is_hex = i > 0 && is_hex_byte(bytes[i - 1]);
+        if !prev_is_hex {
+            // Match dashed UUID: 8-4-4-4-12 (36 chars)
+            if i + 36 <= bytes.len()
+                && bytes[i..i + 8].iter().all(|b| is_hex_byte(*b))
+                && bytes[i + 8] == b'-'
+                && bytes[i + 9..i + 13].iter().all(|b| is_hex_byte(*b))
+                && bytes[i + 13] == b'-'
+                && bytes[i + 14..i + 18].iter().all(|b| is_hex_byte(*b))
+                && bytes[i + 18] == b'-'
+                && bytes[i + 19..i + 23].iter().all(|b| is_hex_byte(*b))
+                && bytes[i + 23] == b'-'
+                && bytes[i + 24..i + 36].iter().all(|b| is_hex_byte(*b))
+                && (i + 36 == bytes.len() || !is_hex_byte(bytes[i + 36]))
+            {
+                out.push_str(&input[i..i + 8]);
+                out.push_str("...");
+                i += 36;
+                continue;
+            }
+            // Match exact 32-hex undashed UUID (must NOT match 40-hex SHA-1 or 64-hex SHA-256)
+            if i + 32 <= bytes.len()
+                && bytes[i..i + 32].iter().all(|b| is_hex_byte(*b))
+                && (i + 32 == bytes.len() || !is_hex_byte(bytes[i + 32]))
+            {
+                out.push_str(&input[i..i + 8]);
+                out.push_str("...");
+                i += 32;
+                continue;
+            }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}

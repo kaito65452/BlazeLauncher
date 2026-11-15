@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -730,6 +730,177 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
     echo "Checking Stage B preparer & bundled asset hygiene..."
     check_stage_b_hygiene "."
     echo "✓ Stage B preparer & bundled asset hygiene passed."
+fi
+
+# 7c. Local pin refresh patch guard: engine/patches/0007-pin-refresh-26.3.patch may ONLY append 40-hex
+# hashes to accepted_manifest_sha1 / accepted_asset_index_sha1 in research-lock.json and must never
+# modify client_sha1, server_sha1, manifest_sha1, or add unrelated fields.
+check_pin_refresh_patch() {
+    local patch_file="$1"
+    local base_lock="${2:-engine/starling/research-lock.json}"
+    python3 - "$patch_file" "$base_lock" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+patch_path, base_lock = sys.argv[1:3]
+if not os.path.isfile(patch_path) or os.path.getsize(patch_path) == 0:
+    print(f"ERROR: Missing or empty pin refresh patch: {patch_path}", file=sys.stderr)
+    sys.exit(1)
+
+raw = open(patch_path, "r", encoding="utf-8", errors="replace").read()
+lines = raw.splitlines()
+
+# 1. File header scope: ONLY research-lock.json may appear
+diff_files = []
+for line in lines:
+    if line.startswith("diff --git "):
+        diff_files.append(line)
+    elif line.startswith("--- "):
+        diff_files.append(line)
+    elif line.startswith("+++ "):
+        diff_files.append(line)
+
+if not diff_files:
+    print(f"ERROR: Patch {patch_path} contains no unified diff file headers!", file=sys.stderr)
+    sys.exit(1)
+
+allowed_headers = {
+    "diff --git a/research-lock.json b/research-lock.json",
+    "--- a/research-lock.json",
+    "+++ b/research-lock.json",
+}
+bad_headers = [h for h in diff_files if h not in allowed_headers]
+if bad_headers:
+    print(
+        f"ERROR: Patch {patch_path} touches forbidden paths outside research-lock.json: {bad_headers}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+# 2. Line-by-line hunk audit: only 40-hex accepted-hash entries (or adding trailing comma on existing 40-hex entry)
+hex_item_re = re.compile(r'^\s*"([0-9a-f]{40})"(,?)\s*$')
+removed_hashes = []
+added_hashes = []
+for idx, line in enumerate(lines, start=1):
+    if line.startswith(("diff --git ", "--- ", "+++ ", "@@ ", "index ", "\\")):
+        continue
+    if line.startswith("-"):
+        body = line[1:]
+        m = hex_item_re.match(body)
+        if not m:
+            print(
+                f"ERROR: Patch {patch_path}:{idx} removes or modifies non-hash line in research-lock.json: {body!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        removed_hashes.append((m.group(1), body))
+    elif line.startswith("+"):
+        body = line[1:]
+        m = hex_item_re.match(body)
+        if not m:
+            print(
+                f"ERROR: Patch {patch_path}:{idx} adds forbidden non-hash/unrelated field line to research-lock.json: {body!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        added_hashes.append((m.group(1), body))
+
+added_set = {h for h, _ in added_hashes}
+for rem_hash, rem_body in removed_hashes:
+    if rem_hash not in added_set:
+        print(
+            f"ERROR: Patch {patch_path} removes existing hash {rem_hash} ({rem_body!r}) instead of only appending!",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+if not added_hashes:
+    print(f"ERROR: Patch {patch_path} adds no hashes to accepted lists!", file=sys.stderr)
+    sys.exit(1)
+
+# 3. Structural JSON verification when base research-lock.json is available
+if os.path.isfile(base_lock):
+    with tempfile.TemporaryDirectory() as td:
+        target = os.path.join(td, "research-lock.json")
+        orig_text = open(base_lock, "r", encoding="utf-8").read()
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(orig_text)
+        res = subprocess.run(
+            ["git", "apply", os.path.abspath(patch_path)],
+            cwd=td,
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode != 0:
+            print(
+                f"ERROR: Patch {patch_path} does not cleanly apply to {base_lock}: {res.stderr.strip()}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        orig_json = json.loads(orig_text)
+        new_json = json.loads(open(target, "r", encoding="utf-8").read())
+        if set(orig_json.keys()) != set(new_json.keys()):
+            print(
+                f"ERROR: Patch {patch_path} changed top-level keys in research-lock.json!",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        for k in orig_json:
+            if k != "minecraft":
+                if orig_json[k] != new_json[k]:
+                    print(
+                        f"ERROR: Patch {patch_path} modified non-minecraft section {k!r}!",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+        om = orig_json.get("minecraft", {})
+        nm = new_json.get("minecraft", {})
+        if set(om.keys()) != set(nm.keys()):
+            print(
+                f"ERROR: Patch {patch_path} added/removed fields under minecraft: {set(om.keys()) ^ set(nm.keys())}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        allowed_list_keys = {"accepted_manifest_sha1", "accepted_asset_index_sha1"}
+        for k in om:
+            if k in allowed_list_keys:
+                if not isinstance(nm[k], list) or nm[k][: len(om[k])] != om[k]:
+                    print(
+                        f"ERROR: Patch {patch_path} mutated existing entries in {k} instead of appending!",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                for h in nm[k]:
+                    if not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{40}", h):
+                        print(
+                            f"ERROR: Patch {patch_path} introduced invalid SHA-1 in {k}: {h!r}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(1)
+            elif om[k] != nm[k]:
+                print(
+                    f"ERROR: Patch {patch_path} modified strict field minecraft.{k} ({om[k]!r} -> {nm[k]!r})!",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+PY
+}
+
+if [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ]; then
+    echo "Checking custom patch for Check 12 pin refresh hygiene: $GUARD_CHECK12_ONLY_PATCH"
+    check_pin_refresh_patch "$GUARD_CHECK12_ONLY_PATCH" "engine/starling/research-lock.json"
+    echo "✓ Custom Check 12 patch passed."
+    exit 0
+fi
+
+if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -f "engine/patches/0007-pin-refresh-26.3.patch" ]; then
+    echo "Checking local pin refresh patch 0007-pin-refresh-26.3.patch..."
+    check_pin_refresh_patch "engine/patches/0007-pin-refresh-26.3.patch" "engine/starling/research-lock.json"
+    echo "✓ Pin refresh patch 0007 touches only accepted hash lists in research-lock.json."
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)

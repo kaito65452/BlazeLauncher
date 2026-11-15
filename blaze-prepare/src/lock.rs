@@ -89,6 +89,48 @@ impl LockFile {
             .iter()
             .any(|h| h.eq_ignore_ascii_case(sha1))
     }
+
+    pub fn is_local_refreshed_manifest(&self, sha1: &str) -> bool {
+        self.manifest_accepted(sha1)
+            && LOCAL_REFRESHED_MANIFEST_SHA1
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(sha1))
+    }
+
+    pub fn is_local_refreshed_asset_index(&self, sha1: &str) -> bool {
+        self.asset_index_accepted(sha1)
+            && LOCAL_REFRESHED_ASSET_INDEX_SHA1
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(sha1))
+    }
+
+    pub fn accepted_manifest_list_display(&self) -> String {
+        let mut all = Vec::with_capacity(1 + self.minecraft.accepted_manifest_sha1.len());
+        all.push(self.minecraft.manifest_sha1.as_str());
+        for h in &self.minecraft.accepted_manifest_sha1 {
+            all.push(h.as_str());
+        }
+        all.join(", ")
+    }
+
+    pub fn accepted_asset_index_list_display(&self) -> String {
+        if self.minecraft.accepted_asset_index_sha1.is_empty() {
+            "<empty>".to_string()
+        } else {
+            self.minecraft.accepted_asset_index_sha1.join(", ")
+        }
+    }
+}
+
+/// Pins added by `engine/patches/0007-pin-refresh-26.3.patch` on top of upstream commit `fa548eb7ab`.
+/// Only honored when also present in `research-lock.json`.
+pub const LOCAL_REFRESHED_MANIFEST_SHA1: &[&str] = &["9f67e10ed013deeaad20ac3c800652765d493408"];
+pub const LOCAL_REFRESHED_ASSET_INDEX_SHA1: &[&str] = &["e99f9973047785b5a9d52eaf72020b97545053c9"];
+
+#[derive(Debug, Clone)]
+pub struct ManifestValidationInfo {
+    pub manifest_sha1: String,
+    pub asset_index_sha1: String,
 }
 
 impl BedrockControlsManifest {
@@ -158,26 +200,51 @@ pub fn validate_version_manifest(
     pin: &MinecraftPin,
     strict_manifest_pin: bool,
 ) -> Result<Value, String> {
-    let actual_sha1 = sha1_bytes(bytes);
-    if let Some(exp) = expected_sha1 {
-        if !actual_sha1.eq_ignore_ascii_case(exp) {
-            return Err(format!(
-                "Version manifest SHA-1 mismatch: expected {exp}, got {actual_sha1}"
-            ));
-        }
-    }
+    validate_version_manifest_with_source(
+        bytes,
+        expected_sha1,
+        pin,
+        strict_manifest_pin,
+        "version manifest",
+    )
+    .map(|(val, _)| val)
+}
+
+/// Validates a Mojang version JSON with source labeling and enforces both manifest and asset-index pins
+/// as well as strict client/server jar SHA-1 pins.
+pub fn validate_version_manifest_with_source(
+    bytes: &[u8],
+    expected_sha1: Option<&str>,
+    pin: &MinecraftPin,
+    strict_manifest_pin: bool,
+    source_label: &str,
+) -> Result<(Value, ManifestValidationInfo), String> {
     let lock_wrapper = LockFile {
         minecraft: pin.clone(),
     };
+    let actual_sha1 = sha1_bytes(bytes);
+    if let Some(exp) = expected_sha1 {
+        if !actual_sha1.eq_ignore_ascii_case(exp) {
+            return Err(crate::files::redact_sensitive(&format!(
+                "Version manifest SHA-1 mismatch while hashing {source_label}: computed sha1={actual_sha1}, expected={exp}. Next step: check network integrity or delete the corrupted cached file and retry preparation."
+            )));
+        }
+    }
     if strict_manifest_pin && !lock_wrapper.manifest_accepted(&actual_sha1) {
-        return Err(format!(
-            "Version manifest SHA-1 {actual_sha1} is not accepted by research-lock.json"
-        ));
+        return Err(crate::files::redact_sensitive(&format!(
+            "Version manifest sha1 ({actual_sha1}) from {source_label} is not accepted by research-lock.json (accepted: [{}]). Next step: Mojang may have republished {} or the file was modified; install/verify vanilla {} in Zalith Launcher or refresh accepted_manifest_sha1 after confirming client/server jar pins match.",
+            lock_wrapper.accepted_manifest_list_display(),
+            pin.version,
+            pin.version,
+        )));
     }
     let manifest: Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("Invalid version JSON: {e}"))?;
+        serde_json::from_slice(bytes).map_err(|e| format!("Invalid version JSON ({source_label}): {e}"))?;
     if manifest.get("id").and_then(Value::as_str) != Some(pin.version.as_str()) {
-        return Err("Version JSON id does not match pinned Minecraft version".to_string());
+        return Err(format!(
+            "Version JSON id in {source_label} does not match pinned Minecraft version {}",
+            pin.version
+        ));
     }
     if manifest
         .get("javaVersion")
@@ -185,13 +252,18 @@ pub fn validate_version_manifest(
         .and_then(Value::as_u64)
         != Some(u64::from(pin.java_major))
     {
-        return Err("Version JSON javaVersion.majorVersion does not match pin".to_string());
+        return Err(format!(
+            "Version JSON javaVersion.majorVersion in {source_label} does not match pinned Java {}",
+            pin.java_major
+        ));
     }
     let downloads = manifest
         .get("downloads")
-        .ok_or("Version JSON has no downloads section")?;
+        .ok_or_else(|| format!("Version JSON ({source_label}) has no downloads section"))?;
     if downloads.get("client_mappings").is_some() || downloads.get("server_mappings").is_some() {
-        return Err("Unobfuscated target expected; legacy obfuscated release rejected".to_string());
+        return Err(format!(
+            "Unobfuscated target expected ({source_label}); legacy obfuscated release rejected"
+        ));
     }
     let client_sha = downloads
         .get("client")
@@ -199,10 +271,11 @@ pub fn validate_version_manifest(
         .and_then(Value::as_str)
         .unwrap_or("");
     if !client_sha.eq_ignore_ascii_case(&pin.client_sha1) {
-        return Err(format!(
-            "Version JSON client_sha1 ({client_sha}) != pinned ({})",
-            pin.client_sha1
-        ));
+        return Err(crate::files::redact_sensitive(&format!(
+            "Version JSON client_sha1 mismatch in {source_label}: got {client_sha}, expected pinned {}. Next step: do NOT override client_sha1; download official Minecraft {} from Mojang or restore an unmodified jar.",
+            pin.client_sha1,
+            pin.version
+        )));
     }
     let server_sha = downloads
         .get("server")
@@ -210,10 +283,29 @@ pub fn validate_version_manifest(
         .and_then(Value::as_str)
         .unwrap_or("");
     if !server_sha.eq_ignore_ascii_case(&pin.server_sha1) {
-        return Err(format!(
-            "Version JSON server_sha1 ({server_sha}) != pinned ({})",
+        return Err(crate::files::redact_sensitive(&format!(
+            "Version JSON server_sha1 mismatch in {source_label}: got {server_sha}, expected pinned {}. Next step: do NOT override server_sha1; wait for verified upstream support if Mojang updated server artifacts.",
             pin.server_sha1
-        ));
+        )));
     }
-    Ok(manifest)
+    let asset_index_sha1 = manifest
+        .get("assetIndex")
+        .and_then(|a| a.get("sha1"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Version JSON ({source_label}) missing assetIndex.sha1"))?;
+    validate_sha1_hex(asset_index_sha1, "manifest assetIndex.sha1")?;
+    if !lock_wrapper.asset_index_accepted(asset_index_sha1) {
+        return Err(crate::files::redact_sensitive(&format!(
+            "Asset index sha1 ({asset_index_sha1}) referenced by {source_label} is not accepted by research-lock.json (accepted: [{}]). Next step: Mojang republished the {} asset index; verify jars still match upstream pins and update accepted_asset_index_sha1 via an explicit lock refresh.",
+            lock_wrapper.accepted_asset_index_list_display(),
+            pin.version
+        )));
+    }
+    Ok((
+        manifest,
+        ManifestValidationInfo {
+            manifest_sha1: actual_sha1,
+            asset_index_sha1: asset_index_sha1.to_string(),
+        },
+    ))
 }

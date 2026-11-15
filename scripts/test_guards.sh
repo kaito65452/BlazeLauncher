@@ -535,6 +535,55 @@ expect_fail "Check 11 APK check rejects .py bundled into APK assets" "disallowed
     bash scripts/guard.sh --check-apk "$BAD_APK_PY"
 
 echo ""
+echo "=== 8. Check 12 Self-Tests (0007 local pin refresh patch scope guard) ==="
+
+if [ -f "engine/patches/0007-pin-refresh-26.3.patch" ]; then
+    expect_pass "Check 12 accepts real engine/patches/0007-pin-refresh-26.3.patch" \
+        env GUARD_CHECK12_ONLY_PATCH="engine/patches/0007-pin-refresh-26.3.patch" bash scripts/guard.sh
+fi
+
+BAD_PATCH_CLIENT="$TMP_ROOT/bad_0007_client_sha1.patch"
+cat > "$BAD_PATCH_CLIENT" <<'PATCH'
+diff --git a/research-lock.json b/research-lock.json
+--- a/research-lock.json
++++ b/research-lock.json
+@@ -17,7 +17,7 @@
+     ],
+     "accepted_asset_index_note": "The asset indexes (id 34) of those republished version JSONs: a launcher keeps one 34.json, the last it downloaded, whichever version JSON it reads.",
+-    "client_sha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
++    "client_sha1": "0000000000000000000000000000000000000000",
+     "server_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
+PATCH
+expect_fail "Check 12 rejects patch modifying client_sha1" "forbidden|non-hash|strict field" \
+    env GUARD_CHECK12_ONLY_PATCH="$BAD_PATCH_CLIENT" bash scripts/guard.sh
+
+BAD_PATCH_FIELD="$TMP_ROOT/bad_0007_unrelated_field.patch"
+cat > "$BAD_PATCH_FIELD" <<'PATCH'
+diff --git a/research-lock.json b/research-lock.json
+--- a/research-lock.json
++++ b/research-lock.json
+@@ -19,5 +19,6 @@
+     "accepted_asset_index_note": "The asset indexes (id 34) of those republished version JSONs: a launcher keeps one 34.json, the last it downloaded, whichever version JSON it reads.",
+     "client_sha1": "e877b6a07acd633fb3bb475002175cec036e7b87",
+     "server_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
++    "unrelated_field": "bypass",
+     "java_major": 25
+PATCH
+expect_fail "Check 12 rejects patch adding an unrelated field" "unrelated field|non-hash|added/removed fields" \
+    env GUARD_CHECK12_ONLY_PATCH="$BAD_PATCH_FIELD" bash scripts/guard.sh
+
+BAD_PATCH_OTHER_FILE="$TMP_ROOT/bad_0007_other_file.patch"
+cat > "$BAD_PATCH_OTHER_FILE" <<'PATCH'
+diff --git a/crates/horizon-client/src/catalog.rs b/crates/horizon-client/src/catalog.rs
+--- a/crates/horizon-client/src/catalog.rs
++++ b/crates/horizon-client/src/catalog.rs
+@@ -1,1 +1,2 @@
++// "9f67e10ed013deeaad20ac3c800652765d493408"
+PATCH
+expect_fail "Check 12 rejects patch touching files other than research-lock.json" "forbidden paths outside research-lock.json" \
+    env GUARD_CHECK12_ONLY_PATCH="$BAD_PATCH_OTHER_FILE" bash scripts/guard.sh
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

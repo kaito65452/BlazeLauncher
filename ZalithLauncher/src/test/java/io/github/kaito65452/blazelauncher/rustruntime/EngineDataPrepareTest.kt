@@ -222,4 +222,48 @@ class EngineDataPrepareTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun localPinRefreshWarningReachesPhase1AndEngineDataCheckReport() {
+        val env = BlazePrepareNative.parseEnvelope(
+            """{"ok":true,"data":{"work_dir":"/tmp/w","stage_dir":"/tmp/s","target_resources_dir":"/tmp/t","client_resource_files":10,"indexed_assets_copied":2,"controls_ready":1,"worldgen_structures_extracted":1,"worldgen_maps_written":19,"elapsed_ms":120,"peak_rss_kb":4096,"warnings":["Manifest/asset-index pin drift on 26.3 (manifest sha1=9f67e10ed013deeaad20ac3c800652765d493408, assetIndex sha1=e99f9973047785b5a9d52eaf72020b97545053c9; client_sha1 and server_sha1 match upstream pins): local pin refresh, not verified by upstream"]}}""",
+            Phase1OutputJson::class.java
+        )
+        assertTrue(env is PrepareEnvelope.Success)
+        val p1 = (env as PrepareEnvelope.Success).data
+        assertEquals(1, p1.warnings.size)
+        assertTrue(p1.warnings.first().contains("local pin refresh, not verified by upstream"))
+
+        val root = Files.createTempDirectory("blaze-prepare-warning-report-test").toFile()
+        try {
+            val filesDir = File(root, "files").apply { mkdirs() }
+            val statusDir = File(root, "status").apply { mkdirs() }
+            EngineDataPrepareTelemetry.save(
+                filesDir,
+                EngineDataPrepareMetrics(
+                    status = "ready",
+                    minecraftVersion = "26.3",
+                    warnings = p1.warnings,
+                    updatedAtMs = 1000L
+                )
+            )
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                logcatProvider = { "" }
+            )
+            val engineCheckIdx = report.indexOf("=== Engine Data Check ===")
+            val renderIdx = report.indexOf("=== Render Startup & Exit Summary ===")
+            assertTrue(engineCheckIdx >= 0 && renderIdx > engineCheckIdx)
+            val engineSection = report.substring(engineCheckIdx, renderIdx)
+            assertTrue(
+                "Expected local pin refresh warning in Engine Data Check section:\n$engineSection",
+                engineSection.contains("local pin refresh, not verified by upstream")
+            )
+            assertTrue(engineSection.contains("9f67e10ed013deeaad20ac3c800652765d493408"))
+            assertTrue(engineSection.contains("e99f9973047785b5a9d52eaf72020b97545053c9"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

@@ -35,6 +35,11 @@ jobs:
           ./scripts/guard.sh
           ./scripts/scope_guard.sh main
 
+      - name: Apply Engine Pin Refresh Patch to Bundled Lock
+        run: |
+          git -C engine/starling apply --check "$PWD/engine/patches/0007-pin-refresh-26.3.patch"
+          git -C engine/starling apply "$PWD/engine/patches/0007-pin-refresh-26.3.patch"
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:

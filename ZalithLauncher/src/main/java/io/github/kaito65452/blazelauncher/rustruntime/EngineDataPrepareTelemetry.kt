@@ -35,8 +35,14 @@ data class EngineDataPrepareMetrics(
     @SerializedName("files_downloaded") val filesDownloaded: Long = 0L,
     @SerializedName("engine_data_entries") val engineDataEntries: Long = 0L,
     @SerializedName("last_error") val lastError: String = "",
+    @SerializedName("warnings") val warnings: List<String> = emptyList(),
     @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
 )
+
+internal fun EngineDataPrepareMetrics.safeWarnings(): List<String> {
+    @Suppress("USELESS_ELVIS")
+    return warnings ?: emptyList()
+}
 
 object EngineDataPrepareTelemetry {
     private const val METRICS_FILE = "blaze_prepare_metrics.json"
@@ -46,7 +52,8 @@ object EngineDataPrepareTelemetry {
 
     fun save(filesDir: File, metrics: EngineDataPrepareMetrics) {
         val redacted = metrics.copy(
-            lastError = RustDiagnosticsCollector.redactDiagnosticText(metrics.lastError)
+            lastError = RustDiagnosticsCollector.redactDiagnosticText(metrics.lastError),
+            warnings = metrics.safeWarnings().map { RustDiagnosticsCollector.redactDiagnosticText(it) }
         )
         runCatching {
             val file = metricsFile(filesDir)
@@ -79,6 +86,12 @@ object EngineDataPrepareTelemetry {
             }
             if (metrics.lastError.isNotBlank()) {
                 appendLine("last_error: ${RustDiagnosticsCollector.redactDiagnosticText(metrics.lastError)}")
+            }
+            val safeWarnings = metrics.safeWarnings().filter { it.isNotBlank() }
+            if (safeWarnings.isNotEmpty()) {
+                safeWarnings.forEach { warn ->
+                    appendLine("warning: ${RustDiagnosticsCollector.redactDiagnosticText(warn)}")
+                }
             }
         }.trimEnd()
     }

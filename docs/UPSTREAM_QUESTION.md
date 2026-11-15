@@ -28,4 +28,7 @@ Today we apply build-time patches (`engine/patches/0001..0006`) on top of `fa548
 ### (d) Branch stability and generated-table status *(technical screening, not legal advice)*
 As the `android` branch freezes per `README.md` (*"Horizon Android is now Starling"*), which `starling` branch/tag should downstream integrators track next, how stable is the `horizon-prepare` layout (`SCHEMA = 7`, `OUTPUT_VERSION = 3`), and does upstream regard the 28 generated `.json`/`.nbt` files in `tools/android_build.py:49-68` as Starling-authored functional schemas or vanilla-derived extracts?
 
+### (e) Refreshing `research-lock.json` after Mojang republishes `26.3`
+Mojang has republished the `26.3` manifest (`9f67e10ed013deeaad20ac3c800652765d493408`) and asset index (`e99f9973047785b5a9d52eaf72020b97545053c9`) while keeping `client_sha1` and `server_sha1` unchanged (`fa548eb7ab`'s lock stops at `80608ff6...` / `917ff6d7...`). What is the intended process to refresh `research-lock.json` for republished metadata, and will the `starling` branch carry these updates going forward?
+
 Thank you for maintaining Starling!

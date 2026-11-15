@@ -76,7 +76,8 @@ data class Phase1OutputJson(
     @SerializedName("worldgen_structures_extracted") val worldgenStructuresExtracted: Long = 0,
     @SerializedName("worldgen_maps_written") val worldgenMapsWritten: Long = 0,
     @SerializedName("elapsed_ms") val elapsedMs: Long = 0,
-    @SerializedName("peak_rss_kb") val peakRssKb: Long = 0
+    @SerializedName("peak_rss_kb") val peakRssKb: Long = 0,
+    @SerializedName("warnings") val warnings: List<String> = emptyList()
 )
 
 data class Phase2OutputJson(

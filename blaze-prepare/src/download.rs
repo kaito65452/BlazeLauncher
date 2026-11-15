@@ -5,12 +5,13 @@
 //! Pin-verified downloads via `ureq` (Rustls) with ZL2 `<gameHome>` reuse and atomic `.partial` writes.
 
 use crate::files::{
-    atomic_copy_file, atomic_write_bytes, partial_path, sha1_file, sha256_file,
-    safe_relative, CancelFlag,
+    atomic_copy_file, atomic_write_bytes, partial_path, redact_sensitive, safe_relative, sha1_file,
+    sha256_file, CancelFlag,
 };
 use crate::lock::{
-    validate_download_url, validate_sha1_hex, validate_sha256_hex, validate_version_manifest,
-    BedrockControlsManifest, LockFile, MinecraftPin,
+    validate_download_url, validate_sha1_hex, validate_sha256_hex,
+    validate_version_manifest_with_source, BedrockControlsManifest, LockFile,
+    ManifestValidationInfo, MinecraftPin,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -144,6 +145,34 @@ fn file_matches(path: &Path, spec: &FileFetchSpec) -> Result<Option<u64>, String
     }
 }
 
+fn describe_reuse_mismatch(path: &Path, spec: &FileFetchSpec) -> Option<String> {
+    let Ok(meta) = fs::metadata(path) else {
+        return None;
+    };
+    if !meta.is_file() {
+        return None;
+    }
+    let len = meta.len();
+    if let Some(exp_size) = spec.expected_size {
+        if len != exp_size {
+            return Some(format!(
+                "reuse from <gameHome> ({}): size={len}, expected={exp_size}",
+                path.display()
+            ));
+        }
+    }
+    let actual = match spec.alg {
+        HashAlg::Sha1 => sha1_file(path).ok()?,
+        HashAlg::Sha256 => sha256_file(path).ok()?,
+    };
+    Some(format!(
+        "reuse from <gameHome> ({}): computed={}, expected={}",
+        path.display(),
+        actual,
+        spec.expected_hash
+    ))
+}
+
 /// Ensures `spec.dest` exists with verified size/hash, preferring local reuse candidates before HTTP.
 pub fn ensure_verified_file(
     fetcher: &HttpFetcher,
@@ -157,6 +186,7 @@ pub fn ensure_verified_file(
     if let Some(size) = file_matches(&spec.dest, spec)? {
         return Ok(FetchOutcome::AlreadyPresent(size));
     }
+    let mut reuse_notes = Vec::new();
     for cand in &spec.reuse_candidates {
         if cand == &spec.dest {
             continue;
@@ -164,6 +194,9 @@ pub fn ensure_verified_file(
         if let Some(size) = file_matches(cand, spec)? {
             atomic_copy_file(cand, &spec.dest, &fetcher.cancel)?;
             return Ok(FetchOutcome::ReusedFromStore(size));
+        }
+        if let Some(note) = describe_reuse_mismatch(cand, spec) {
+            reuse_notes.push(note);
         }
     }
 
@@ -207,12 +240,18 @@ pub fn ensure_verified_file(
                 .sync_all()
                 .map_err(|e| format!("{}: {e}", partial.display()))?;
             drop(writer);
+            let reuse_ctx = if reuse_notes.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", reuse_notes.join("; "))
+            };
             if let Some(exp_size) = spec.expected_size {
                 if written != exp_size {
-                    return Err(format!(
-                        "Size mismatch for {}: expected {exp_size}, got {written}",
+                    return Err(redact_sensitive(&format!(
+                        "Size mismatch for direct download from {} -> {}: expected {exp_size} bytes, got {written} bytes{reuse_ctx}. Next step: check your network connection or delete the partial download and retry.",
+                        spec.url,
                         spec.dest.display()
-                    ));
+                    )));
                 }
             }
             let actual = match spec.alg {
@@ -220,11 +259,12 @@ pub fn ensure_verified_file(
                 HashAlg::Sha256 => sha256_file(&partial)?,
             };
             if !actual.eq_ignore_ascii_case(&spec.expected_hash) {
-                return Err(format!(
-                    "Checksum mismatch for {}: expected {}, got {actual}",
+                return Err(redact_sensitive(&format!(
+                    "Checksum mismatch for direct download from {} -> {}: computed={actual}, expected={}{reuse_ctx}. Next step: delete corrupted cached files and retry on a stable connection.",
+                    spec.url,
                     spec.dest.display(),
                     spec.expected_hash
-                ));
+                )));
             }
             fs::rename(&partial, &spec.dest)
                 .map_err(|e| format!("{}: {e}", spec.dest.display()))?;
@@ -250,6 +290,30 @@ pub fn ensure_verified_file(
     unreachable!()
 }
 
+pub struct ResolvedManifest {
+    pub manifest: Value,
+    pub warnings: Vec<String>,
+}
+
+fn build_local_refresh_warnings(lock: &LockFile, info: &ManifestValidationInfo) -> Vec<String> {
+    let mut parts = Vec::new();
+    if lock.is_local_refreshed_manifest(&info.manifest_sha1) {
+        parts.push(format!("manifest sha1={}", info.manifest_sha1));
+    }
+    if lock.is_local_refreshed_asset_index(&info.asset_index_sha1) {
+        parts.push(format!("assetIndex sha1={}", info.asset_index_sha1));
+    }
+    if parts.is_empty() {
+        Vec::new()
+    } else {
+        vec![redact_sensitive(&format!(
+            "Manifest/asset-index pin drift on {} ({}; client_sha1 and server_sha1 match upstream pins): local pin refresh, not verified by upstream",
+            lock.minecraft.version,
+            parts.join(", ")
+        ))]
+    }
+}
+
 /// Resolves and pin-verifies `<version>.json`, reusing ZL2's version JSON if intact.
 pub fn resolve_version_manifest(
     fetcher: &HttpFetcher,
@@ -258,30 +322,60 @@ pub fn resolve_version_manifest(
     game_home: Option<&Path>,
     catalog_url: &str,
     stats: &mut DownloadStats,
-) -> Result<Value, String> {
+) -> Result<ResolvedManifest, String> {
     let dest = work_dir.join("manifest.json");
-    let mut candidates = vec![dest.clone()];
+    let mut candidates: Vec<(PathBuf, String)> = vec![(
+        dest.clone(),
+        format!("work cache ({})", dest.display()),
+    )];
     if let Some(gh) = game_home {
-        candidates.push(
-            gh.join("versions")
-                .join(&lock.minecraft.version)
-                .join(format!("{}.json", lock.minecraft.version)),
-        );
+        let gh_manifest = gh
+            .join("versions")
+            .join(&lock.minecraft.version)
+            .join(format!("{}.json", lock.minecraft.version));
+        let label = format!("reuse from <gameHome> ({})", gh_manifest.display());
+        candidates.push((gh_manifest, label));
     }
-    for cand in &candidates {
+    let mut local_rejections = Vec::new();
+    for (cand, source_label) in &candidates {
         if let Ok(bytes) = fs::read(cand) {
-            if let Ok(val) = validate_version_manifest(&bytes, None, &lock.minecraft, true) {
-                if cand != &dest {
-                    atomic_write_bytes(&dest, &bytes)?;
+            match validate_version_manifest_with_source(
+                &bytes,
+                None,
+                &lock.minecraft,
+                true,
+                source_label,
+            ) {
+                Ok((val, info)) => {
+                    if cand != &dest {
+                        atomic_write_bytes(&dest, &bytes)?;
+                    }
+                    stats.files_reused += 1;
+                    stats.bytes_reused += bytes.len() as u64;
+                    let warnings = build_local_refresh_warnings(lock, &info);
+                    return Ok(ResolvedManifest {
+                        manifest: val,
+                        warnings,
+                    });
                 }
-                stats.files_reused += 1;
-                stats.bytes_reused += bytes.len() as u64;
-                return Ok(val);
+                Err(err) => {
+                    local_rejections.push(err);
+                }
             }
         }
     }
 
-    let catalog_bytes = fetcher.get_bytes(catalog_url, 32 * 1024 * 1024)?;
+    let catalog_bytes = fetcher.get_bytes(catalog_url, 32 * 1024 * 1024).map_err(|e| {
+        if local_rejections.is_empty() {
+            e
+        } else {
+            redact_sensitive(&format!(
+                "{}; prior local checks failed: {}",
+                e,
+                local_rejections.join(" | ")
+            ))
+        }
+    })?;
     let catalog: Value =
         serde_json::from_slice(&catalog_bytes).map_err(|e| format!("Invalid catalog JSON: {e}"))?;
     let entry = catalog
@@ -306,18 +400,35 @@ pub fn resolve_version_manifest(
         .and_then(Value::as_str)
         .ok_or("Catalog entry missing sha1")?;
     if !lock.manifest_accepted(meta_sha1) {
-        return Err(format!(
-            "Catalog version {} manifest sha1 ({meta_sha1}) rejected by research-lock.json",
+        let local_ctx = if local_rejections.is_empty() {
+            String::new()
+        } else {
+            format!(" Local check notes: [{}].", local_rejections.join(" | "))
+        };
+        return Err(redact_sensitive(&format!(
+            "Catalog version {} manifest sha1 ({meta_sha1}) from direct download catalog entry ({meta_url}) is rejected by research-lock.json (accepted: [{}]).{local_ctx} Next step: Mojang may have republished {}; confirm client_sha1 and server_sha1 match upstream pins before adding an explicit lock refresh.",
+            lock.minecraft.version,
+            lock.accepted_manifest_list_display(),
             lock.minecraft.version
-        ));
+        )));
     }
     let manifest_bytes = fetcher.get_bytes(meta_url, 16 * 1024 * 1024)?;
-    let val =
-        validate_version_manifest(&manifest_bytes, Some(meta_sha1), &lock.minecraft, true)?;
+    let source_label = format!("direct download from {meta_url}");
+    let (val, info) = validate_version_manifest_with_source(
+        &manifest_bytes,
+        Some(meta_sha1),
+        &lock.minecraft,
+        true,
+        &source_label,
+    )?;
     atomic_write_bytes(&dest, &manifest_bytes)?;
     stats.files_downloaded += 1;
     stats.bytes_downloaded += manifest_bytes.len() as u64;
-    Ok(val)
+    let warnings = build_local_refresh_warnings(lock, &info);
+    Ok(ResolvedManifest {
+        manifest: val,
+        warnings,
+    })
 }
 
 fn rule_system() -> &'static str {
@@ -505,6 +616,15 @@ pub fn build_artifact_plan(
         .and_then(Value::as_str)
         .ok_or("assetIndex missing sha1")?
         .to_string();
+    let lock_wrapper = LockFile {
+        minecraft: pin.clone(),
+    };
+    if !lock_wrapper.asset_index_accepted(&idx_sha1) {
+        return Err(redact_sensitive(&format!(
+            "Asset index sha1 ({idx_sha1}) from version manifest is not accepted by research-lock.json (accepted: [{}]). Next step: refresh accepted_asset_index_sha1 only after verifying client_sha1 and server_sha1 match upstream pins.",
+            lock_wrapper.accepted_asset_index_list_display()
+        )));
+    }
     let idx_url = asset_idx
         .get("url")
         .and_then(Value::as_str)

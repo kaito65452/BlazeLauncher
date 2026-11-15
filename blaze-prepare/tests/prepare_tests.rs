@@ -2,7 +2,11 @@
 // Copyright (C) 2026 Blaze Launcher contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use blaze_prepare::files::{cleanup_partials, sha1_bytes, sha256_bytes, CancelFlag};
+use blaze_prepare::download::{resolve_version_manifest, DownloadStats, HttpFetcher};
+use blaze_prepare::files::{cleanup_partials, redact_sensitive, sha1_bytes, sha256_bytes, CancelFlag};
+use blaze_prepare::lock::{
+    LockFile, LOCAL_REFRESHED_ASSET_INDEX_SHA1, LOCAL_REFRESHED_MANIFEST_SHA1,
+};
 use blaze_prepare::resources::{
     is_generated_engine_file, is_prepared, package_resources_zip, run_phase1, run_phase2_finalize,
     PrepareConfig,
@@ -263,7 +267,7 @@ fn make_synthetic_world(base_url: &str) -> SyntheticWorld {
             "version": "26.3",
             "manifest_sha1": manifest_sha1,
             "accepted_manifest_sha1": [],
-            "accepted_asset_index_sha1": [],
+            "accepted_asset_index_sha1": [asset_index_sha1],
             "client_sha1": client_sha1,
             "server_sha1": server_sha1,
             "java_major": 25
@@ -1024,4 +1028,250 @@ fn synthetic_parity_export_for_ci_oracle() {
 
     stop.store(true, Ordering::Relaxed);
     let _ = srv_thread.join();
+}
+
+#[test]
+fn task_y6_manifest_and_asset_index_drift_policy_synthetic() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+
+    let world = make_synthetic_world(&base);
+    let mut base_manifest: serde_json::Value = serde_json::from_slice(&world.manifest_bytes).unwrap();
+    let refreshed_idx_sha1 = LOCAL_REFRESHED_ASSET_INDEX_SHA1[0];
+    base_manifest["assetIndex"]["sha1"] = serde_json::json!(refreshed_idx_sha1);
+    let drifted_manifest_bytes = serde_json::to_vec(&base_manifest).unwrap();
+    let drifted_manifest_sha1 = sha1_bytes(&drifted_manifest_bytes);
+
+    let catalog = serde_json::to_vec(&serde_json::json!({
+        "versions": [
+            {
+                "id": "26.3",
+                "url": format!("{base}/drifted-manifest.json"),
+                "sha1": drifted_manifest_sha1,
+            }
+        ]
+    }))
+    .unwrap();
+
+    let mut routes: HashMap<String, Vec<u8>> = HashMap::new();
+    routes.insert("/catalog.json".into(), catalog);
+    routes.insert("/drifted-manifest.json".into(), drifted_manifest_bytes.clone());
+
+    // Client jar mismatch manifest (listed hash, wrong client_sha1)
+    let mut bad_client_manifest = base_manifest.clone();
+    bad_client_manifest["downloads"]["client"]["sha1"] =
+        serde_json::json!("0000000000000000000000000000000000000000");
+    let bad_client_bytes = serde_json::to_vec(&bad_client_manifest).unwrap();
+    let bad_client_manifest_sha1 = sha1_bytes(&bad_client_bytes);
+    routes.insert("/bad-client-manifest.json".into(), bad_client_bytes);
+    routes.insert(
+        "/catalog-bad-client.json".into(),
+        serde_json::to_vec(&serde_json::json!({
+            "versions": [{ "id": "26.3", "url": format!("{base}/bad-client-manifest.json"), "sha1": bad_client_manifest_sha1 }]
+        }))
+        .unwrap(),
+    );
+
+    // Server jar mismatch manifest (listed hash, wrong server_sha1)
+    let mut bad_server_manifest = base_manifest.clone();
+    bad_server_manifest["downloads"]["server"]["sha1"] =
+        serde_json::json!("1111111111111111111111111111111111111111");
+    let bad_server_bytes = serde_json::to_vec(&bad_server_manifest).unwrap();
+    let bad_server_manifest_sha1 = sha1_bytes(&bad_server_bytes);
+    routes.insert("/bad-server-manifest.json".into(), bad_server_bytes);
+    routes.insert(
+        "/catalog-bad-server.json".into(),
+        serde_json::to_vec(&serde_json::json!({
+            "versions": [{ "id": "26.3", "url": format!("{base}/bad-server-manifest.json"), "sha1": bad_server_manifest_sha1 }]
+        }))
+        .unwrap(),
+    );
+
+    // Unlisted asset index manifest (manifest sha1 listed, assetIndex.sha1 unlisted)
+    let mut unlisted_idx_manifest = base_manifest.clone();
+    let unlisted_idx_sha1 = "2222222222222222222222222222222222222222";
+    unlisted_idx_manifest["assetIndex"]["sha1"] = serde_json::json!(unlisted_idx_sha1);
+    let unlisted_idx_bytes = serde_json::to_vec(&unlisted_idx_manifest).unwrap();
+    let unlisted_idx_manifest_sha1 = sha1_bytes(&unlisted_idx_bytes);
+    routes.insert("/unlisted-idx-manifest.json".into(), unlisted_idx_bytes);
+    routes.insert(
+        "/catalog-unlisted-idx.json".into(),
+        serde_json::to_vec(&serde_json::json!({
+            "versions": [{ "id": "26.3", "url": format!("{base}/unlisted-idx-manifest.json"), "sha1": unlisted_idx_manifest_sha1 }]
+        }))
+        .unwrap(),
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::clone(&stop);
+    let srv = std::thread::spawn(move || {
+        while !stop_c.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut s, _)) => {
+                    let _ = s.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let n = s.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    if let Some(body) = routes.get(path) {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = s.write_all(hdr.as_bytes());
+                        let _ = s.write_all(body);
+                    } else {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                    let _ = s.flush();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let dir = TempDir::new("tasky6");
+    let cancel = CancelFlag::new();
+    let fetcher = HttpFetcher::new(true, cancel.clone());
+
+    // Helper lock containing patched local-refresh hashes + test manifest hashes
+    let make_lock = |accepted_manifests: Vec<&str>, accepted_indices: Vec<&str>| -> LockFile {
+        let val = serde_json::json!({
+            "minecraft": {
+                "version": "26.3",
+                "manifest_sha1": world.manifest_sha1,
+                "accepted_manifest_sha1": accepted_manifests,
+                "accepted_asset_index_sha1": accepted_indices,
+                "client_sha1": world.client_sha1,
+                "server_sha1": world.server_sha1,
+                "java_major": 25
+            }
+        });
+        serde_json::from_value(val).unwrap()
+    };
+
+    // (i) Accepted drift passes with warning when client_sha1 and server_sha1 match
+    let lock_ok = make_lock(
+        vec![&drifted_manifest_sha1, LOCAL_REFRESHED_MANIFEST_SHA1[0]],
+        vec![&world.asset_index_sha1, refreshed_idx_sha1],
+    );
+    assert!(lock_ok.is_local_refreshed_manifest(LOCAL_REFRESHED_MANIFEST_SHA1[0]));
+    assert!(lock_ok.is_local_refreshed_asset_index(refreshed_idx_sha1));
+    let mut stats = DownloadStats::default();
+    let work_i = dir.path().join("case_i");
+    fs::create_dir_all(&work_i).unwrap();
+    let resolved = resolve_version_manifest(
+        &fetcher,
+        &lock_ok,
+        &work_i,
+        None,
+        &format!("{base}/catalog.json"),
+        &mut stats,
+    )
+    .expect("Accepted local-refresh drift must pass");
+    assert!(
+        resolved
+            .warnings
+            .iter()
+            .any(|w| w.contains("local pin refresh, not verified by upstream")),
+        "Expected local pin refresh warning, got: {:?}",
+        resolved.warnings
+    );
+
+    // (ii) Unlisted manifest hash is rejected with descriptive source/hash/accepted/next-step message
+    let lock_unlisted_manifest = make_lock(vec![], vec![refreshed_idx_sha1]);
+    let work_ii = dir.path().join("case_ii");
+    let gh_ii = dir.path().join("gh_ii");
+    fs::create_dir_all(&work_ii).unwrap();
+    fs::create_dir_all(gh_ii.join("versions/26.3")).unwrap();
+    fs::write(gh_ii.join("versions/26.3/26.3.json"), &drifted_manifest_bytes).unwrap();
+    let err_ii = resolve_version_manifest(
+        &fetcher,
+        &lock_unlisted_manifest,
+        &work_ii,
+        Some(&gh_ii),
+        &format!("{base}/catalog.json"),
+        &mut DownloadStats::default(),
+    )
+    .err()
+    .expect("Unlisted manifest sha1 must be rejected");
+    assert!(err_ii.contains(&drifted_manifest_sha1), "err={err_ii}");
+    assert!(err_ii.contains("reuse from <gameHome>"), "err={err_ii}");
+    assert!(err_ii.contains("direct download"), "err={err_ii}");
+    assert!(err_ii.contains("Next step:"), "err={err_ii}");
+
+    // (iii) Unlisted asset index hash is rejected even if manifest sha1 is listed and jars match
+    let lock_unlisted_idx = make_lock(vec![&unlisted_idx_manifest_sha1], vec![refreshed_idx_sha1]);
+    let work_iii = dir.path().join("case_iii");
+    fs::create_dir_all(&work_iii).unwrap();
+    let err_iii = resolve_version_manifest(
+        &fetcher,
+        &lock_unlisted_idx,
+        &work_iii,
+        None,
+        &format!("{base}/catalog-unlisted-idx.json"),
+        &mut DownloadStats::default(),
+    )
+    .err()
+    .expect("Unlisted assetIndex.sha1 must be rejected");
+    assert!(err_iii.contains(unlisted_idx_sha1), "err={err_iii}");
+    assert!(err_iii.contains("accepted_asset_index_sha1") || err_iii.contains("research-lock.json"), "err={err_iii}");
+    assert!(err_iii.contains("Next step:"), "err={err_iii}");
+
+    // (iv) Client and server sha1 mismatches rejected even when manifest & asset index hashes are listed
+    let lock_bad_jars = make_lock(
+        vec![&bad_client_manifest_sha1, &bad_server_manifest_sha1],
+        vec![refreshed_idx_sha1],
+    );
+    let work_iv_c = dir.path().join("case_iv_client");
+    fs::create_dir_all(&work_iv_c).unwrap();
+    let err_iv_c = resolve_version_manifest(
+        &fetcher,
+        &lock_bad_jars,
+        &work_iv_c,
+        None,
+        &format!("{base}/catalog-bad-client.json"),
+        &mut DownloadStats::default(),
+    )
+    .err()
+    .expect("Mismatched client_sha1 must be rejected");
+    assert!(err_iv_c.contains("client_sha1 mismatch"), "err={err_iv_c}");
+
+    let work_iv_s = dir.path().join("case_iv_server");
+    fs::create_dir_all(&work_iv_s).unwrap();
+    let err_iv_s = resolve_version_manifest(
+        &fetcher,
+        &lock_bad_jars,
+        &work_iv_s,
+        None,
+        &format!("{base}/catalog-bad-server.json"),
+        &mut DownloadStats::default(),
+    )
+    .err()
+    .expect("Mismatched server_sha1 must be rejected");
+    assert!(err_iv_s.contains("server_sha1 mismatch"), "err={err_iv_s}");
+
+    // Y5 redaction preserves 40-char SHA-1 digests while scrubbing tokens and truncating full UUIDs
+    let sample_sha1 = "9f67e10ed013deeaad20ac3c800652765d493408";
+    let dirty = format!(
+        "sha1={sample_sha1} uuid=12345678-90ab-cdef-1234-567890abcdef compact=abcdef0123456789abcdef0123456789 access_token=secret123"
+    );
+    let clean = redact_sensitive(&dirty);
+    assert!(clean.contains(sample_sha1), "SHA-1 should remain intact: {clean}");
+    assert!(clean.contains("12345678..."), "Dashed UUID should truncate to 8 chars: {clean}");
+    assert!(clean.contains("abcdef01..."), "32-hex UUID should truncate to 8 chars: {clean}");
+    assert!(!clean.contains("secret123"), "Token should be scrubbed: {clean}");
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = srv.join();
 }
