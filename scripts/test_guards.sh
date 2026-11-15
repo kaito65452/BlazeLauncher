@@ -605,6 +605,42 @@ expect_fail "Zero/NUL check rejects text file containing embedded NUL bytes" "NU
     env GUARD_CHECK_ZERO_ONLY_DIR="$BAD_MIXED_NUL_DIR" bash scripts/guard.sh
 
 echo ""
+echo "=== 10. Real-Data Preflight Workflow Hygiene Self-Tests (P4 / check_preflight_workflow.sh) ==="
+
+expect_pass "Preflight hygiene check accepts repo .github/workflows/preflight-real.yml" \
+    bash scripts/check_preflight_workflow.sh .github/workflows/preflight-real.yml
+
+BAD_PREFLIGHT_PUSH="$TMP_ROOT/preflight-push.yml"
+sed 's/workflow_dispatch:/push:\n  workflow_dispatch:/' .github/workflows/preflight-real.yml > "$BAD_PREFLIGHT_PUSH"
+expect_fail "Preflight hygiene check rejects push trigger" "Forbidden trigger 'push'" \
+    bash scripts/check_preflight_workflow.sh "$BAD_PREFLIGHT_PUSH"
+
+BAD_PREFLIGHT_PR="$TMP_ROOT/preflight-pr.yml"
+sed 's/workflow_dispatch:/pull_request:\n  workflow_dispatch:/' .github/workflows/preflight-real.yml > "$BAD_PREFLIGHT_PR"
+expect_fail "Preflight hygiene check rejects pull_request trigger" "Forbidden trigger 'pull_request'" \
+    bash scripts/check_preflight_workflow.sh "$BAD_PREFLIGHT_PR"
+
+BAD_PREFLIGHT_UPLOAD="$TMP_ROOT/preflight-upload.yml"
+python3 - .github/workflows/preflight-real.yml "$BAD_PREFLIGHT_UPLOAD" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+s = s.replace("preflight-${{ matrix.arch }}.log", "engine-data.zip")
+open(sys.argv[2], "w").write(s)
+PY
+expect_fail "Preflight hygiene check rejects uploading engine-data.zip" "Forbidden Mojang/engine artifact path" \
+    bash scripts/check_preflight_workflow.sh "$BAD_PREFLIGHT_UPLOAD"
+
+BAD_PREFLIGHT_CACHE="$TMP_ROOT/preflight-cache.yml"
+python3 - .github/workflows/preflight-real.yml "$BAD_PREFLIGHT_CACHE" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+s = s.replace("actions/setup-java@v4", "actions/cache@v4")
+open(sys.argv[2], "w").write(s)
+PY
+expect_fail "Preflight hygiene check rejects actions/cache in preflight-real.yml" "Forbidden 'actions/cache'" \
+    bash scripts/check_preflight_workflow.sh "$BAD_PREFLIGHT_CACHE"
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

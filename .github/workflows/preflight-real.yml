@@ -1,0 +1,402 @@
+name: Real-Data Preflight (Minecraft 26.3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      heap_mb:
+        description: "JVM -Xmx headroom in MiB for desktop exporters/datagen (upstream default: 2048)"
+        required: false
+        default: "2048"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Real 26.3 Preflight (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.arm }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-latest
+            arm: false
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            arm: true
+
+    steps:
+      - name: Checkout Pinned Repository & Submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Verify Pinned Engine Submodule & Apply Patches (incl. 0007)
+        run: |
+          if [ ! -d "engine/starling" ] || [ ! -s "engine/starling/Cargo.toml" ]; then
+            echo "ERROR: engine/starling submodule is missing or empty!" >&2
+            exit 1
+          fi
+          ACTUAL_SHA=$(git -C engine/starling rev-parse HEAD)
+          EXPECTED_SHA="fa548eb7abe91c194d3780e4580b9746323cd606"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: engine/starling HEAD ($ACTUAL_SHA) != pinned ($EXPECTED_SHA)" >&2
+            exit 1
+          fi
+          for p in engine/patches/*.patch; do
+            echo "Applying $p on $EXPECTED_SHA..."
+            git -C engine/starling apply --check "$PWD/$p"
+            git -C engine/starling apply "$PWD/$p"
+          done
+          echo "✓ Patches applied cleanly to $EXPECTED_SHA"
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Setup Desktop JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Build & Run blaze-prepare Preflight (Real Mojang 26.3 -> $RUNNER_TEMP)
+        env:
+          ARCH_LABEL: ${{ matrix.arch }}
+          HEAP_MB: ${{ inputs.heap_mb || '2048' }}
+        run: |
+          set -euo pipefail
+          PREFLIGHT_DIR="$RUNNER_TEMP/preflight-work-$ARCH_LABEL"
+          REPORT_DIR="$RUNNER_TEMP/preflight-reports-$ARCH_LABEL"
+          rm -rf "$PREFLIGHT_DIR" "$REPORT_DIR"
+          mkdir -p "$PREFLIGHT_DIR/files" "$PREFLIGHT_DIR/staged/parity/dev/horizonlab/parity" "$REPORT_DIR"
+
+          # Stage the exact 26 upstream MIT Java exporter files + PrepareBatchShim.java
+          SRC_PARITY="engine/starling/mods/horizon/src/test/java/dev/horizonlab/parity"
+          DST_PARITY="$PREFLIGHT_DIR/staged/parity/dev/horizonlab/parity"
+          for name in \
+            ParityData.java PrepareWorker.java VanillaBlockBehaviourExporter.java \
+            VanillaBlockLandingOracle.java VanillaBlockPropertiesOracle.java \
+            VanillaBlockStateCodecOracle.java VanillaBlockSupportOracle.java \
+            VanillaBlockSurvivalOracle.java VanillaCollisionOracle.java \
+            VanillaCommandParseOracle.java VanillaCreativeTabsExporter.java \
+            VanillaDamageSourceOracle.java VanillaEntityAttributeOracle.java \
+            VanillaEntityTypesExporter.java VanillaFaceVisibilityOracle.java \
+            VanillaGameplayFactsExporter.java VanillaHeightmapOracle.java \
+            VanillaMovementRegistryOracle.java VanillaPlacementOracle.java \
+            VanillaPlayerHealthOracle.java VanillaSimpleBlockOracle.java \
+            VanillaStructureBlockExporter.java VanillaBlockStateBindingOracle.java \
+            VanillaCuboidModelOracle.java VanillaEntityModelExporter.java \
+            VanillaMobDataExporter.java
+          do
+            cp "$SRC_PARITY/$name" "$DST_PARITY/$name"
+          done
+          cp "ZalithLauncher/src/main/assets/blaze-prepare/PrepareBatchShim.java" "$DST_PARITY/PrepareBatchShim.java"
+
+          LOCK_FILE="engine/starling/research-lock.json"
+          CONTROLS_FILE="engine/starling/packaging/android/bedrock-controls.json"
+          SUMMARY_JSON="$PREFLIGHT_DIR/blaze-summary.json"
+          LOG_FILE="$REPORT_DIR/preflight-$ARCH_LABEL.log"
+
+          echo "=== Running blaze-prepare preflight (arch=$ARCH_LABEL heap_mb=$HEAP_MB) ===" | tee "$LOG_FILE"
+          cargo run --locked --release --manifest-path blaze-prepare/Cargo.toml --example preflight -- \
+            --files-dir "$PREFLIGHT_DIR/files" \
+            --lock-path "$LOCK_FILE" \
+            --controls-manifest "$CONTROLS_FILE" \
+            --parity-sources "$PREFLIGHT_DIR/staged/parity" \
+            --java-home "$JAVA_HOME" \
+            --heap-mb "$HEAP_MB" \
+            --summary-json "$SUMMARY_JSON" 2>&1 | tee -a "$LOG_FILE"
+
+      - name: Run Upstream horizon-prepare Parity Comparison & Readiness Check (P3)
+        env:
+          ARCH_LABEL: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          PREFLIGHT_DIR="$RUNNER_TEMP/preflight-work-$ARCH_LABEL"
+          REPORT_DIR="$RUNNER_TEMP/preflight-reports-$ARCH_LABEL"
+          SUMMARY_JSON="$PREFLIGHT_DIR/blaze-summary.json"
+          LOG_FILE="$REPORT_DIR/preflight-$ARCH_LABEL.log"
+          SUMMARY_MD="$REPORT_DIR/preflight-summary-$ARCH_LABEL.md"
+
+          echo "=== Building upstream horizon-prepare (from patched pinned submodule) ===" | tee -a "$LOG_FILE"
+          cargo build --locked --release --manifest-path engine/starling/Cargo.toml -p horizon-prepare
+          HORIZON_BIN="engine/starling/target/release/horizon-prepare"
+
+          # Read blaze-prepare summary metadata cleanly in Python (no Mojang content leaked)
+          eval "$(python3 - "$SUMMARY_JSON" <<'PY'
+          import json, shlex, sys
+          d = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+          for k, env_k in [
+              ("manifest_json", "MANIFEST_JSON"),
+              ("client_jar", "CLIENT_JAR"),
+              ("server_jar", "SERVER_JAR"),
+              ("libraries_dir", "BLAZE_LIBS_DIR"),
+              ("assets_dir", "ASSETS_DIR"),
+              ("target_resources_dir", "BLAZE_OUT_DIR"),
+          ]:
+              print(f"{env_k}={shlex.quote(d[k])}")
+          PY
+          )"
+
+          # Hardlink blaze-prepare libraries and fetch only desktop Linux natives filtered by Android rule
+          UPSTREAM_LIBS="$PREFLIGHT_DIR/upstream-libs"
+          python3 - "$MANIFEST_JSON" "$BLAZE_LIBS_DIR" "$UPSTREAM_LIBS" <<'PY' 2>&1 | tee -a "$LOG_FILE"
+          import hashlib, json, os, platform, re, shutil, sys, urllib.request
+          from urllib.parse import urlparse
+
+          manifest_path, src_libs, dst_libs = sys.argv[1], sys.argv[2], sys.argv[3]
+          os.makedirs(dst_libs, exist_ok=True)
+          for root, _, files in os.walk(src_libs):
+              rel_root = os.path.relpath(root, src_libs)
+              out_root = os.path.join(dst_libs, rel_root) if rel_root != "." else dst_libs
+              os.makedirs(out_root, exist_ok=True)
+              for fn in files:
+                  src = os.path.join(root, fn)
+                  dst = os.path.join(out_root, fn)
+                  if not os.path.exists(dst):
+                      os.link(src, dst)
+
+          lock_rs = open("blaze-prepare/src/lock.rs", "r", encoding="utf-8").read()
+          m = re.search(r"pub const ALLOWED_DOWNLOAD_HOSTS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", lock_rs, re.S)
+          allowed_hosts = set(re.findall(r'"([^"]+)"', m.group(1)))
+
+          mach = platform.machine().lower()
+          arches = ["arm64", "aarch64"] if mach in ("arm64", "aarch64") else ["x86_64", "amd64", "x64"]
+          manifest = json.load(open(manifest_path, "r", encoding="utf-8"))
+          libs = manifest.get("libraries", [])
+          names = [l.get("name", "") for l in libs if l.get("name")]
+
+          def lib_allowed(lib):
+              rules = lib.get("rules") or []
+              ok = len(rules) == 0
+              for r in rules:
+                  os_obj = r.get("os") or {}
+                  if os_obj.get("name", "linux") != "linux":
+                      continue
+                  if "arch" in os_obj and not any(re.match(rf"^(?:{os_obj['arch']})$", a) for a in arches):
+                      continue
+                  feats = r.get("features")
+                  if feats:
+                      continue
+                  ok = r.get("action") == "allow"
+              return ok
+
+          def native_matches(lib):
+              arm = "arm64" in arches
+              name = lib.get("name", "")
+              parts = name.split(":")
+              cls = parts[3] if len(parts) > 3 else ""
+              def ends(c, opts):
+                  return any(c == o or (c.endswith(o) and c[:-len(o)].endswith("-")) for o in opts)
+              if ends(cls, ("arm64", "aarch64", "aarch_64")):
+                  return arm
+              if ends(cls, ("x86_64", "x64")):
+                  return not arm
+              if arm and cls.startswith("natives-"):
+                  return not any(f"{name}-{s}" in names for s in ("arm64", "aarch64"))
+              return True
+
+          extra_fetched = []
+          for lib in libs:
+              art = (lib.get("downloads") or {}).get("artifact")
+              if not art or not lib_allowed(lib) or not native_matches(lib):
+                  continue
+              dest = os.path.join(dst_libs, art["path"])
+              if os.path.isfile(dest):
+                  continue
+              url = art["url"]
+              p = urlparse(url)
+              assert p.scheme == "https" and (p.port in (None, 443)) and (p.hostname or "").lower() in allowed_hosts, f"Blocked URL host: {p.hostname}"
+              os.makedirs(os.path.dirname(dest), exist_ok=True)
+              req = urllib.request.Request(url, headers={"User-Agent": "BlazeLauncher-Preflight/1.0"})
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  data = resp.read()
+              got = hashlib.sha1(data).hexdigest()
+              assert got == art["sha1"].lower(), f"SHA-1 mismatch on {lib.get('name')}"
+              with open(dest, "wb") as f:
+                  f.write(data)
+              extra_fetched.append(lib.get("name", art["path"]))
+          print(f"UPSTREAM_DESKTOP_NATIVES_ADDED count={len(extra_fetched)} names={extra_fetched}")
+          PY
+
+          UPSTREAM_OUT="$PREFLIGHT_DIR/upstream-out"
+          t0=$(date +%s%3N)
+          "$HORIZON_BIN" \
+            --prepare \
+            --root "$PWD/engine/starling" \
+            --version-json "$MANIFEST_JSON" \
+            --client-jar "$CLIENT_JAR" \
+            --libraries-dir "$UPSTREAM_LIBS" \
+            --assets-dir "$ASSETS_DIR" \
+            --server-jar "$SERVER_JAR" \
+            --java-home "$JAVA_HOME" \
+            --output "$UPSTREAM_OUT" \
+            --complete 2>&1 | tee -a "$LOG_FILE"
+          t1=$(date +%s%3N)
+          UPSTREAM_MS=$((t1 - t0))
+          echo "UPSTREAM_HORIZON_PREPARE elapsed_ms=$UPSTREAM_MS" | tee -a "$LOG_FILE"
+
+          # Run upstream horizon-prepare --check directly on blaze-prepare output
+          set +e
+          CHECK_OUT="$("$HORIZON_BIN" --check --root "$PWD/engine/starling" --output "$BLAZE_OUT_DIR" 2>&1)"
+          CHECK_EXIT=$?
+          set -e
+          echo "HORIZON_CHECK_ON_BLAZE exit=$CHECK_EXIT" | tee -a "$LOG_FILE"
+          printf '%s\n' "$CHECK_OUT" | tee -a "$LOG_FILE"
+
+          # Compare outputs file-by-file (SHA-256 + schema/output_version + semantic JSON equality)
+          python3 - "$SUMMARY_JSON" "$BLAZE_OUT_DIR" "$UPSTREAM_OUT" "$CHECK_EXIT" "$CHECK_OUT" "$UPSTREAM_MS" "$SUMMARY_MD" <<'PY'
+          import hashlib, json, os, sys
+
+          summary_json, blaze_dir, upstream_dir, check_exit_s, check_out, upstream_ms_s, summary_md = sys.argv[1:8]
+          blaze = json.load(open(summary_json, "r", encoding="utf-8"))
+
+          def walk_dir(root):
+              inv = {}
+              for r, _, files in os.walk(root):
+                  for fn in files:
+                      p = os.path.join(r, fn)
+                      rel = os.path.relpath(p, root).replace(os.sep, "/")
+                      h = hashlib.sha256()
+                      sz = 0
+                      with open(p, "rb") as fh:
+                          while True:
+                              b = fh.read(65536)
+                              if not b:
+                                  break
+                              sz += len(b)
+                              h.update(b)
+                      inv[rel] = (sz, h.hexdigest())
+              return inv
+
+          b_inv = walk_dir(blaze_dir)
+          u_inv = walk_dir(upstream_dir)
+          b_keys = set(b_inv)
+          u_keys = set(u_inv)
+
+          only_blaze = sorted(b_keys - u_keys)
+          only_upstream = sorted(u_keys - b_keys)
+          common = sorted(b_keys & u_keys)
+
+          identical = []
+          json_equiv_fmt_diff = []
+          content_diff = []
+
+          for rel in common:
+              bsz, bsha = b_inv[rel]
+              usz, usha = u_inv[rel]
+              if bsha == usha:
+                  identical.append((rel, bsz, bsha))
+              else:
+                  sem_eq = False
+                  if rel.endswith(".json"):
+                      try:
+                          bj = json.load(open(os.path.join(blaze_dir, rel), "r", encoding="utf-8"))
+                          uj = json.load(open(os.path.join(upstream_dir, rel), "r", encoding="utf-8"))
+                          sem_eq = (bj == uj)
+                      except Exception:
+                          sem_eq = False
+                  if sem_eq:
+                      json_equiv_fmt_diff.append((rel, bsz, bsha, usz, usha))
+                  else:
+                      content_diff.append((rel, bsz, bsha, usz, usha))
+
+          def read_markers(d):
+              res = {}
+              rp = os.path.join(d, "horizon-resources.json")
+              pp = os.path.join(d, "horizon-prepare.json")
+              if os.path.isfile(rp):
+                  rj = json.load(open(rp, "r", encoding="utf-8"))
+                  res["schema"] = rj.get("schema")
+                  res["minecraft"] = rj.get("minecraft")
+                  res["resource_keys"] = sorted(rj.keys())
+              if os.path.isfile(pp):
+                  pj = json.load(open(pp, "r", encoding="utf-8"))
+                  res["output_version"] = pj.get("output_version")
+              return res
+
+          b_mark = read_markers(blaze_dir)
+          u_mark = read_markers(upstream_dir)
+
+          total_b_bytes = sum(v[0] for v in b_inv.values())
+          total_u_bytes = sum(v[0] for v in u_inv.values())
+
+          print(
+              f"PARITY_SUMMARY arch={blaze['arch']} total_common={len(common)} "
+              f"byte_identical={len(identical)} json_sem_eq_only={len(json_equiv_fmt_diff)} "
+              f"content_diff={len(content_diff)} only_blaze={len(only_blaze)} only_upstream={len(only_upstream)} "
+              f"check_exit={check_exit_s}"
+          )
+          for rel in only_blaze:
+              print(f"ONLY_BLAZE rel={rel} bytes={b_inv[rel][0]} sha256={b_inv[rel][1]}")
+          for rel in only_upstream:
+              print(f"ONLY_UPSTREAM rel={rel} bytes={u_inv[rel][0]} sha256={u_inv[rel][1]}")
+          for rel, bsz, bsha, usz, usha in json_equiv_fmt_diff:
+              print(f"JSON_FMT_DIFF rel={rel} blaze_bytes={bsz} blaze_sha256={bsha} upstream_bytes={usz} upstream_sha256={usha}")
+          for rel, bsz, bsha, usz, usha in content_diff:
+              print(f"CONTENT_DIFF rel={rel} blaze_bytes={bsz} blaze_sha256={bsha} upstream_bytes={usz} upstream_sha256={usha}")
+
+          with open(summary_md, "w", encoding="utf-8") as out:
+              out.write(f"# Real-Data Preflight Summary (`{blaze['arch']}`)\n\n")
+              out.write(f"- Total `blaze-prepare` wall-clock: `{blaze['total_ms']} ms`\n")
+              out.write(f"- Upstream `horizon-prepare --complete` wall-clock: `{upstream_ms_s} ms`\n")
+              out.write(f"- `blaze-prepare` Rust process `VmHWM`: `{blaze['rust_process_peak_rss_kb']} KiB`\n")
+              out.write(f"- Max step peak RSS (`VmHWM`): `{blaze['max_step_peak_rss_kb']} KiB`\n")
+              out.write(f"- Downloaded files: `{blaze['files_downloaded']}` (`{blaze['bytes_downloaded']}` bytes), reused: `{blaze['files_reused']}`\n")
+              out.write(f"- `engine-data.zip` entries: `{blaze['engine_data_entries']}`\n")
+              out.write(f"- `is_prepared(&files_dir, \"26.3\")`: `{blaze['is_prepared']}`\n")
+              out.write(f"- Upstream `horizon-prepare --check` on `blaze-prepare` output: exit `{check_exit_s}`\n\n")
+              out.write("## Per-Phase Timings & Peak Memory (`VmHWM`)\n\n")
+              out.write("| Phase | Elapsed (ms) | Peak RSS (KiB) |\n|---|---|---|\n")
+              for st in blaze["steps"]:
+                  out.write(f"| `{st['name']}` | {st['elapsed_ms']} | {st['peak_rss_kb']} |\n")
+              out.write("\n## Markers & Counts\n\n")
+              out.write(f"- `blaze-prepare`: files=`{len(b_inv)}`, bytes=`{total_b_bytes}`, markers=`{b_mark}`\n")
+              out.write(f"- `horizon-prepare`: files=`{len(u_inv)}`, bytes=`{total_u_bytes}`, markers=`{u_mark}`\n")
+              out.write(f"- `horizon-prepare --check` output:\n```text\n{check_out.strip() or '(empty: exit 0 ready)'}\n```\n\n")
+              out.write("## Parity Diff Overview (Zero Mojang Content)\n\n")
+              out.write(f"- Common files: `{len(common)}`\n")
+              out.write(f"- Byte-identical SHA-256: `{len(identical)}`\n")
+              out.write(f"- JSON semantically identical (formatting/key-order diff only): `{len(json_equiv_fmt_diff)}`\n")
+              out.write(f"- Content diffs: `{len(content_diff)}`\n")
+              out.write(f"- Only in `blaze-prepare` ({len(only_blaze)}): `{only_blaze}`\n")
+              out.write(f"- Only in `horizon-prepare` ({len(only_upstream)}): `{only_upstream}`\n\n")
+              if json_equiv_fmt_diff:
+                  out.write("### JSON Formatting-Only Differences\n")
+                  for rel, bsz, bsha, usz, usha in json_equiv_fmt_diff:
+                      out.write(f"- `{rel}`: blaze={bsz}B (`{bsha[:12]}...`) vs upstream={usz}B (`{usha[:12]}...`)\n")
+              if content_diff:
+                  out.write("\n### Content Differences\n")
+                  for rel, bsz, bsha, usz, usha in content_diff:
+                      out.write(f"- `{rel}`: blaze={bsz}B (`{bsha[:12]}...`) vs upstream={usz}B (`{usha[:12]}...`)\n")
+          PY
+          cat "$SUMMARY_MD" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup Transient Mojang Data from Runner Temp
+        if: always()
+        env:
+          ARCH_LABEL: ${{ matrix.arch }}
+        run: |
+          rm -rf "$RUNNER_TEMP/preflight-work-$ARCH_LABEL" "$PWD/engine/starling/.local"
+          REPORT_DIR="$RUNNER_TEMP/preflight-reports-$ARCH_LABEL"
+          if [ -d "$REPORT_DIR" ]; then
+            BAD=$(find "$REPORT_DIR" -type f ! \( -name '*.log' -o -name '*-summary-*.md' \) || true)
+            if [ -n "$BAD" ]; then
+              echo "ERROR: Unexpected non-report files in report dir: $BAD" >&2
+              exit 1
+            fi
+          fi
+          echo "✓ Cleaned transient Mojang data from $RUNNER_TEMP and engine/starling/.local"
+
+      - name: Upload Redacted Preflight Log & Summary ONLY
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-report-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/preflight-reports-${{ matrix.arch }}/preflight-${{ matrix.arch }}.log
+            ${{ runner.temp }}/preflight-reports-${{ matrix.arch }}/preflight-summary-${{ matrix.arch }}.md
+          if-no-files-found: warn

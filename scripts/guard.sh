@@ -928,6 +928,12 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
+# --- Check 13: Real-data preflight workflow hygiene (P4) ---
+if [ -z "${1:-}" ] && [ -z "${GUARD_CHECK10_ONLY_DIR:-}" ] && [ -z "${GUARD_CHECK11_ONLY_APK:-}" ] && [ -z "${GUARD_CHECK12_ONLY_APK:-}" ]; then
+    echo "=== Checking preflight-real.yml hygiene ==="
+    bash scripts/check_preflight_workflow.sh
+fi
+
 if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
     CHECK_RELEASE_APK=0
     if [ "${1:-}" = "--check-release-apk" ]; then
