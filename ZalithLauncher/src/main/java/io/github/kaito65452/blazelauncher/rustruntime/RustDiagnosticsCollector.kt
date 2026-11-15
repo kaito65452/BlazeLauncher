@@ -119,6 +119,7 @@ object RustDiagnosticsCollector {
         appendLine()
         appendLine("=== Engine Data Check ===")
         appendLine(redactDiagnosticText(collectEngineDataDiagnosis(filesDir)))
+        appendLine(redactDiagnosticText(EngineDataPrepareTelemetry.formatForReport(filesDir)))
 
         if (historicalExits.isNotBlank()) {
             appendLine()

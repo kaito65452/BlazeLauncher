@@ -33,11 +33,14 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +61,8 @@ import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SettingsCa
 import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SwitchSettingsCard
 import io.github.kaito65452.blazelauncher.developer.DeveloperDiagnosticsStore
 import io.github.kaito65452.blazelauncher.developer.DeveloperModeManager
+import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPreparer
+import io.github.kaito65452.blazelauncher.rustruntime.PrepareUiState
 import io.github.kaito65452.blazelauncher.rustruntime.RustActivity
 import io.github.kaito65452.blazelauncher.rustruntime.RustSessionHandoff
 
@@ -72,6 +77,27 @@ private fun copyDiagnosticReport(context: Context, text: String) {
     Toast.makeText(context, "Diagnostic report copied", Toast.LENGTH_SHORT).show()
 }
 
+private fun copyTextWithToast(context: Context, label: String, text: String, toastMessage: String) {
+    DeveloperDiagnosticsStore.copyToClipboard(context, label, text)
+    Toast.makeText(context, toastMessage, Toast.LENGTH_SHORT).show()
+}
+
+private fun formatPrepareSummary(context: Context, state: PrepareUiState): String {
+    return when {
+        state.running -> listOf(state.phase, state.detail)
+            .filter { it.isNotBlank() }
+            .joinToString(" — ")
+            .ifBlank { context.getString(R.string.developer_prepare_summary) }
+        state.redactedError != null -> listOf(
+            context.getString(R.string.developer_prepare_failed),
+            state.detail
+        ).filter { it.isNotBlank() }.joinToString(": ")
+        state.completedSummary != null -> state.completedSummary
+        state.prepared -> context.getString(R.string.developer_prepare_ready)
+        else -> context.getString(R.string.developer_prepare_summary)
+    }
+}
+
 @Composable
 fun DeveloperSettingsSection(
     modifier: Modifier = Modifier
@@ -80,7 +106,13 @@ fun DeveloperSettingsSection(
     val visibility = DeveloperModeManager.visibility(AllSettings.developerMode.state)
     if (!visibility.showDeveloperSection) return
 
+    val prepareState by EngineDataPreparer.uiState.collectAsState()
+    LaunchedEffect(Unit) {
+        EngineDataPreparer.refreshPreparedState(context)
+    }
+
     var dialogReport by remember { mutableStateOf<String?>(null) }
+    var prepareErrorDetails by remember { mutableStateOf<String?>(null) }
 
     SettingsCardColumn(modifier = modifier) {
         CardTitleLayout {
@@ -113,6 +145,26 @@ fun DeveloperSettingsSection(
         SettingsCard(
             modifier = Modifier.fillMaxWidth(),
             position = CardPosition.Middle,
+            title = stringResource(R.string.developer_prepare_title),
+            summary = formatPrepareSummary(context, prepareState),
+            onClick = {
+                if (!prepareState.running) {
+                    EngineDataPreparer.startInBackground(context)
+                }
+            }
+        )
+
+        if (prepareState.running || prepareState.redactedError != null) {
+            PrepareActionStrip(
+                state = prepareState,
+                onCancel = { EngineDataPreparer.cancel(context) },
+                onShowDetails = { prepareErrorDetails = prepareState.redactedError }
+            )
+        }
+
+        SettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
             title = stringResource(R.string.developer_rust_spike_title),
             summary = stringResource(R.string.developer_rust_spike_summary),
             onClick = { launchRustSpikeActivity(context) }
@@ -135,10 +187,73 @@ fun DeveloperSettingsSection(
 
     dialogReport?.let { report ->
         DiagnosticReportDialog(
+            title = stringResource(R.string.developer_capability_report_title),
+            confirmLabel = stringResource(R.string.developer_copy_report),
             report = report,
             onCopy = { copyDiagnosticReport(context, report) },
             onDismiss = { dialogReport = null }
         )
+    }
+
+    prepareErrorDetails?.let { details ->
+        DiagnosticReportDialog(
+            title = stringResource(R.string.developer_prepare_failed),
+            confirmLabel = stringResource(R.string.developer_prepare_copy_details),
+            report = details,
+            onCopy = {
+                copyTextWithToast(context, "Blaze Prepare Error", details, "Prepare details copied")
+            },
+            onDismiss = { prepareErrorDetails = null }
+        )
+    }
+}
+
+@Composable
+private fun PrepareActionStrip(
+    state: PrepareUiState,
+    onCancel: () -> Unit,
+    onShowDetails: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        if (state.running) {
+            val frac = state.progressFraction
+            if (frac != null) {
+                LinearProgressIndicator(
+                    progress = { frac.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (state.peakRssKb > 0) "VmHWM: ${state.peakRssKb / 1024} MB" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = onCancel) {
+                    Text(text = stringResource(R.string.developer_prepare_cancel))
+                }
+            }
+        } else if (state.redactedError != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(onClick = onShowDetails) {
+                    Text(text = stringResource(R.string.developer_prepare_copy_details))
+                }
+            }
+        }
     }
 }
 
@@ -147,7 +262,13 @@ fun DeveloperDiagnosticsButtons(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val prepareState by EngineDataPreparer.uiState.collectAsState()
+    LaunchedEffect(Unit) {
+        EngineDataPreparer.refreshPreparedState(context)
+    }
+
     var dialogReport by remember { mutableStateOf<String?>(null) }
+    var prepareErrorDetails by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -179,38 +300,83 @@ fun DeveloperDiagnosticsButtons(
             }
         }
 
-        OutlinedButton(
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("developer_copy_report_button"),
-            onClick = {
-                val report = DeveloperDiagnosticsStore.collectAndBuildReport(context)
-                copyDiagnosticReport(context, report)
-                dialogReport = report
-            }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = stringResource(R.string.developer_copy_report))
+            OutlinedButton(
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("developer_prepare_engine_data_button"),
+                enabled = !prepareState.running,
+                onClick = { EngineDataPreparer.startInBackground(context) }
+            ) {
+                Text(text = stringResource(R.string.developer_prepare_title))
+            }
+
+            OutlinedButton(
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("developer_copy_report_button"),
+                onClick = {
+                    val report = DeveloperDiagnosticsStore.collectAndBuildReport(context)
+                    copyDiagnosticReport(context, report)
+                    dialogReport = report
+                }
+            ) {
+                Text(text = stringResource(R.string.developer_copy_report))
+            }
+        }
+
+        if (prepareState.running || prepareState.redactedError != null || prepareState.completedSummary != null) {
+            Text(
+                text = formatPrepareSummary(context, prepareState),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            PrepareActionStrip(
+                state = prepareState,
+                onCancel = { EngineDataPreparer.cancel(context) },
+                onShowDetails = { prepareErrorDetails = prepareState.redactedError }
+            )
         }
     }
 
     dialogReport?.let { report ->
         DiagnosticReportDialog(
+            title = stringResource(R.string.developer_capability_report_title),
+            confirmLabel = stringResource(R.string.developer_copy_report),
             report = report,
             onCopy = { copyDiagnosticReport(context, report) },
             onDismiss = { dialogReport = null }
+        )
+    }
+
+    prepareErrorDetails?.let { details ->
+        DiagnosticReportDialog(
+            title = stringResource(R.string.developer_prepare_failed),
+            confirmLabel = stringResource(R.string.developer_prepare_copy_details),
+            report = details,
+            onCopy = {
+                copyTextWithToast(context, "Blaze Prepare Error", details, "Prepare details copied")
+            },
+            onDismiss = { prepareErrorDetails = null }
         )
     }
 }
 
 @Composable
 private fun DiagnosticReportDialog(
+    title: String,
+    confirmLabel: String,
     report: String,
     onCopy: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(text = stringResource(R.string.developer_capability_report_title)) },
+        title = { Text(text = title) },
         text = {
             SelectionContainer(
                 modifier = Modifier
@@ -227,7 +393,7 @@ private fun DiagnosticReportDialog(
         },
         confirmButton = {
             TextButton(onClick = onCopy) {
-                Text(text = stringResource(R.string.developer_copy_report))
+                Text(text = confirmLabel)
             }
         },
         dismissButton = {

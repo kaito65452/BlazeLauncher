@@ -194,6 +194,54 @@ androidComponents {
                             }
                         }
 
+                        val starlingRoot = File(rootProject.projectDir, "engine/starling")
+                        val paritySrcDir = File(starlingRoot, "mods/horizon/src/test/java/dev/horizonlab/parity")
+                        if (paritySrcDir.isDirectory) {
+                            val researchLockFile = File(starlingRoot, "research-lock.json")
+                            val bedrockControlsFile = File(starlingRoot, "packaging/android/bedrock-controls.json")
+                            check(researchLockFile.isFile) { "Missing pinned research-lock.json at $researchLockFile" }
+                            check(bedrockControlsFile.isFile) { "Missing pinned bedrock-controls.json at $bedrockControlsFile" }
+                            researchLockFile.copyTo(File(assetsDir, "research-lock.json"), overwrite = true)
+                            bedrockControlsFile.copyTo(File(assetsDir, "bedrock-controls.json"), overwrite = true)
+
+                            val allowedParityFiles = listOf(
+                                "ParityData.java",
+                                "PrepareWorker.java",
+                                "VanillaBlockBehaviourExporter.java",
+                                "VanillaBlockLandingOracle.java",
+                                "VanillaBlockPropertiesOracle.java",
+                                "VanillaBlockStateBindingOracle.java",
+                                "VanillaBlockStateCodecOracle.java",
+                                "VanillaBlockSupportOracle.java",
+                                "VanillaBlockSurvivalOracle.java",
+                                "VanillaCollisionOracle.java",
+                                "VanillaCommandParseOracle.java",
+                                "VanillaCreativeTabsExporter.java",
+                                "VanillaCuboidModelOracle.java",
+                                "VanillaDamageSourceOracle.java",
+                                "VanillaEntityAttributeOracle.java",
+                                "VanillaEntityModelExporter.java",
+                                "VanillaEntityTypesExporter.java",
+                                "VanillaFaceVisibilityOracle.java",
+                                "VanillaGameplayFactsExporter.java",
+                                "VanillaHeightmapOracle.java",
+                                "VanillaMobDataExporter.java",
+                                "VanillaMovementRegistryOracle.java",
+                                "VanillaPlacementOracle.java",
+                                "VanillaPlayerHealthOracle.java",
+                                "VanillaSimpleBlockOracle.java",
+                                "VanillaStructureBlockExporter.java"
+                            )
+                            val destParityDir = File(assetsDir, "horizon-parity/dev/horizonlab/parity")
+                            destParityDir.deleteRecursively()
+                            destParityDir.mkdirs()
+                            allowedParityFiles.forEach { fileName ->
+                                val src = File(paritySrcDir, fileName)
+                                check(src.isFile) { "Missing pinned parity exporter: $src" }
+                                src.copyTo(File(destParityDir, fileName), overwrite = true)
+                            }
+                        }
+
                         if (projectArch == "all") return@doLast
                         val abi = when (projectArch) {
                             "arm" -> "armeabi-v7a"

@@ -53,13 +53,16 @@ jobs:
 
       - name: Verify Rust Engine .so Placement
         run: |
-          SO_PATH="ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so"
-          if [ ! -s "$SO_PATH" ]; then
-            echo "ERROR: Missing $SO_PATH after artifact download!" >&2
-            exit 1
-          fi
-          ls -lh "$SO_PATH"
-          echo "Engine .so bytes: $(stat -c%s "$SO_PATH")"
+          for SO_PATH in \
+            "ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so" \
+            "ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so"; do
+            if [ ! -s "$SO_PATH" ]; then
+              echo "ERROR: Missing $SO_PATH after artifact download!" >&2
+              exit 1
+            fi
+            ls -lh "$SO_PATH"
+            echo "$SO_PATH bytes: $(stat -c%s "$SO_PATH")"
+          done
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -157,17 +160,37 @@ jobs:
           apk = sys.argv[1]
           apk_bytes = os.path.getsize(apk)
           with zipfile.ZipFile(apk, "r") as zf:
-              matches = [i for i in zf.infolist() if i.filename.endswith("libhorizon_android.so")]
+              names = set(zf.namelist())
               print(f"APK size report for {apk}: total={apk_bytes} bytes ({apk_bytes / (1024*1024):.2f} MiB)")
-              if not matches:
-                  print("ERROR: libhorizon_android.so not packaged in APK!", file=sys.stderr)
+              for req_so in ("libhorizon_android.so", "libblaze_prepare.so"):
+                  matches = [i for i in zf.infolist() if i.filename.endswith(req_so)]
+                  if not matches:
+                      print(f"ERROR: {req_so} not packaged in APK!", file=sys.stderr)
+                      sys.exit(1)
+                  for m in matches:
+                      print(
+                          f"  entry={m.filename} uncompressed={m.file_size} bytes "
+                          f"({m.file_size / (1024*1024):.2f} MiB) compressed={m.compress_size} bytes "
+                          f"({m.compress_size / (1024*1024):.2f} MiB)"
+                      )
+              for req_asset in (
+                  "assets/research-lock.json",
+                  "assets/bedrock-controls.json",
+                  "assets/blaze-prepare/PrepareBatchShim.java",
+                  "assets/horizon-parity/dev/horizonlab/parity/PrepareWorker.java",
+                  "assets/horizon-parity/dev/horizonlab/parity/ParityData.java",
+                  "assets/horizon-parity/dev/horizonlab/parity/VanillaCommandParseOracle.java",
+                  "assets/horizon-parity/dev/horizonlab/parity/VanillaCreativeTabsExporter.java",
+                  "assets/horizon-parity/dev/horizonlab/parity/VanillaBlockStateBindingOracle.java",
+              ):
+                  if req_asset not in names:
+                      print(f"ERROR: Missing required Stage B asset {req_asset} in APK!", file=sys.stderr)
+                      sys.exit(1)
+              parity_java = [n for n in names if n.startswith("assets/horizon-parity/dev/horizonlab/parity/") and n.endswith(".java")]
+              print(f"  bundled parity java sources: {len(parity_java)}")
+              if len(parity_java) != 26:
+                  print(f"ERROR: Expected 26 MIT parity .java sources in APK, found {len(parity_java)}", file=sys.stderr)
                   sys.exit(1)
-              for m in matches:
-                  print(
-                      f"  entry={m.filename} uncompressed={m.file_size} bytes "
-                      f"({m.file_size / (1024*1024):.2f} MiB) compressed={m.compress_size} bytes "
-                      f"({m.compress_size / (1024*1024):.2f} MiB)"
-                  )
           PY
           done
 

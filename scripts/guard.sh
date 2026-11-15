@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -678,6 +678,60 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "$DEV_PKG_DIR" ]; then
     check_developer_pkg_safety "$DEV_PKG_DIR"
 fi
 
+# 7b. Check 11: Stage B pure-Rust preparer & bundled asset hygiene (zero Python, zero Mojang assets/derived tables)
+check_stage_b_hygiene() {
+    local target_root="${1:-.}"
+    python3 - "$target_root" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+violations = []
+
+for sub in ("blaze-prepare", os.path.join("ZalithLauncher", "src", "main", "assets")):
+    scan_dir = os.path.join(root, sub)
+    if not os.path.isdir(scan_dir):
+        continue
+    for dirpath, dirnames, filenames in os.walk(scan_dir):
+        dirnames[:] = sorted(d for d in dirnames if d not in (".git", "target"))
+        for fname in sorted(filenames):
+            fpath = os.path.join(dirpath, fname)
+            rel = os.path.relpath(fpath, root).replace(os.sep, "/")
+            lower = rel.lower()
+            if lower.endswith((".py", ".pyc", ".nbt")):
+                violations.append(f"{rel}: forbidden Python or NBT file in Stage B tree")
+            if fname in ("engine-data.zip", "horizon-resources.json", "android-downloads-v2.json", "audio-complete.json"):
+                violations.append(f"{rel}: forbidden generated engine-data file committed in repo")
+            if sub == "blaze-prepare" and lower.endswith(".jar"):
+                violations.append(f"{rel}: forbidden JAR in blaze-prepare crate")
+            if "/horizon-parity/" in f"/{rel}" or "/blaze-prepare/" in f"/{rel}":
+                if sub.endswith("assets") and not lower.endswith(".java"):
+                    violations.append(f"{rel}: only .java sources may exist under assets/blaze-prepare or assets/horizon-parity")
+            if re.search(r"/assets/(?:minecraft|worldgen|\.local)(?:/|$)", f"/{lower}"):
+                violations.append(f"{rel}: forbidden Mojang assets/worldgen/.local directory under assets/")
+
+if violations:
+    print("ERROR: Stage B engine-data preparer hygiene guard failed:", file=sys.stderr)
+    for v in violations:
+        print(f"  {v}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+if [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ]; then
+    echo "Checking custom directory for Stage B preparer hygiene: $GUARD_CHECK11_ONLY_DIR"
+    check_stage_b_hygiene "$GUARD_CHECK11_ONLY_DIR"
+    echo "✓ Custom Check 11 directory passed."
+    exit 0
+fi
+
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
+    echo "Checking Stage B preparer & bundled asset hygiene..."
+    check_stage_b_hygiene "."
+    echo "✓ Stage B preparer & bundled asset hygiene passed."
+fi
+
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
 if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
     CHECK_RELEASE_APK=0
@@ -699,7 +753,9 @@ import zipfile
 apk_path = sys.argv[1]
 check_release = sys.argv[2] == "1"
 disallowed_re = re.compile(
-    r"(^|/)(wallpapers|wallpaper_templates)/|(^|/)assets/skin/|(^|/)assets/alex\.png$|voicechat",
+    r"(^|/)(wallpapers|wallpaper_templates)/|(^|/)assets/skin/|(^|/)assets/alex\.png$|voicechat"
+    r"|^assets/(?:minecraft|worldgen|\.local)/|^assets/(?:engine-data\.zip|horizon-resources\.json|android-downloads-v2\.json|audio-complete\.json)$"
+    r"|\.(?:py|pyc|nbt)$|^assets/(?:horizon-parity|blaze-prepare)/.*\.class$",
     re.IGNORECASE,
 )
 marker_strings = [

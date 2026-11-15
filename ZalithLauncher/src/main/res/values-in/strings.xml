@@ -1406,4 +1406,20 @@
     <string name="favorites_item_unavailable">Tidak Tersedia</string>
     <string name="favorites_sort_follow_time">Berdasarkan Waktu</string>
     <string name="favorites_sort_title">Nama Project</string>
+    <string name="developer_section_title">Pengembang</string>
+    <string name="developer_mode_title">Mode pengembang</string>
+    <string name="developer_mode_summary">Tampilkan diagnostik dan alat eksperimental runtime Rust</string>
+    <string name="developer_capability_report_title">Laporan Kapabilitas Perangkat</string>
+    <string name="developer_capability_report_summary">Periksa dukungan Vulkan, ABI, dan audio perangkat</string>
+    <string name="developer_rust_spike_title">Jalankan Spike Rust Edition</string>
+    <string name="developer_rust_spike_summary">Jalankan NativeActivity terisolasi di proses :rust</string>
+    <string name="developer_copy_report">Salin laporan</string>
+    <string name="developer_copy_report_summary">Salin laporan kapabilitas perangkat dan diagnostik :rust</string>
+    <string name="developer_prepare_title">Siapkan data engine (spike)</string>
+    <string name="developer_prepare_summary">Siapkan data engine 26.3 langsung di perangkat dari unduhan Mojang</string>
+    <string name="developer_prepare_ready">Data engine 26.3 siap</string>
+    <string name="developer_prepare_cancelled">Persiapan dibatalkan</string>
+    <string name="developer_prepare_failed">Persiapan gagal</string>
+    <string name="developer_prepare_cancel">Batal</string>
+    <string name="developer_prepare_copy_details">Salin detail</string>
 </resources>

@@ -505,6 +505,36 @@ expect_fail "Check 10b rejects login.microsoftonline.com in libhorizon_android.s
     bash scripts/guard.sh --check-apk "$SO_BAD_URL"
 
 echo ""
+echo "=== 7. Check 11 Self-Tests (Stage B preparer & asset hygiene) ==="
+
+expect_pass "Check 11 passes on real repo blaze-prepare and ZalithLauncher assets" \
+    env GUARD_CHECK11_ONLY_DIR="." bash scripts/guard.sh
+
+BAD_PREPARE_PY="$TMP_ROOT/bad_prepare_py"
+mkdir -p "$BAD_PREPARE_PY/blaze-prepare/src"
+touch "$BAD_PREPARE_PY/blaze-prepare/src/helper.py"
+expect_fail "Check 11 rejects Python file inside blaze-prepare/" "forbidden Python or NBT file" \
+    env GUARD_CHECK11_ONLY_DIR="$BAD_PREPARE_PY" bash scripts/guard.sh
+
+BAD_PREPARE_NBT="$TMP_ROOT/bad_prepare_nbt"
+mkdir -p "$BAD_PREPARE_NBT/ZalithLauncher/src/main/assets/worldgen"
+touch "$BAD_PREPARE_NBT/ZalithLauncher/src/main/assets/worldgen/village.nbt"
+expect_fail "Check 11 rejects NBT/worldgen assets in ZalithLauncher assets/" "forbidden Python or NBT file|forbidden Mojang assets" \
+    env GUARD_CHECK11_ONLY_DIR="$BAD_PREPARE_NBT" bash scripts/guard.sh
+
+BAD_APK_PY="$TMP_ROOT/bad_stageb_py.apk"
+python3 - "$SYNTH_NEG_BASE" "$BAD_APK_PY" <<'PY'
+import sys, zipfile
+src, dst = sys.argv[1:3]
+with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_STORED) as zout:
+    for item in zin.infolist():
+        zout.writestr(item.filename, zin.read(item.filename))
+    zout.writestr("assets/blaze-prepare/helper.py", b"print('bad')\n")
+PY
+expect_fail "Check 11 APK check rejects .py bundled into APK assets" "disallowed asset entries" \
+    bash scripts/guard.sh --check-apk "$BAD_APK_PY"
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

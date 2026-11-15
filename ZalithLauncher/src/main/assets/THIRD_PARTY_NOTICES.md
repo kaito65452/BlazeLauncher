@@ -75,3 +75,13 @@ Summary by SPDX identifier from `cargo metadata --filter-platform aarch64-linux-
 - `packaging/android/assets/skin/{alex,steve}.png` from Horizon fork (Mojang default skins — excluded; note Zalith Launcher 2 ships its own pre-existing `assets/steve.png`)
 - `crates/voicechat-engine/` & `crates/voicechat-engine/data/icons/*/*.png` (excluded; unverified PNG provenance)
 - `launcher/` desktop GPUI crate & loader icon `neoforge.png` (`CC-BY-4.0`) / `quilt.png` (`CC0-1.0`) (not compiled or packaged for Android)
+
+
+---
+
+## On-Device Resource Preparer (`blaze-prepare/` & `dev.horizonlab.parity`)
+
+* **Blaze Engine-Data Preparer (`blaze-prepare/`, `libblaze_prepare.so`)** — **GPL-3.0-or-later**
+  * Pure-Rust `arm64-v8a` native library linked via JNI using permissive crates (`crc32fast`, `flate2`, `jni`, `regex`, `rustls`, `serde`, `serde_json`, `sha1`, `sha2`, `ureq`, `url`, `webpki-roots`, `zip`, and transitive dependencies; `ring` 0.17 notice details are covered above).
+* **Starling Vanilla Parity Exporters (`assets/horizon-parity/dev/horizonlab/parity/*.java`)** — **MIT**
+  * Copyright (c) 2025-2026 starling-client contributors (`mods/horizon/src/test/java/dev/horizonlab/parity`, pinned upstream commit `fa548eb7abe91c194d3780e4580b9746323cd606`, compiled and run strictly against user-downloaded jars on-device).

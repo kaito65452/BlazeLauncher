@@ -1485,4 +1485,11 @@
     <string name="developer_rust_spike_summary">Launch the isolated :rust NativeActivity spike</string>
     <string name="developer_copy_report">Copy report</string>
     <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
+    <string name="developer_prepare_title">Prepare engine data (spike)</string>
+    <string name="developer_prepare_summary">Prepare 26.3 engine data on-device using downloaded Mojang files</string>
+    <string name="developer_prepare_ready">26.3 engine data ready</string>
+    <string name="developer_prepare_cancelled">Preparation cancelled</string>
+    <string name="developer_prepare_failed">Preparation failed</string>
+    <string name="developer_prepare_cancel">Cancel</string>
+    <string name="developer_prepare_copy_details">Copy details</string>
 </resources>

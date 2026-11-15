@@ -55,3 +55,11 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew testDebugUnitTest --no-daemon --stacktrace
+          python3 - <<'PY'
+          import glob, re
+          for path in sorted(glob.glob("ZalithLauncher/build/test-results/**/*.xml", recursive=True)):
+              txt = open(path, encoding="utf-8", errors="replace").read()
+              for line in txt.splitlines():
+                  if "BENCH_KOTLIN_4000" in line:
+                      print(line.strip())
+          PY

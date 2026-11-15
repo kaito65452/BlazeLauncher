@@ -33,7 +33,7 @@ for file in $CHANGED_FILES; do
             ;;
         docs/*)
             ;;
-        engine/*|.gitmodules)
+        engine/*|blaze-prepare/*|.gitmodules)
             ;;
         build.gradle.kts|settings.gradle.kts|gradle.properties|.gitignore)
             ;;
@@ -43,7 +43,7 @@ for file in $CHANGED_FILES; do
             ;;
         ZalithLauncher/src/main/res/values*/strings.xml)
             ;;
-        ZalithLauncher/src/main/assets/THIRD_PARTY_NOTICES.md|ZalithLauncher/src/main/assets/fonts/*)
+        ZalithLauncher/src/main/assets/THIRD_PARTY_NOTICES.md|ZalithLauncher/src/main/assets/fonts/*|ZalithLauncher/src/main/assets/blaze-prepare/*)
             ;;
         ZalithLauncher/src/main/java/dev/horizon/android/bridge/BlazeNativeBridge.kt)
             ;;

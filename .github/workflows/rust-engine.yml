@@ -65,7 +65,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             engine/starling/target
-          key: ${{ runner.os }}-cargo-starling-arm64-${{ hashFiles('engine/starling/Cargo.lock', 'engine/patches/*.patch') }}
+            blaze-prepare/target
+          key: ${{ runner.os }}-cargo-starling-arm64-${{ hashFiles('engine/starling/Cargo.lock', 'engine/patches/*.patch', 'blaze-prepare/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-starling-arm64-
 
@@ -116,15 +117,80 @@ jobs:
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
           cp "$REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
 
+          echo "=== Testing blaze-prepare (Stage B pure-Rust engine-data preparer) ==="
+          cargo test --locked --manifest-path blaze-prepare/Cargo.toml -- --nocapture
+
+          echo "=== Running 4,000-file Python baseline benchmark on runner ==="
+          python3 - <<'PY'
+          import json, os, resource, tempfile, time, zipfile, zlib
+          with tempfile.TemporaryDirectory() as td:
+              in_zip = os.path.join(td, "in.jar")
+              ext = os.path.join(td, "ext")
+              out_zip = os.path.join(td, "out.zip")
+              t0 = time.perf_counter()
+              crcs = {}
+              with zipfile.ZipFile(in_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                  for i in range(4000):
+                      rel = f"assets/minecraft/models/gen_{i}.json"
+                      data = f'{{"id":{i},"tag":"minecraft:stone_{i}","ok":true}}'.encode()
+                      crcs[rel] = zlib.crc32(data) & 0xFFFFFFFF
+                      zf.writestr(rel, data)
+              t1 = time.perf_counter()
+              with zipfile.ZipFile(in_zip, "r") as zf:
+                  zf.extractall(ext)
+              t2 = time.perf_counter()
+              count = 0
+              for r, _, files in os.walk(ext):
+                  for fn in files:
+                      p = os.path.join(r, fn)
+                      rel = os.path.relpath(p, ext).replace(os.sep, "/")
+                      with open(p, "rb") as fh:
+                          assert (zlib.crc32(fh.read()) & 0xFFFFFFFF) == crcs[rel]
+                      count += 1
+              assert count == 4000
+              t3 = time.perf_counter()
+              with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                  for r, _, files in os.walk(ext):
+                      for fn in files:
+                          p = os.path.join(r, fn)
+                          rel = os.path.relpath(p, ext).replace(os.sep, "/")
+                          zf.write(p, rel)
+              t4 = time.perf_counter()
+              rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+              print(
+                  f"BENCH_PYTHON_4000 build_ms={int((t1-t0)*1000)} extract_ms={int((t2-t1)*1000)} "
+                  f"verify_ms={int((t3-t2)*1000)} zip_ms={int((t4-t3)*1000)} peak_rss_kb={rss_kb}"
+              )
+          PY
+
+          echo "=== Building blaze-prepare (arm64-v8a fast vs release) ==="
+          (
+            cd blaze-prepare
+            cargo ndk -t arm64-v8a --platform 28 build --profile fast --locked --manifest-path Cargo.toml
+            cargo ndk -t arm64-v8a --platform 28 build --release --locked --manifest-path Cargo.toml
+          )
+          PREP_FAST_SO="blaze-prepare/target/aarch64-linux-android/fast/libblaze_prepare.so"
+          PREP_REL_SO="blaze-prepare/target/aarch64-linux-android/release/libblaze_prepare.so"
+          PREP_BEFORE_BYTES=$(stat -c%s "$PREP_FAST_SO")
+          PREP_AFTER_BYTES=$(stat -c%s "$PREP_REL_SO")
+          ls -lh "$PREP_FAST_SO" "$PREP_REL_SO"
+          echo "libblaze_prepare.so before (fast, unstripped): $PREP_BEFORE_BYTES bytes"
+          echo "libblaze_prepare.so after (release, lto=fat, panic=abort, strip=true): $PREP_AFTER_BYTES bytes"
+          cp "$PREP_REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
+
           {
             echo "### Rust Engine Build (arm64-v8a)"
-            echo "- Before (fast/unstripped): \`$BEFORE_BYTES\` bytes"
-            echo "- After (release fat-LTO/stripped): \`$AFTER_BYTES\` bytes"
+            echo "- libhorizon_android.so fast/unstripped: \`$BEFORE_BYTES\` bytes"
+            echo "- libhorizon_android.so release/stripped: \`$AFTER_BYTES\` bytes"
+            echo "- libblaze_prepare.so fast/unstripped: \`$PREP_BEFORE_BYTES\` bytes"
+            echo "- libblaze_prepare.so release/stripped: \`$PREP_AFTER_BYTES\` bytes"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Engine .so Artifact
         uses: actions/upload-artifact@v4
         with:
           name: horizon-engine-arm64
-          path: ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
+          path: |
+            ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
+            ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
           if-no-files-found: error
