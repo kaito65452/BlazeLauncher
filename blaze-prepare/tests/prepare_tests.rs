@@ -2,10 +2,14 @@
 // Copyright (C) 2026 Blaze Launcher contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use blaze_prepare::download::{resolve_version_manifest, DownloadStats, HttpFetcher};
+use blaze_prepare::download::{
+    ensure_verified_file, resolve_version_manifest, DownloadStats, FileFetchSpec, HashAlg,
+    HttpFetcher,
+};
 use blaze_prepare::files::{cleanup_partials, redact_sensitive, sha1_bytes, sha256_bytes, CancelFlag};
 use blaze_prepare::lock::{
-    LockFile, LOCAL_REFRESHED_ASSET_INDEX_SHA1, LOCAL_REFRESHED_MANIFEST_SHA1,
+    sanitize_url_for_error, validate_download_url_with_context, LockFile, ALLOWED_DOWNLOAD_HOSTS,
+    LOCAL_REFRESHED_ASSET_INDEX_SHA1, LOCAL_REFRESHED_MANIFEST_SHA1,
 };
 use blaze_prepare::resources::{
     is_generated_engine_file, is_prepared, package_resources_zip, run_phase1, run_phase2_finalize,
@@ -1271,6 +1275,236 @@ fn task_y6_manifest_and_asset_index_drift_policy_synthetic() {
     assert!(clean.contains("12345678..."), "Dashed UUID should truncate to 8 chars: {clean}");
     assert!(clean.contains("abcdef01..."), "32-hex UUID should truncate to 8 chars: {clean}");
     assert!(!clean.contains("secret123"), "Token should be scrubbed: {clean}");
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = srv.join();
+}
+
+#[test]
+fn task_x4_download_host_allowlist_and_redirect_security_synthetic() {
+    // (1) Every host in ALLOWED_DOWNLOAD_HOSTS passes over HTTPS (default or explicit :443).
+    assert!(
+        ALLOWED_DOWNLOAD_HOSTS.contains(&"libraries.minecraft.net"),
+        "ALLOWED_DOWNLOAD_HOSTS must include libraries.minecraft.net"
+    );
+    for host in ALLOWED_DOWNLOAD_HOSTS {
+        let url_default = format!("https://{host}/path/to/artifact.jar");
+        validate_download_url_with_context(&url_default, "libraries[0].downloads.artifact.url", false)
+            .unwrap_or_else(|e| panic!("Expected allowed host {host} to pass: {e}"));
+        let url_443 = format!("https://{host}:443/path/to/artifact.jar");
+        validate_download_url_with_context(&url_443, "libraries[0].downloads.artifact.url", false)
+            .unwrap_or_else(|e| panic!("Expected allowed host {host}:443 to pass: {e}"));
+    }
+
+    // (2) Suffix, prefix, substring, trailing-dot, and subdomain lookalikes are strictly rejected.
+    let untrusted_hosts = [
+        "evil-libraries.minecraft.net",
+        "libraries.minecraft.net.evil.com",
+        "minecraft.net.evil.com",
+        "libraries.minecraft.net.",
+        "sub.libraries.minecraft.net",
+        "evil-piston-data.mojang.com",
+        "piston-data.mojang.com.evil.com",
+        "localhost.evil.com",
+    ];
+    for host in untrusted_hosts {
+        let raw = format!("https://{host}/org/example/1.0/example-1.0.jar?access_token=topsecret999");
+        let err = validate_download_url_with_context(&raw, "libraries[3].downloads.artifact.url", false)
+            .expect_err("Lookalike host must be rejected");
+        assert!(err.contains("Untrusted download host:"), "host={host} err={err}");
+        assert!(err.contains(host), "err missing offending host {host}: {err}");
+        assert!(
+            err.contains("libraries[3].downloads.artifact.url"),
+            "err missing source field: {err}"
+        );
+        assert!(
+            !err.contains("topsecret999") && !err.contains("access_token"),
+            "err leaked query token: {err}"
+        );
+        for allowed in ALLOWED_DOWNLOAD_HOSTS {
+            assert!(err.contains(allowed), "err missing allowed host {allowed}: {err}");
+        }
+        assert!(err.contains("Next step:"), "err missing Next step: {err}");
+
+        // Even with allow_loopback=true, untrusted remote hosts stay rejected.
+        validate_download_url_with_context(&raw, "libraries[3].downloads.artifact.url", true)
+            .expect_err("Lookalike host must stay rejected when allow_loopback=true");
+    }
+
+    // (3) Non-HTTPS schemes, non-443 ports, and userinfo (@ / user:pass@) are rejected.
+    for (url, expected_frag) in [
+        (
+            "http://libraries.minecraft.net/com/mojang/test.jar?token=abc",
+            "HTTPS on port 443",
+        ),
+        (
+            "https://libraries.minecraft.net:8443/com/mojang/test.jar",
+            "HTTPS on port 443",
+        ),
+        (
+            "https://libraries.minecraft.net:80/com/mojang/test.jar",
+            "HTTPS on port 443",
+        ),
+        (
+            "https://user:pass@libraries.minecraft.net/com/mojang/test.jar",
+            "Credentials in download URL are forbidden",
+        ),
+        (
+            "https://@libraries.minecraft.net/com/mojang/test.jar",
+            "Credentials in download URL are forbidden",
+        ),
+        ("not-a-valid-url", "Malformed download URL"),
+    ] {
+        let err = validate_download_url_with_context(url, "downloads.client.url", false)
+            .expect_err(&format!("URL should be rejected: {url}"));
+        assert!(err.contains(expected_frag), "url={url} err={err}");
+        assert!(err.contains("Next step:"), "url={url} missing Next step: {err}");
+        assert!(!err.contains("pass@") && !err.contains("token=abc"), "leaked secret: {err}");
+        assert!(
+            err.contains("libraries.minecraft.net"),
+            "err missing allowed hosts list: {err}"
+        );
+    }
+
+    // sanitize_url_for_error strips credentials, query, and fragment.
+    let sanitized = sanitize_url_for_error(
+        "https://user:secretpass@libraries.minecraft.net/a/b.jar?token=xyz#frag",
+    );
+    assert_eq!(sanitized, "https://libraries.minecraft.net/a/b.jar");
+
+    // (4) Loopback synthetic redirect server: verify redirect target re-validation + zero retries.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = Arc::clone(&stop);
+    let hits = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let hits_srv = Arc::clone(&hits);
+
+    let good_payload = b"verified-jar-bytes".to_vec();
+    let good_sha1 = sha1_bytes(&good_payload);
+    let corrupted_payload = b"corrupted-jar-bytes".to_vec();
+    let corrupted_expected_sha1 = sha1_bytes(b"different-expected-bytes");
+
+    let srv = std::thread::spawn(move || {
+        while !stop_srv.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    hits_srv.lock().unwrap().push(path.clone());
+                    let resp = match path.as_str() {
+                        "/redir-evil" => b"HTTP/1.1 302 Found\r\nLocation: https://libraries.minecraft.net.evil.com/evil.jar?access_token=redirsecret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                        "/redir-http" => b"HTTP/1.1 302 Found\r\nLocation: http://libraries.minecraft.net/plain.jar\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                        "/redir-userinfo" => b"HTTP/1.1 302 Found\r\nLocation: https://alice:secret@libraries.minecraft.net/creds.jar\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                        "/redir-loop" => b"HTTP/1.1 302 Found\r\nLocation: /redir-loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                        "/good.jar" => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            good_payload.len()
+                        )
+                        .into_bytes()
+                        .into_iter()
+                        .chain(good_payload.iter().copied())
+                        .collect(),
+                        "/bad-hash.jar" => format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            corrupted_payload.len()
+                        )
+                        .into_bytes()
+                        .into_iter()
+                        .chain(corrupted_payload.iter().copied())
+                        .collect(),
+                        _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+                    };
+                    let _ = stream.write_all(&resp);
+                    let _ = stream.flush();
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let fetcher = HttpFetcher::new(true, CancelFlag::new());
+
+    // Redirect to non-allowed host must be rejected cleanly with zero retries.
+    let err_evil = fetcher
+        .get_bytes_with_context(&format!("{base}/redir-evil"), 1024 * 1024, "libraries[1].downloads.artifact.url")
+        .err()
+        .expect("Redirect to lookalike host must fail");
+    assert!(err_evil.contains("Untrusted download host: libraries.minecraft.net.evil.com"), "err={err_evil}");
+    assert!(err_evil.contains("redirect hop 1"), "err={err_evil}");
+    assert!(!err_evil.contains("redirsecret"), "err leaked redirect token: {err_evil}");
+    assert!(err_evil.contains("libraries.minecraft.net"), "err missing allowed hosts: {err_evil}");
+    assert!(err_evil.contains("Next step:"), "err missing Next step: {err_evil}");
+    assert_eq!(
+        hits.lock().unwrap().iter().filter(|p| p.as_str() == "/redir-evil").count(),
+        1,
+        "Untrusted redirect error must not retry"
+    );
+
+    // Redirect to plain http on non-loopback allowed host must be rejected with zero retries.
+    let err_http = fetcher
+        .get_bytes_with_context(&format!("{base}/redir-http"), 1024 * 1024, "libraries[2].downloads.artifact.url")
+        .err()
+        .expect("Redirect to HTTP allowed host must fail");
+    assert!(err_http.contains("HTTPS on port 443"), "err={err_http}");
+    assert!(err_http.contains("Next step:"), "err={err_http}");
+
+    // Redirect to URL with userinfo must be rejected with zero retries.
+    let err_creds = fetcher
+        .get_bytes_with_context(&format!("{base}/redir-userinfo"), 1024 * 1024, "assetIndex.url")
+        .err()
+        .expect("Redirect with credentials must fail");
+    assert!(err_creds.contains("Credentials in download URL are forbidden"), "err={err_creds}");
+    assert!(!err_creds.contains("alice:secret"), "err leaked credentials: {err_creds}");
+
+    // Infinite redirect loop stops at MAX_DOWNLOAD_REDIRECTS (5).
+    let err_loop = fetcher
+        .get_bytes_with_context(&format!("{base}/redir-loop"), 1024 * 1024, "downloads.client.url")
+        .err()
+        .expect("Redirect loop must fail");
+    assert!(err_loop.contains("Too many redirects (>5)"), "err={err_loop}");
+    assert!(err_loop.contains("Next step:"), "err={err_loop}");
+
+    // Mandatory SHA-1 verification rejects tampered bytes even from accepted loopback server.
+    let tmp = TempDir::new("x4-sha1");
+    let bad_spec = FileFetchSpec {
+        url: format!("{base}/bad-hash.jar"),
+        source_field: "libraries[0].downloads.artifact.url".into(),
+        expected_hash: corrupted_expected_sha1,
+        alg: HashAlg::Sha1,
+        expected_size: None,
+        dest: tmp.path().join("bad-hash.jar"),
+        reuse_candidates: vec![],
+    };
+    let err_sha = ensure_verified_file(&fetcher, &bad_spec)
+        .err()
+        .expect("Tampered bytes must fail SHA-1 verification");
+    assert!(err_sha.contains("Checksum mismatch"), "err={err_sha}");
+    assert!(!bad_spec.dest.exists(), "Failed download must not leave dest file");
+
+    let good_spec = FileFetchSpec {
+        url: format!("{base}/good.jar"),
+        source_field: "libraries[0].downloads.artifact.url".into(),
+        expected_hash: good_sha1,
+        alg: HashAlg::Sha1,
+        expected_size: Some(18),
+        dest: tmp.path().join("good.jar"),
+        reuse_candidates: vec![],
+    };
+    ensure_verified_file(&fetcher, &good_spec).expect("Valid SHA-1 download should succeed");
 
     stop.store(true, Ordering::Relaxed);
     let _ = srv.join();

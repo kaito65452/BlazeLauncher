@@ -315,6 +315,88 @@ jobs:
               )
           PY
 
+          echo "=== Transient Mojang 26.3 download host allowlist audit (Task X2) ==="
+          X2_TMP=$(mktemp -d)
+          trap 'rm -rf "$X2_TMP"' EXIT
+          python3 - "$X2_TMP" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.request
+          from urllib.parse import urlparse
+
+          _tmp = sys.argv[1]
+          lock_rs = open("blaze-prepare/src/lock.rs", "r", encoding="utf-8").read()
+          m = re.search(r"pub const ALLOWED_DOWNLOAD_HOSTS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", lock_rs, re.S)
+          assert m, "Could not locate ALLOWED_DOWNLOAD_HOSTS in blaze-prepare/src/lock.rs"
+          allowed_hosts = set(re.findall(r'"([^"]+)"', m.group(1)))
+
+          def fetch_json(url, field_name):
+              parsed = urlparse(url)
+              assert parsed.scheme == "https" and (parsed.port in (None, 443)), f"Non-HTTPS URL in {field_name}: {parsed.scheme}"
+              assert parsed.hostname in allowed_hosts, f"Unexpected host {parsed.hostname} in {field_name}"
+              with urllib.request.urlopen(url, timeout=30) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          catalog_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+          records = [("DEFAULT_CATALOG_URL", urlparse(catalog_url).hostname)]
+          catalog = fetch_json(catalog_url, "catalog")
+          entry = next((v for v in catalog.get("versions", []) if v.get("id") == "26.3"), None)
+          assert entry is not None, "Version 26.3 not found in Mojang catalog"
+          ver_url = entry["url"]
+          records.append(("version_manifest_v2.versions[id=26.3].url", urlparse(ver_url).hostname))
+
+          manifest = fetch_json(ver_url, "versions[26.3].url")
+          for dl_key, dl_obj in sorted((manifest.get("downloads") or {}).items()):
+              if isinstance(dl_obj, dict) and dl_obj.get("url"):
+                  records.append((f"downloads.{dl_key}.url", urlparse(dl_obj["url"]).hostname))
+
+          asset_idx_obj = manifest.get("assetIndex") or {}
+          asset_idx_url = asset_idx_obj.get("url")
+          assert asset_idx_url, "Manifest missing assetIndex.url"
+          records.append(("assetIndex.url", urlparse(asset_idx_url).hostname))
+
+          for lib in manifest.get("libraries", []):
+              dls = lib.get("downloads") or {}
+              if isinstance(dls.get("artifact"), dict) and dls["artifact"].get("url"):
+                  records.append(("libraries[*].downloads.artifact.url", urlparse(dls["artifact"]["url"]).hostname))
+              for cls_key, cls_obj in sorted((dls.get("classifiers") or {}).items()):
+                  if isinstance(cls_obj, dict) and cls_obj.get("url"):
+                      records.append(("libraries[*].downloads.classifiers.*.url", urlparse(cls_obj["url"]).hostname))
+
+          logging_url = (((manifest.get("logging") or {}).get("client") or {}).get("file") or {}).get("url")
+          if logging_url:
+              records.append(("logging.client.file.url", urlparse(logging_url).hostname))
+
+          asset_index = fetch_json(asset_idx_url, "assetIndex.url")
+          objects = asset_index.get("objects") or {}
+          assert len(objects) > 0, "Asset index has no objects"
+          # blaze-prepare constructs object URLs under https://resources.download.minecraft.net/<hh>/<hash>
+          records.append(("assetIndex.objects[*].hash -> OBJECTS_BASE_URL", "resources.download.minecraft.net"))
+          for obj_val in objects.values():
+              if isinstance(obj_val, dict) and obj_val.get("url"):
+                  records.append(("assetIndex.objects[*].url", urlparse(obj_val["url"]).hostname))
+
+          dl_rs = open("blaze-prepare/src/download.rs", "r", encoding="utf-8").read()
+          m_ctrl = re.search(r"https://raw\.githubusercontent\.com/", dl_rs)
+          if m_ctrl:
+              records.append(("bedrock_controls.BASE_URL", "raw.githubusercontent.com"))
+
+          # Deduplicate (field, host) pairs without retaining any Mojang filenames, hashes, or paths
+          distinct_pairs = sorted(set(records))
+          distinct_hosts = sorted({h for _, h in distinct_pairs})
+          unexpected = [h for h in distinct_hosts if h not in allowed_hosts]
+
+          print(f"X2_ALLOWED_HOSTS={sorted(allowed_hosts)}")
+          for field_path, host in distinct_pairs:
+              print(f"X2_HOST_PAIR field={field_path} host={host}")
+          print(f"X2_DISTINCT_HOSTS={distinct_hosts} asset_object_count={len(objects)}")
+          assert not unexpected, f"Unexpected Mojang 26.3 download hosts not in ALLOWED_DOWNLOAD_HOSTS: {unexpected}"
+          PY
+          rm -rf "$X2_TMP"
+          trap - EXIT
+
           echo "=== Building blaze-prepare (arm64-v8a fast vs release) ==="
           (
             cd blaze-prepare

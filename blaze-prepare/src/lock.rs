@@ -161,12 +161,68 @@ pub fn validate_sha256_hex(s: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Canonical HTTPS-only host allowlist for official Mojang & Bedrock sample downloads.
+/// Every hostname must match by exact lowercase domain equality (no suffix or substring matching).
+pub const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
+    "piston-meta.mojang.com",
+    "piston-data.mojang.com",
+    "libraries.minecraft.net",
+    "resources.download.minecraft.net",
+    "launcher.mojang.com",
+    "launchermeta.mojang.com",
+    "raw.githubusercontent.com",
+];
+
+/// Strips userinfo, query parameters, and fragments from a URL before including it in diagnostics.
+pub fn sanitize_url_for_error(raw: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(raw) {
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        return crate::files::redact_sensitive(parsed.as_str());
+    }
+    let without_query = raw.split(['?', '#']).next().unwrap_or(raw);
+    let sanitized = if let Some((scheme, rest)) = without_query.split_once("://") {
+        if let Some((_, after_at)) = rest.split_once('@') {
+            format!("{scheme}://{after_at}")
+        } else {
+            without_query.to_string()
+        }
+    } else {
+        without_query.to_string()
+    };
+    crate::files::redact_sensitive(&sanitized)
+}
+
 /// Verifies URL host and scheme: production builds allow official Mojang CDN or `Mojang/bedrock-samples`
 /// over HTTPS only; unit/synthetic tests may enable loopback HTTP.
 pub fn validate_download_url(raw: &str, allow_loopback: bool) -> Result<(), String> {
-    let parsed = url::Url::parse(raw).map_err(|e| format!("Malformed URL {raw}: {e}"))?;
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("Credentials in download URL are forbidden".to_string());
+    validate_download_url_with_context(raw, "download", allow_loopback)
+}
+
+/// Verifies URL host and scheme with JSON field / source context and actionable diagnostics.
+pub fn validate_download_url_with_context(
+    raw: &str,
+    source_field: &str,
+    allow_loopback: bool,
+) -> Result<(), String> {
+    let safe_url = sanitize_url_for_error(raw);
+    let allowed_list = ALLOWED_DOWNLOAD_HOSTS.join(", ");
+    let parsed = url::Url::parse(raw).map_err(|e| {
+        crate::files::redact_sensitive(&format!(
+            "Malformed download URL from {source_field} ({safe_url}): {e} (allowed hosts: [{allowed_list}]). Next step: check network/catalog configuration or retry download."
+        ))
+    })?;
+    let authority_has_at = raw
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or("").contains('@'))
+        .unwrap_or(false);
+    let host = parsed.host_str().unwrap_or("");
+    if !parsed.username().is_empty() || parsed.password().is_some() || authority_has_at {
+        return Err(crate::files::redact_sensitive(&format!(
+            "Credentials in download URL are forbidden (host={host}, from {source_field}: {safe_url}; allowed hosts: [{allowed_list}]). Next step: use an anonymous official Mojang CDN URL without embedded credentials."
+        )));
     }
     if allow_loopback
         && parsed.scheme() == "http"
@@ -175,20 +231,15 @@ pub fn validate_download_url(raw: &str, allow_loopback: bool) -> Result<(), Stri
         return Ok(());
     }
     if parsed.scheme() != "https" || parsed.port().is_some_and(|p| p != 443) {
-        return Err(format!("Download URL must use HTTPS on port 443: {raw}"));
+        return Err(crate::files::redact_sensitive(&format!(
+            "Download URL must use HTTPS on port 443 (host={host}, from {source_field}: {safe_url}; allowed hosts: [{allowed_list}]). Next step: use a direct HTTPS URL on port 443 from an official Mojang CDN host."
+        )));
     }
-    let host = parsed.host_str().unwrap_or("");
-    let allowed = matches!(
-        host,
-        "piston-meta.mojang.com"
-            | "piston-data.mojang.com"
-            | "resources.download.minecraft.net"
-            | "launcher.mojang.com"
-            | "launchermeta.mojang.com"
-            | "raw.githubusercontent.com"
-    );
+    let allowed = ALLOWED_DOWNLOAD_HOSTS.contains(&host);
     if !allowed {
-        return Err(format!("Untrusted download host: {host}"));
+        return Err(crate::files::redact_sensitive(&format!(
+            "Untrusted download host: {host} (from {source_field}: {safe_url}; allowed hosts: [{allowed_list}]). Next step: report this host if it is an official Mojang endpoint added for Minecraft 26.3, or check whether a proxy/mirror rewrote the manifest URL."
+        )));
     }
     Ok(())
 }

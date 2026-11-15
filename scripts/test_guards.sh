@@ -584,6 +584,27 @@ expect_fail "Check 12 rejects patch touching files other than research-lock.json
     env GUARD_CHECK12_ONLY_PATCH="$BAD_PATCH_OTHER_FILE" bash scripts/guard.sh
 
 echo ""
+echo "=== 9. Zero/NUL Integrity Self-Tests (check_no_zero_files.sh) ==="
+
+GOOD_ZERO_DIR="$TMP_ROOT/good_zero_dir"
+mkdir -p "$GOOD_ZERO_DIR"
+printf 'ok\n' > "$GOOD_ZERO_DIR/valid.rs"
+expect_pass "Zero/NUL check accepts valid non-empty UTF-8 file" \
+    env GUARD_CHECK_ZERO_ONLY_DIR="$GOOD_ZERO_DIR" bash scripts/guard.sh
+
+BAD_NUL_DIR="$TMP_ROOT/bad_nul_dir"
+mkdir -p "$BAD_NUL_DIR"
+dd if=/dev/zero bs=128 count=1 2>/dev/null > "$BAD_NUL_DIR/prepare_tests.rs"
+expect_fail "Zero/NUL check rejects NUL-filled text file" "Zero-filled or empty file detected" \
+    env GUARD_CHECK_ZERO_ONLY_DIR="$BAD_NUL_DIR" bash scripts/guard.sh
+
+BAD_MIXED_NUL_DIR="$TMP_ROOT/bad_mixed_nul_dir"
+mkdir -p "$BAD_MIXED_NUL_DIR"
+printf 'abc\0def\n' > "$BAD_MIXED_NUL_DIR/mixed.kt"
+expect_fail "Zero/NUL check rejects text file containing embedded NUL bytes" "NUL bytes detected in text file" \
+    env GUARD_CHECK_ZERO_ONLY_DIR="$BAD_MIXED_NUL_DIR" bash scripts/guard.sh
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1

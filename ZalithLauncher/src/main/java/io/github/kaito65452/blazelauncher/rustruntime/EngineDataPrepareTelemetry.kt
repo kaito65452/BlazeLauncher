@@ -34,6 +34,7 @@ data class EngineDataPrepareMetrics(
     @SerializedName("files_reused") val filesReused: Long = 0L,
     @SerializedName("files_downloaded") val filesDownloaded: Long = 0L,
     @SerializedName("engine_data_entries") val engineDataEntries: Long = 0L,
+    @SerializedName("failed_phase") val failedPhase: String = "",
     @SerializedName("last_error") val lastError: String = "",
     @SerializedName("warnings") val warnings: List<String> = emptyList(),
     @SerializedName("updated_at_ms") val updatedAtMs: Long = 0L
@@ -83,6 +84,11 @@ object EngineDataPrepareTelemetry {
             if (metrics.phaseTimingsMs.isNotEmpty()) {
                 val breakdown = metrics.phaseTimingsMs.entries.joinToString(", ") { "${it.key}=${it.value}ms" }
                 appendLine("phases: $breakdown")
+            }
+            @Suppress("USELESS_ELVIS")
+            val phase = (metrics.failedPhase ?: "").trim()
+            if (phase.isNotBlank()) {
+                appendLine("failed_phase: ${RustDiagnosticsCollector.redactDiagnosticText(phase)}")
             }
             if (metrics.lastError.isNotBlank()) {
                 appendLine("last_error: ${RustDiagnosticsCollector.redactDiagnosticText(metrics.lastError)}")

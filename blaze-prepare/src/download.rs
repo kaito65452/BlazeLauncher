@@ -9,8 +9,8 @@ use crate::files::{
     sha256_file, CancelFlag,
 };
 use crate::lock::{
-    validate_download_url, validate_sha1_hex, validate_sha256_hex,
-    validate_version_manifest_with_source, BedrockControlsManifest, LockFile,
+    sanitize_url_for_error, validate_download_url_with_context, validate_sha1_hex,
+    validate_sha256_hex, validate_version_manifest_with_source, BedrockControlsManifest, LockFile,
     ManifestValidationInfo, MinecraftPin,
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,19 @@ pub struct HttpFetcher {
     cancel: CancelFlag,
 }
 
+const MAX_DOWNLOAD_REDIRECTS: usize = 5;
+
+fn is_non_retryable_download_error(err: &str) -> bool {
+    err.contains("Untrusted download host:")
+        || err.contains("Download URL must use HTTPS on port 443")
+        || err.contains("Credentials in download URL are forbidden")
+        || err.contains("Malformed download URL")
+        || err.contains("Too many redirects")
+        || err.contains("Redirect ")
+        || err.contains("Checksum mismatch")
+        || err.contains("Size mismatch")
+}
+
 impl HttpFetcher {
     pub fn new(allow_loopback: bool, cancel: CancelFlag) -> Self {
         let agent = ureq::AgentBuilder::new()
@@ -55,17 +68,90 @@ impl HttpFetcher {
         }
     }
 
+    pub fn call_validated_with_redirects(
+        &self,
+        initial_url: &str,
+        source_field: &str,
+    ) -> Result<ureq::Response, String> {
+        let mut current_url = initial_url.to_string();
+        let mut current_field = source_field.to_string();
+        validate_download_url_with_context(&current_url, &current_field, self.allow_loopback)?;
+
+        for hop in 0..=MAX_DOWNLOAD_REDIRECTS {
+            self.cancel.check()?;
+            let safe_cur = sanitize_url_for_error(&current_url);
+            let resp = match self.agent.get(&current_url).call() {
+                Ok(r) => r,
+                Err(ureq::Error::Status(code, _)) => {
+                    return Err(redact_sensitive(&format!(
+                        "GET {current_field} ({safe_cur}): HTTP {code}"
+                    )));
+                }
+                Err(ureq::Error::Transport(t)) => {
+                    return Err(redact_sensitive(&format!(
+                        "GET {current_field} ({safe_cur}): {t}"
+                    )));
+                }
+            };
+            let status = resp.status();
+            if (300..=399).contains(&status) {
+                if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+                    return Err(redact_sensitive(&format!(
+                        "Redirect HTTP {status} unsupported (from {current_field}: {safe_cur}). Next step: retry later or check whether a network proxy altered the Mojang CDN response."
+                    )));
+                }
+                if hop == MAX_DOWNLOAD_REDIRECTS {
+                    return Err(redact_sensitive(&format!(
+                        "Too many redirects (>{MAX_DOWNLOAD_REDIRECTS}) from {source_field}: {}. Next step: retry on a clean network connection without redirect loops.",
+                        sanitize_url_for_error(initial_url)
+                    )));
+                }
+                let location = resp.header("location").ok_or_else(|| {
+                    redact_sensitive(&format!(
+                        "Redirect HTTP {status} missing Location header (from {current_field}: {safe_cur}). Next step: retry later or check for a broken CDN/proxy response."
+                    ))
+                })?;
+                let base = url::Url::parse(&current_url).map_err(|e| {
+                    redact_sensitive(&format!(
+                        "Malformed download URL while resolving redirect from {current_field}: {e}"
+                    ))
+                })?;
+                let next_url = base
+                    .join(location)
+                    .map_err(|e| {
+                        redact_sensitive(&format!(
+                            "Malformed download URL in redirect Location from {current_field}: {e}"
+                        ))
+                    })?
+                    .to_string();
+                let next_field = format!("{source_field} redirect hop {}", hop + 1);
+                validate_download_url_with_context(&next_url, &next_field, self.allow_loopback)?;
+                current_url = next_url;
+                current_field = next_field;
+                continue;
+            }
+            return Ok(resp);
+        }
+        unreachable!()
+    }
+
     pub fn get_bytes(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        validate_download_url(url, self.allow_loopback)?;
+        self.get_bytes_with_context(url, max_bytes, "download")
+    }
+
+    pub fn get_bytes_with_context(
+        &self,
+        url: &str,
+        max_bytes: u64,
+        source_field: &str,
+    ) -> Result<Vec<u8>, String> {
+        validate_download_url_with_context(url, source_field, self.allow_loopback)?;
         self.cancel.check()?;
+        let safe_url = sanitize_url_for_error(url);
         for attempt in 0..3 {
             let res = (|| -> Result<Vec<u8>, String> {
                 self.cancel.check()?;
-                let resp = self
-                    .agent
-                    .get(url)
-                    .call()
-                    .map_err(|e| format!("GET {url}: {e}"))?;
+                let resp = self.call_validated_with_redirects(url, source_field)?;
                 let mut reader = resp.into_reader().take(max_bytes + 1);
                 let mut out = Vec::new();
                 let mut buf = [0u8; 16 * 1024];
@@ -73,12 +159,14 @@ impl HttpFetcher {
                     self.cancel.check()?;
                     let n = reader
                         .read(&mut buf)
-                        .map_err(|e| format!("Read {url}: {e}"))?;
+                        .map_err(|e| redact_sensitive(&format!("Read {source_field} ({safe_url}): {e}")))?;
                     if n == 0 {
                         break;
                     }
                     if out.len() as u64 + n as u64 > max_bytes {
-                        return Err(format!("Response from {url} exceeds {max_bytes} byte limit"));
+                        return Err(redact_sensitive(&format!(
+                            "Response from {source_field} ({safe_url}) exceeds {max_bytes} byte limit"
+                        )));
                     }
                     out.extend_from_slice(&buf[..n]);
                 }
@@ -87,7 +175,10 @@ impl HttpFetcher {
             match res {
                 Ok(bytes) => return Ok(bytes),
                 Err(err) => {
-                    if self.cancel.is_cancelled() || attempt == 2 {
+                    if self.cancel.is_cancelled()
+                        || is_non_retryable_download_error(&err)
+                        || attempt == 2
+                    {
                         return Err(err);
                     }
                     std::thread::sleep(Duration::from_millis(400 * (attempt + 1)));
@@ -107,6 +198,7 @@ pub enum HashAlg {
 #[derive(Clone)]
 pub struct FileFetchSpec {
     pub url: String,
+    pub source_field: String,
     pub expected_hash: String,
     pub alg: HashAlg,
     pub expected_size: Option<u64>,
@@ -200,7 +292,8 @@ pub fn ensure_verified_file(
         }
     }
 
-    validate_download_url(&spec.url, fetcher.allow_loopback)?;
+    validate_download_url_with_context(&spec.url, &spec.source_field, fetcher.allow_loopback)?;
+    let safe_url = sanitize_url_for_error(&spec.url);
     let partial = partial_path(&spec.dest);
     if let Some(parent) = spec.dest.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -210,11 +303,7 @@ pub fn ensure_verified_file(
         let dl_res = (|| -> Result<u64, String> {
             fetcher.cancel.check()?;
             let limit = spec.expected_size.unwrap_or(1024 * 1024 * 1024);
-            let resp = fetcher
-                .agent
-                .get(&spec.url)
-                .call()
-                .map_err(|e| format!("GET {}: {e}", spec.url))?;
+            let resp = fetcher.call_validated_with_redirects(&spec.url, &spec.source_field)?;
             let mut reader = resp.into_reader().take(limit + 1);
             let mut writer =
                 fs::File::create(&partial).map_err(|e| format!("{}: {e}", partial.display()))?;
@@ -224,13 +313,16 @@ pub fn ensure_verified_file(
                 fetcher.cancel.check()?;
                 let n = reader
                     .read(&mut buf)
-                    .map_err(|e| format!("Read {}: {e}", spec.url))?;
+                    .map_err(|e| redact_sensitive(&format!("Read {} ({safe_url}): {e}", spec.source_field)))?;
                 if n == 0 {
                     break;
                 }
                 written += n as u64;
                 if written > limit {
-                    return Err(format!("Download exceeds expected size limit: {}", spec.url));
+                    return Err(redact_sensitive(&format!(
+                        "Download exceeds expected size limit from {} ({safe_url})",
+                        spec.source_field
+                    )));
                 }
                 writer
                     .write_all(&buf[..n])
@@ -248,8 +340,8 @@ pub fn ensure_verified_file(
             if let Some(exp_size) = spec.expected_size {
                 if written != exp_size {
                     return Err(redact_sensitive(&format!(
-                        "Size mismatch for direct download from {} -> {}: expected {exp_size} bytes, got {written} bytes{reuse_ctx}. Next step: check your network connection or delete the partial download and retry.",
-                        spec.url,
+                        "Size mismatch for direct download from {} ({safe_url}) -> {}: expected {exp_size} bytes, got {written} bytes{reuse_ctx}. Next step: check your network connection or delete the partial download and retry.",
+                        spec.source_field,
                         spec.dest.display()
                     )));
                 }
@@ -260,8 +352,8 @@ pub fn ensure_verified_file(
             };
             if !actual.eq_ignore_ascii_case(&spec.expected_hash) {
                 return Err(redact_sensitive(&format!(
-                    "Checksum mismatch for direct download from {} -> {}: computed={actual}, expected={}{reuse_ctx}. Next step: delete corrupted cached files and retry on a stable connection.",
-                    spec.url,
+                    "Checksum mismatch for direct download from {} ({safe_url}) -> {}: computed={actual}, expected={}{reuse_ctx}. Next step: delete corrupted cached files and retry on a stable connection.",
+                    spec.source_field,
                     spec.dest.display(),
                     spec.expected_hash
                 )));
@@ -275,10 +367,9 @@ pub fn ensure_verified_file(
             Ok(bytes) => return Ok(FetchOutcome::Downloaded(bytes)),
             Err(err) => {
                 let _ = fs::remove_file(&partial);
-                // Do not retry checksum mismatches, pin errors, or user cancellations.
+                // Do not retry checksum/size mismatches, URL/host/redirect policy errors, or user cancellations.
                 if fetcher.cancel.is_cancelled()
-                    || err.contains("Checksum mismatch")
-                    || err.contains("Size mismatch")
+                    || is_non_retryable_download_error(&err)
                     || attempt == 2
                 {
                     return Err(err);
@@ -365,7 +456,9 @@ pub fn resolve_version_manifest(
         }
     }
 
-    let catalog_bytes = fetcher.get_bytes(catalog_url, 32 * 1024 * 1024).map_err(|e| {
+    let catalog_bytes = fetcher
+        .get_bytes_with_context(catalog_url, 32 * 1024 * 1024, "version_catalog")
+        .map_err(|e| {
         if local_rejections.is_empty() {
             e
         } else {
@@ -405,15 +498,17 @@ pub fn resolve_version_manifest(
         } else {
             format!(" Local check notes: [{}].", local_rejections.join(" | "))
         };
+        let safe_meta_url = sanitize_url_for_error(meta_url);
         return Err(redact_sensitive(&format!(
-            "Catalog version {} manifest sha1 ({meta_sha1}) from direct download catalog entry ({meta_url}) is rejected by research-lock.json (accepted: [{}]).{local_ctx} Next step: Mojang may have republished {}; confirm client_sha1 and server_sha1 match upstream pins before adding an explicit lock refresh.",
+            "Catalog version {} manifest sha1 ({meta_sha1}) from direct download catalog entry ({safe_meta_url}) is rejected by research-lock.json (accepted: [{}]).{local_ctx} Next step: Mojang may have republished {}; confirm client_sha1 and server_sha1 match upstream pins before adding an explicit lock refresh.",
             lock.minecraft.version,
             lock.accepted_manifest_list_display(),
             lock.minecraft.version
         )));
     }
-    let manifest_bytes = fetcher.get_bytes(meta_url, 16 * 1024 * 1024)?;
-    let source_label = format!("direct download from {meta_url}");
+    let manifest_field = format!("version_catalog.versions[{}].url", lock.minecraft.version);
+    let manifest_bytes = fetcher.get_bytes_with_context(meta_url, 16 * 1024 * 1024, &manifest_field)?;
+    let source_label = format!("direct download from {}", sanitize_url_for_error(meta_url));
     let (val, info) = validate_version_manifest_with_source(
         &manifest_bytes,
         Some(meta_sha1),
@@ -501,6 +596,10 @@ fn native_library_matches(library: &Value, names: &[&str]) -> bool {
     let arm = rule_architectures().contains(&"arm64");
     let name = library.get("name").and_then(Value::as_str).unwrap_or("");
     let classifier = name.split(':').nth(3).unwrap_or("");
+    // Headless Java 25 exporters/datagen never load desktop LWJGL native binaries (.so/.dll/.dylib).
+    if name.starts_with("org.lwjgl:") && classifier.starts_with("natives-") {
+        return false;
+    }
     if classifier_ends_with(classifier, &["arm64", "aarch64", "aarch_64"]) {
         return arm;
     }
@@ -581,6 +680,7 @@ pub fn build_artifact_plan(
         let reuse = gh_rel.into_iter().collect();
         Ok(FileFetchSpec {
             url,
+            source_field: format!("downloads.{side}.url"),
             expected_hash: sha1,
             alg: HashAlg::Sha1,
             expected_size: size,
@@ -638,6 +738,7 @@ pub fn build_artifact_plan(
     }
     let asset_index_spec = FileFetchSpec {
         url: idx_url,
+        source_field: "assetIndex.url".to_string(),
         expected_hash: idx_sha1,
         alg: HashAlg::Sha1,
         expected_size: idx_size,
@@ -697,6 +798,7 @@ pub fn build_artifact_plan(
         client_library_paths.push(dest.clone());
         specs.push(FileFetchSpec {
             url,
+            source_field: format!("libraries[{name}].downloads.artifact.url"),
             expected_hash: sha1,
             alg: HashAlg::Sha1,
             expected_size: size,
@@ -837,6 +939,7 @@ pub fn plan_asset_objects(
             }
             specs.push(FileFetchSpec {
                 url: format!("{base}/{prefix}/{hash}"),
+                source_field: format!("assetIndex.objects[{name}]"),
                 expected_hash: hash.to_string(),
                 alg: HashAlg::Sha1,
                 expected_size: Some(size),
@@ -880,6 +983,7 @@ pub fn plan_bedrock_controls(
         out.push((
             FileFetchSpec {
                 url,
+                source_field: format!("bedrock_controls[{}]", rel.display()),
                 expected_hash: entry.sha256.clone(),
                 alg: HashAlg::Sha256,
                 expected_size: Some(entry.size),

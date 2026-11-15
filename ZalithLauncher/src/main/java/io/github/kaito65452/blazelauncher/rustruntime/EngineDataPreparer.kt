@@ -62,7 +62,8 @@ data class PrepareUiState(
 
 class EngineDataPrepareException(
     val redactedMessage: String,
-    val redactedDetails: String
+    val redactedDetails: String,
+    val failedPhase: String = "prepare"
 ) : RuntimeException(redactedMessage)
 
 /**
@@ -114,6 +115,7 @@ internal object EngineDataPrepareSupport {
         if (totalDeviceRamBytes == null || totalDeviceRamBytes <= 0L) return 512
         val totalMb = totalDeviceRamBytes / (1024L * 1024L)
         return when {
+            totalMb >= 8 * 1024 -> 1024
             totalMb >= 6 * 1024 -> 768
             totalMb >= 4 * 1024 -> 640
             else -> 512
@@ -197,9 +199,27 @@ object EngineDataPreparer {
         }.getOrElse { isPreparedFallback(context.filesDir) }
 
         val metrics = EngineDataPrepareTelemetry.load(context.filesDir)
+        val persistedFailure = if (!prepared && metrics?.status == "failed" && metrics.lastError.isNotBlank()) {
+            RustDiagnosticsCollector.redactDiagnosticText(metrics.lastError)
+        } else {
+            null
+        }
+        @Suppress("USELESS_ELVIS")
+        val persistedFailedPhase = (metrics?.failedPhase ?: "").trim()
         _uiState.value = _uiState.value.copy(
             prepared = prepared,
+            phase = if (persistedFailure != null && !_uiState.value.running) {
+                context.getString(R.string.developer_prepare_failed)
+            } else {
+                _uiState.value.phase
+            },
+            detail = if (persistedFailure != null && _uiState.value.detail.isBlank()) {
+                persistedFailedPhase
+            } else {
+                _uiState.value.detail
+            },
             peakRssKb = metrics?.peakRssKb ?: _uiState.value.peakRssKb,
+            redactedError = persistedFailure ?: _uiState.value.redactedError,
             warnings = metrics?.safeWarnings() ?: _uiState.value.warnings
         )
     }
@@ -270,36 +290,78 @@ object EngineDataPreparer {
         )
     }
 
+    private fun saveFailureTelemetry(
+        appContext: Context,
+        failedPhase: String,
+        redactedDetails: String,
+        timings: Map<String, Long> = emptyMap(),
+        peakRssKb: Long = 0L,
+        warnings: List<String> = emptyList()
+    ) {
+        val status = if (redactedDetails.contains("cancel", ignoreCase = true) ||
+            failedPhase.contains("cancel", ignoreCase = true)
+        ) {
+            "cancelled"
+        } else {
+            "failed"
+        }
+        EngineDataPrepareTelemetry.save(
+            appContext.filesDir,
+            EngineDataPrepareMetrics(
+                status = status,
+                minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
+                phaseTimingsMs = timings,
+                peakRssKb = peakRssKb,
+                failedPhase = failedPhase,
+                lastError = redactedDetails,
+                warnings = warnings,
+                updatedAtMs = System.currentTimeMillis()
+            )
+        )
+    }
+
     private fun recordPrepareFailure(appContext: Context, e: EngineDataPrepareException) {
+        val existing = EngineDataPrepareTelemetry.load(appContext.filesDir)
+        if (existing?.status != "failed" || existing.lastError != RustDiagnosticsCollector.redactDiagnosticText(e.redactedDetails)) {
+            saveFailureTelemetry(
+                appContext = appContext,
+                failedPhase = e.failedPhase,
+                redactedDetails = e.redactedDetails,
+                timings = existing?.phaseTimingsMs.orEmpty(),
+                peakRssKb = maxOf(_uiState.value.peakRssKb, existing?.peakRssKb ?: 0L),
+                warnings = _uiState.value.warnings
+            )
+        }
         _uiState.value = PrepareUiState(
             running = false,
             phase = appContext.getString(R.string.developer_prepare_failed),
             detail = e.redactedMessage,
             prepared = isPreparedFallback(appContext.filesDir),
-            redactedError = e.redactedDetails
+            redactedError = e.redactedDetails,
+            warnings = _uiState.value.warnings
         )
     }
 
     private fun recordUnexpectedFailure(appContext: Context, t: Throwable) {
+        val stepPhase = _uiState.value.phase.ifBlank { "prepare" }
         val errDetails = EngineDataPrepareSupport.buildRedactedErrorDetails(
-            stepName = _uiState.value.phase.ifBlank { "prepare" },
+            stepName = stepPhase,
             reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
         )
-        EngineDataPrepareTelemetry.save(
-            appContext.filesDir,
-            EngineDataPrepareMetrics(
-                status = "failed",
-                minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
-                lastError = errDetails,
-                updatedAtMs = System.currentTimeMillis()
-            )
+        saveFailureTelemetry(
+            appContext = appContext,
+            failedPhase = stepPhase,
+            redactedDetails = errDetails,
+            peakRssKb = _uiState.value.peakRssKb,
+            warnings = _uiState.value.warnings
         )
         _uiState.value = PrepareUiState(
             running = false,
             phase = appContext.getString(R.string.developer_prepare_failed),
             detail = RustDiagnosticsCollector.redactDiagnosticText(t.message ?: t.javaClass.simpleName),
             prepared = isPreparedFallback(appContext.filesDir),
-            redactedError = errDetails
+            redactedError = errDetails,
+            warnings = _uiState.value.warnings
         )
     }
 
@@ -339,13 +401,26 @@ object EngineDataPreparer {
         if (!BlazePrepareNative.ensureLoaded()) {
             val err = BlazePrepareNative.lastLoadError() ?: "libblaze_prepare.so missing"
             val details = EngineDataPrepareSupport.buildRedactedErrorDetails("load_native", err)
-            throw EngineDataPrepareException(err, details)
+            saveFailureTelemetry(context, "load_native", details, timings, peakRssKb, prepareWarnings)
+            throw EngineDataPrepareException(err, details, failedPhase = "load_native")
         }
 
         // Phase 0: unpack bundled lock, bedrock-controls, and MIT Java exporter sources
         updateProgress("Unpacking pinned exporter sources", "", 0.02f)
         val unpackStartNs = System.nanoTime()
-        val assetsWorkspace = unpackBundledAssets(context)
+        val assetsWorkspace = try {
+            unpackBundledAssets(context)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("unpack_assets", reason)
+            saveFailureTelemetry(context, "unpack_assets", details, timings, peakRssKb, prepareWarnings)
+            throw EngineDataPrepareException(
+                RustDiagnosticsCollector.redactDiagnosticText(reason),
+                details,
+                failedPhase = "unpack_assets"
+            )
+        }
         timings["unpack_assets"] = (System.nanoTime() - unpackStartNs) / 1_000_000L
 
         // Phase 1 (Rust): pin verification, ZL2 reuse, downloads, bundler unpack, client resources, worldgen
@@ -382,21 +457,18 @@ object EngineDataPreparer {
                 is PrepareEnvelope.Success -> env.data
                 is PrepareEnvelope.Failure -> {
                     val details = EngineDataPrepareSupport.buildRedactedErrorDetails("rust_phase1", env.error)
-                    EngineDataPrepareTelemetry.save(
-                        context.filesDir,
-                        EngineDataPrepareMetrics(
-                            status = if (env.error.contains("cancel", ignoreCase = true)) "cancelled" else "failed",
-                            minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
-                            phaseTimingsMs = timings,
-                            peakRssKb = maxOf(peakRssKb, env.peakRssKb),
-                            lastError = details,
-                            warnings = prepareWarnings,
-                            updatedAtMs = System.currentTimeMillis()
-                        )
+                    saveFailureTelemetry(
+                        appContext = context,
+                        failedPhase = "rust_phase1",
+                        redactedDetails = details,
+                        timings = timings,
+                        peakRssKb = maxOf(peakRssKb, env.peakRssKb),
+                        warnings = prepareWarnings
                     )
                     throw EngineDataPrepareException(
                         RustDiagnosticsCollector.redactDiagnosticText(env.error),
-                        details
+                        details,
+                        failedPhase = "rust_phase1"
                     )
                 }
             }
@@ -421,21 +493,52 @@ object EngineDataPreparer {
         // Ensure OpenJDK 25 (Internal-25) is unpacked for datagen & parity compilation
         updateProgress("Checking OpenJDK 25 runtime", Jre.JRE_25.jreName, 0.42f)
         val jreStartNs = System.nanoTime()
-        ensureInternalJre25(context)
+        try {
+            ensureInternalJre25(context)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("ensure_jre25", reason)
+            saveFailureTelemetry(context, "ensure_jre25", details, timings, peakRssKb, prepareWarnings)
+            throw EngineDataPrepareException(
+                RustDiagnosticsCollector.redactDiagnosticText(reason),
+                details,
+                failedPhase = "ensure_jre25"
+            )
+        }
         timings["ensure_jre25"] = (System.nanoTime() - jreStartNs) / 1_000_000L
 
         // Run sequential :jvm steps (javac + vanilla datagen + parity exporters)
         val jvmStartNs = System.nanoTime()
-        runSequentialJavaExporters(
-            context = context,
-            plan = phase1.javaPlan,
-            parityPackageDir = assetsWorkspace.parityPackageDir,
-            paritySourceRoot = assetsWorkspace.paritySourceRoot,
-            onStep = { stepIdx, totalSteps, label ->
-                val frac = 0.45f + 0.42f * (stepIdx.toFloat() / totalSteps.toFloat())
-                updateProgress(label, "JVM step $stepIdx/$totalSteps", frac)
-            }
-        )
+        runCatching { getGameHome() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { File(it).mkdirs() }
+        try {
+            runSequentialJavaExporters(
+                context = context,
+                plan = phase1.javaPlan,
+                parityPackageDir = assetsWorkspace.parityPackageDir,
+                paritySourceRoot = assetsWorkspace.paritySourceRoot,
+                onStep = { stepIdx, totalSteps, label ->
+                    val frac = 0.45f + 0.42f * (stepIdx.toFloat() / totalSteps.toFloat())
+                    updateProgress(label, "JVM step $stepIdx/$totalSteps", frac)
+                }
+            )
+        } catch (e: EngineDataPrepareException) {
+            saveFailureTelemetry(context, e.failedPhase, e.redactedDetails, timings, peakRssKb, prepareWarnings)
+            throw e
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("jvm_exporters", reason)
+            saveFailureTelemetry(context, "jvm_exporters", details, timings, peakRssKb, prepareWarnings)
+            throw EngineDataPrepareException(
+                RustDiagnosticsCollector.redactDiagnosticText(reason),
+                details,
+                failedPhase = "jvm_exporters"
+            )
+        }
         timings["jvm_exporters"] = (System.nanoTime() - jvmStartNs) / 1_000_000L
 
         // Phase 2 (Rust): assemble reports, survival rules, block flags, engine-data.zip, atomic swap
@@ -456,21 +559,18 @@ object EngineDataPreparer {
                 is PrepareEnvelope.Success -> env.data
                 is PrepareEnvelope.Failure -> {
                     val details = EngineDataPrepareSupport.buildRedactedErrorDetails("rust_phase2", env.error)
-                    EngineDataPrepareTelemetry.save(
-                        context.filesDir,
-                        EngineDataPrepareMetrics(
-                            status = if (env.error.contains("cancel", ignoreCase = true)) "cancelled" else "failed",
-                            minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
-                            phaseTimingsMs = timings,
-                            peakRssKb = maxOf(peakRssKb, env.peakRssKb),
-                            lastError = details,
-                            warnings = prepareWarnings,
-                            updatedAtMs = System.currentTimeMillis()
-                        )
+                    saveFailureTelemetry(
+                        appContext = context,
+                        failedPhase = "rust_phase2",
+                        redactedDetails = details,
+                        timings = timings,
+                        peakRssKb = maxOf(peakRssKb, env.peakRssKb),
+                        warnings = prepareWarnings
                     )
                     throw EngineDataPrepareException(
                         RustDiagnosticsCollector.redactDiagnosticText(env.error),
-                        details
+                        details,
+                        failedPhase = "rust_phase2"
                     )
                 }
             }
@@ -691,8 +791,9 @@ object EngineDataPreparer {
                     processLogTail = tail
                 )
                 throw EngineDataPrepareException(
-                    "${step.name} failed (exit=$exitCode)",
-                    details
+                    redactedMessage = "${step.name} failed (exit=$exitCode)",
+                    redactedDetails = details,
+                    failedPhase = "jvm_exporters: ${step.name}"
                 )
             }
         }

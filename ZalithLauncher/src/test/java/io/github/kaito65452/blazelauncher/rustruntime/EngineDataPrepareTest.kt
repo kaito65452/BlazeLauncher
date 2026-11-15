@@ -266,4 +266,49 @@ class EngineDataPrepareTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun failedPhaseAndRedactedErrorReachBothDetailsAndCopyReport() {
+        val root = Files.createTempDirectory("blaze-prepare-failed-phase-test").toFile()
+        try {
+            val filesDir = File(root, "files").apply { mkdirs() }
+            val statusDir = File(root, "status").apply { mkdirs() }
+            val failedPhase = "jvm_exporters: Compiling server parity exporters (javac 25)"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails(
+                stepName = failedPhase,
+                reason = "Untrusted host for account 12345678-90ab-cdef-1234-567890abcdef token=secretTokValue99",
+                processLogTail = "javac: exit 1"
+            )
+            assertTrue(details.contains("Step: $failedPhase"))
+            assertTrue(details.contains("12345678..."))
+            assertFalse(details.contains("secretTokValue99"))
+
+            EngineDataPrepareTelemetry.save(
+                filesDir,
+                EngineDataPrepareMetrics(
+                    status = "failed",
+                    minecraftVersion = "26.3",
+                    failedPhase = failedPhase,
+                    lastError = details,
+                    updatedAtMs = 2000L
+                )
+            )
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                logcatProvider = { "" }
+            )
+            assertTrue("Expected failed_phase in Copy report:\n$report", report.contains("failed_phase: $failedPhase"))
+            assertTrue("Expected last_error in Copy report:\n$report", report.contains("last_error: Step: $failedPhase"))
+            assertFalse(report.contains("secretTokValue99"))
+            assertFalse(report.contains("12345678-90ab-cdef-1234-567890abcdef"))
+
+            assertEquals(1024, EngineDataPrepareSupport.recommendJvmHeapMb(8L * 1024 * 1024 * 1024))
+            assertEquals(768, EngineDataPrepareSupport.recommendJvmHeapMb(6L * 1024 * 1024 * 1024))
+            assertEquals(640, EngineDataPrepareSupport.recommendJvmHeapMb(4L * 1024 * 1024 * 1024))
+            assertEquals(512, EngineDataPrepareSupport.recommendJvmHeapMb(3L * 1024 * 1024 * 1024))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
 }

@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -912,6 +912,19 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -f "engine/patches/0007-pin-refresh-26.3.p
     echo "Checking local pin refresh patch 0007-pin-refresh-26.3.patch..."
     check_pin_refresh_patch "engine/patches/0007-pin-refresh-26.3.patch" "engine/starling/research-lock.json"
     echo "✓ Pin refresh patch 0007 touches only accepted hash lists in research-lock.json."
+fi
+
+# 7d. Zero-byte & NUL-corruption integrity check (Stage 0.2)
+if [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ]; then
+    echo "Checking custom directory for zero-filled / NUL-corrupted files: $GUARD_CHECK_ZERO_ONLY_DIR"
+    bash scripts/check_no_zero_files.sh "$GUARD_CHECK_ZERO_ONLY_DIR"
+    echo "✓ Custom zero/NUL integrity check passed."
+    exit 0
+fi
+
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
+    echo "Checking repository for zero-filled or NUL-corrupted files..."
+    bash scripts/check_no_zero_files.sh
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
