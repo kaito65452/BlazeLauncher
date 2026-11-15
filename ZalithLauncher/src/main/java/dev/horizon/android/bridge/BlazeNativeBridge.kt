@@ -236,6 +236,12 @@ object BlazeNativeBridge {
     fun setSession(user: String, uuid: String, accessToken: String): Boolean =
         nativeSetSession(user, uuid, accessToken)
 
+    external fun nativeSetDirectLaunch(enabled: Boolean)
+
+    fun setDirectLaunch(enabled: Boolean) {
+        nativeSetDirectLaunch(enabled)
+    }
+
     external fun nativeInjectSyntheticTouch(x: Float, y: Float, phase: Int): Boolean
 
     fun injectSyntheticTouch(x: Float, y: Float, phase: Int): Boolean =

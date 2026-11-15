@@ -52,19 +52,28 @@ import kotlin.math.roundToInt
  */
 class RustActivity : NativeActivity() {
     private var initialProbeDispatched = false
+    private var directLaunchMode = false
 
     private external fun nativeDocumentResult(requestCode: Int, resultCode: Int, uriString: String?)
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        directLaunchMode = intent?.getBooleanExtra(EXTRA_DIRECT_LAUNCH, false) == true
         val pid = Process.myPid()
-        Log.i(TAG, "Starting RustActivity Phase 1a spike in pid=$pid")
-        RustDiagnosticsCollector.recordRustEvent(this, "onCreate pid=$pid")
+        Log.i(TAG, "Starting RustActivity pid=$pid directLaunch=$directLaunchMode")
+        RustDiagnosticsCollector.recordRustEvent(
+            this,
+            "onCreate pid=$pid directLaunch=$directLaunchMode"
+        )
         configureDisplayCutoutMode()
-        super.onCreate(savedInstanceState)
+        // Consume session and set direct-launch mode BEFORE super.onCreate starts android_main.
         val sessionResult = RustSessionHandoff.consumePendingSessionInRustProcess(this)
         RustDiagnosticsCollector.recordRustEvent(this, "session_handoff: ${sessionResult.summary}")
-        attachSpikeOverlay()
-        triggerSyntheticTouchProbe(source = "onCreate_post")
+        BlazeNativeBridge.setDirectLaunch(directLaunchMode)
+        super.onCreate(savedInstanceState)
+        if (!directLaunchMode) {
+            attachSpikeOverlay()
+            triggerSyntheticTouchProbe(source = "onCreate_post")
+        }
     }
 
     private fun configureDisplayCutoutMode() {
@@ -109,7 +118,7 @@ class RustActivity : NativeActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && !initialProbeDispatched) {
+        if (hasFocus && !initialProbeDispatched && !directLaunchMode) {
             initialProbeDispatched = true
             triggerSyntheticTouchProbe(source = "window_focus")
         }
@@ -286,6 +295,7 @@ class RustActivity : NativeActivity() {
 
     companion object {
         private const val TAG = "BlazeRustSpike"
+        internal const val EXTRA_DIRECT_LAUNCH = "io.github.kaito65452.blazelauncher.EXTRA_DIRECT_LAUNCH"
         internal const val DOCUMENT_PICKER_REQUEST_CODE = 4101
         internal const val MAX_DOCUMENT_URI_LENGTH = 8192
         internal const val MAX_SYSTEM_GESTURE_STRIP_DP = 200

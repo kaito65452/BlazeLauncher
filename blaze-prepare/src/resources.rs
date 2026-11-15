@@ -915,18 +915,39 @@ pub fn run_phase2_finalize(
 
     on_progress("Writing manifests and engine-data.zip", 0, 1);
     let origin = read_json_value(&work_dir.join("origin.json"))?;
+    let health_files_sha256 = file_sha256_map(
+        &stage_dir,
+        &[
+            "damage-types.json",
+            "damage-tags.json",
+            "damage-catalog.json",
+            "player-float-ids.json",
+        ],
+    )?;
+    let motion_files_sha256 = file_sha256_map(
+        &stage_dir,
+        &[
+            "movement-properties.nbt",
+            "attributes.json",
+            "landing-definitions.json",
+        ],
+    )?;
+    let render_files_sha256 =
+        file_sha256_map(&stage_dir, &["render-definitions.json", "occlusion.nbt"])?;
     let manifest = serde_json::json!({
         "schema": HORIZON_SCHEMA,
-        "output_version": HORIZON_OUTPUT_VERSION,
         "minecraft": lock.minecraft.version,
         "client_sha256": origin.get("client_sha256").cloned().unwrap_or(Value::Null),
         "server_sha256": origin.get("server_sha256").cloned().unwrap_or(Value::Null),
+        "health_files_sha256": health_files_sha256,
+        "motion_files_sha256": motion_files_sha256,
+        "collision_sha256": sha256_file(&stage_dir.join("cached-collision.nbt"))?,
+        "render_files_sha256": render_files_sha256,
+        "model_states_sha256": sha256_file(&stage_dir.join("model-states.json"))?,
         "data_version": origin.get("data_version").cloned().unwrap_or(Value::Null),
-        "resource_files": origin.get("resource_files").cloned().unwrap_or(Value::Null),
         "facts_sha256": sha256_file(&stage_dir.join("facts.json"))?,
         "block_tags_sha256": sha256_file(&stage_dir.join("block-tags.json"))?,
-        "collision_sha256": sha256_file(&stage_dir.join("cached-collision.nbt"))?,
-        "model_states_sha256": sha256_file(&stage_dir.join("model-states.json"))?,
+        "resource_files": origin.get("resource_files").cloned().unwrap_or(Value::Null),
     });
     atomic_write_bytes(
         &stage_dir.join("horizon-resources.json"),
@@ -958,6 +979,18 @@ pub fn run_phase2_finalize(
         elapsed_ms: started.elapsed().as_millis() as u64,
         peak_rss_kb: peak_rss_kb(),
     })
+}
+
+/// Builds a filename -> lowercase hex SHA-256 JSON object matching horizon-prepare's file hash maps.
+fn file_sha256_map(stage_dir: &Path, names: &[&str]) -> Result<Value, String> {
+    let mut map = Map::new();
+    for name in names {
+        map.insert(
+            (*name).to_string(),
+            Value::String(sha256_file(&stage_dir.join(name))?),
+        );
+    }
+    Ok(Value::Object(map))
 }
 
 /// Checks whether on-device `26.3` resources are complete and stamped.

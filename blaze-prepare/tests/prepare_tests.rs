@@ -539,6 +539,18 @@ fn full_phase1_and_phase2_with_mock_http_and_engine_data_zip_parity() {
         );
     }
 
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(target.join("horizon-resources.json")).unwrap()).unwrap();
+    assert_eq!(manifest["schema"], 7);
+    assert!(manifest.get("output_version").is_none());
+    assert_eq!(manifest["minecraft"], "26.3");
+    assert!(manifest["health_files_sha256"].as_object().unwrap().len() == 4);
+    assert!(manifest["motion_files_sha256"].as_object().unwrap().len() == 3);
+    assert!(manifest["render_files_sha256"].as_object().unwrap().len() == 2);
+    let stamp: serde_json::Value =
+        serde_json::from_slice(&fs::read(target.join("horizon-prepare.json")).unwrap()).unwrap();
+    assert_eq!(stamp["output_version"], 3);
+
     // Check package_resources_zip with bootstrap.json parity
     let bootstrap_zip = dir.path().join("with-bootstrap.zip");
     package_resources_zip(
@@ -816,4 +828,200 @@ fn synthetic_4000_file_benchmark() {
         "BENCH_RUST_4000 build_ms={build_ms} extract_ms={extract_ms} verify_ms={verify_ms} zip_ms={zip_ms} peak_rss_kb={}",
         blaze_prepare::files::peak_rss_kb()
     );
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let ty = entry.file_type().unwrap();
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else if ty.is_file() {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn synthetic_parity_export_for_ci_oracle() {
+    let dir = TempDir::new("oracle-parity");
+    let shared_routes: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let actual_base = format!("http://{}", listener.local_addr().unwrap());
+    let world = make_synthetic_world(&actual_base);
+    *shared_routes.lock().unwrap() = routes_for(&world, &actual_base);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::clone(&stop);
+    let routes_c = Arc::clone(&shared_routes);
+    let srv_thread = std::thread::spawn(move || {
+        while !stop_c.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/")
+                        .to_string();
+                    let guard = routes_c.lock().unwrap();
+                    if let Some(body) = guard.get(&path) {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(hdr.as_bytes());
+                        let _ = stream.write_all(body);
+                    } else {
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let files_dir = dir.path().join("files");
+    fs::create_dir_all(&files_dir).unwrap();
+    let lock_path = dir.path().join("research-lock.json");
+    let controls_path = dir.path().join("bedrock-controls.json");
+    fs::write(&lock_path, &world.lock_json).unwrap();
+    fs::write(&controls_path, &world.controls_json).unwrap();
+
+    let cfg = PrepareConfig {
+        files_dir: files_dir.clone(),
+        game_home: None,
+        lock_path: lock_path.clone(),
+        controls_manifest_path: controls_path,
+        parity_sources_dir: None,
+        catalog_url: Some(format!("{actual_base}/catalog.json")),
+        objects_base_url: Some(actual_base.clone()),
+        controls_base_url: Some(format!("{actual_base}/controls")),
+        allow_loopback: true,
+        download_workers: 2,
+    };
+
+    let cancel = CancelFlag::new();
+    let p1 = run_phase1(&cfg, &cancel, &|_, _, _| {}).unwrap();
+    let stage = PathBuf::from(&p1.stage_dir);
+    let work = PathBuf::from(&p1.work_dir);
+    write_simulated_java_outputs(&work, &stage);
+
+    // Exhaustive synthetic survival inputs covering every CLASS_RULES, VEGETATION_RULES,
+    // CropBlock, DoublePlantBlock, and tag-backed stem/fungus/roots branch.
+    let class_names = [
+        "FireBlock", "CactusBlock", "PathBlock", "MushroomBlock", "MultifaceBlock",
+        "VineBlock", "HangingMossBlock", "SeaPickleBlock", "SnowLayerBlock", "BellBlock",
+        "ShelfMushroomBlock", "GrowingPlantBlock", "MangrovePropaguleBlock", "SpeleothemBlock",
+        "ScaffoldingBlock", "PistonHeadBlock", "ChorusPlantBlock", "ChorusFlowerBlock",
+        "PitcherCropBlock", "BigDripleafBlock", "BigDripleafStemBlock", "FarmlandBlock",
+        "CocoaBlock", "SugarCaneBlock", "SporeBlossomBlock", "FrogspawnBlock",
+        "SmallDripleafBlock", "TallSeagrassBlock", "DoorBlock", "BaseRailBlock",
+        "LeafLitterBlock", "WallSignBlock", "GrindstoneBlock", "RedstoneWallTorchBlock",
+        "BubbleColumnBlock", "RedstoneWireBlock", "SoulFireBlock", "BlockBehaviour",
+        "CakeBlock", "CandleCakeBlock", "BannerBlock", "StandingSignBlock",
+        "WallBannerBlock", "CarpetBlock", "MossyCarpetBlock", "BaseTorchBlock",
+        "CandleBlock", "LanternBlock", "HangingRootsBlock", "LadderBlock",
+        "AmethystClusterBlock", "TripWireHookBlock", "BaseCoralWallFanBlock", "WallTorchBlock",
+        "BasePressurePlateBlock", "DiodeBlock", "BaseCoralPlantTypeBlock",
+        "CeilingHangingSignBlock", "FaceAttachedHorizontalDirectionalBlock",
+        "BambooSaplingBlock", "BambooStalkBlock",
+    ];
+    let mut classes = serde_json::Map::new();
+    let mut placement = serde_json::Map::new();
+    let mut support_tags = serde_json::Map::new();
+    for (idx, cls) in class_names.iter().enumerate() {
+        classes.insert(format!("minecraft:cls_{idx}"), serde_json::json!(cls));
+    }
+    classes.insert("minecraft:synth_crop".into(), serde_json::json!("CropBlock"));
+    placement.insert("minecraft:synth_crop".into(), serde_json::json!("CropBlock"));
+    classes.insert("minecraft:synth_double".into(), serde_json::json!("DoublePlantBlock"));
+    placement.insert("minecraft:synth_double".into(), serde_json::json!("VegetationBlock"));
+    for (idx, pcls) in [
+        "LilyPadBlock", "VegetationBlock", "AzaleaBlock", "DryVegetationBlock",
+        "NetherSproutsBlock", "NetherWartBlock", "WitherRoseBlock", "CactusFlowerBlock",
+        "SeagrassBlock",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let k = format!("minecraft:veg_{idx}");
+        classes.insert(k.clone(), serde_json::json!("VegetationBlock"));
+        placement.insert(k, serde_json::json!(pcls));
+    }
+    for (name, pcls, field, tag) in [
+        ("minecraft:synth_stem", "StemBlock", "stemSupportBlocks", "minecraft:maintains_farmland"),
+        ("minecraft:synth_attached_stem", "AttachedStemBlock", "supportBlocks", "minecraft:farmland"),
+        ("minecraft:synth_fungus", "NetherFungusBlock", "supportBlocks", "minecraft:fungus_support"),
+        ("minecraft:synth_roots", "NetherRootsBlock", "supportBlocks", "minecraft:roots_support"),
+    ] {
+        classes.insert(name.into(), serde_json::json!("VegetationBlock"));
+        placement.insert(name.into(), serde_json::json!(pcls));
+        support_tags.insert(name.into(), serde_json::json!({ field: tag }));
+    }
+
+    let bb = work.join("block-behavior");
+    let classes_bytes = serde_json::to_vec_pretty(&classes).unwrap();
+    let placement_bytes = serde_json::to_vec_pretty(&placement).unwrap();
+    let support_bytes = serde_json::to_vec_pretty(&support_tags).unwrap();
+    fs::write(bb.join("survival-classes.json"), &classes_bytes).unwrap();
+    fs::write(bb.join("survival-placement-classes.json"), &placement_bytes).unwrap();
+    fs::write(bb.join("survival-support-tags.json"), &support_bytes).unwrap();
+
+    let p2 = run_phase2_finalize(&cfg, &cancel, &|_, _, _| {}).unwrap();
+    let expected_rules = (class_names.len() + 1 + 1 + 9 + 4) as u64;
+    assert_eq!(p2.survival_rules_count, expected_rules);
+    let target = PathBuf::from(&p2.target_resources_dir);
+    let packaged_all_zip = dir.path().join("packaged-all.zip");
+    package_resources_zip(&target, &packaged_all_zip, false, None, &cancel).unwrap();
+    let packaged_bs_zip = dir.path().join("packaged-with-bootstrap.zip");
+    package_resources_zip(
+        &target,
+        &packaged_bs_zip,
+        false,
+        Some(&serde_json::json!({"schema": 1, "version": "26.3"})),
+        &cancel,
+    )
+    .unwrap();
+
+    if let Some(dump_dir) = std::env::var_os("BLAZE_ORACLE_DUMP_DIR") {
+        let dump = PathBuf::from(dump_dir);
+        let inputs = dump.join("inputs");
+        let outputs = dump.join("outputs");
+        fs::create_dir_all(&inputs).unwrap();
+        fs::create_dir_all(&outputs).unwrap();
+        fs::write(inputs.join("survival-classes.json"), &classes_bytes).unwrap();
+        fs::write(inputs.join("survival-placement-classes.json"), &placement_bytes).unwrap();
+        fs::write(inputs.join("survival-support-tags.json"), &support_bytes).unwrap();
+        fs::write(inputs.join("server.jar"), &world.server_jar).unwrap();
+        fs::write(inputs.join("research-lock.json"), &world.lock_json).unwrap();
+        copy_dir_recursive(&target, &outputs.join("resources"));
+        fs::create_dir_all(outputs.join("unpacked-server")).unwrap();
+        fs::copy(
+            work.join("jars/server-game.jar"),
+            outputs.join("unpacked-server/server-game.jar"),
+        )
+        .unwrap();
+        copy_dir_recursive(
+            &work.join("libraries/server"),
+            &outputs.join("unpacked-server/libraries"),
+        );
+        fs::copy(&p2.engine_data_zip, outputs.join("engine-data.zip")).unwrap();
+        fs::copy(&packaged_all_zip, outputs.join("packaged-all.zip")).unwrap();
+        fs::copy(&packaged_bs_zip, outputs.join("packaged-with-bootstrap.zip")).unwrap();
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = srv_thread.join();
 }

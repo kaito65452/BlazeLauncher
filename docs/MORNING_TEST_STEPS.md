@@ -39,6 +39,26 @@
    - *(Opsional uji batal)*: jika ingin menguji cancel Stage B, tekan **Batal** lewat Pengembang -> `Siapkan data engine (spike)` saat berjalan dan pastikan tidak macet lalu bisa diulang lagi sampai muncul **`Data engine 26.3 siap`**.
 5. Setelah instalasi selesai, buka daftar **Versi** -> pastikan entri `26.3-Rust` menampilkan badge/label kecil **`Rust Edition`**.
 
+### Perkiraan Durasi, Ukuran Unduhan & Ruang Penyimpanan `26.3` (`UNVERIFIED`)
+
+Angka berikut adalah **estimasi dari ukuran manifest resmi Mojang `26.3`** (`version_manifest_v2.json` / `assetIndex id=34`) dan **belum diukur langsung di `SM-N975F` (`UNVERIFIED`)**:
+
+| Komponen (`26.3`) | Jumlah / Rincian Manifest | Ukuran Unduhan Mentah |
+|---|---|---:|
+| `client.jar` | 1 berkas | `41,483,720` B (`39.56 MiB`) |
+| `server.jar` | 1 berkas | `62,294,556` B (`59.41 MiB`) |
+| `libraries` | 114 entri manifest | `116,648,633` B (`111.24 MiB`) |
+| `assetIndex` (`id=34`) | 1 berkas JSON | `597,235` B (`0.57 MiB`) |
+| Objek non-audio aset | 188 objek | `110,694,508` B (`105.57 MiB`) |
+| Objek audio `.ogg` | 4,961 objek | `376,664,246` B (`359.22 MiB`) |
+| **Total unduhan bersih vanilla** *(tanpa kontrol sentuh kecil)* | 5,266 berkas | **`708,382,898` B (`~675.6 MiB`)** |
+
+- **Catatan reuse**: jika aset/library/`client.jar` ZL2 versi `26.3` sudah ada di `game_home`, Phase 1 memeriksa SHA-1 lalu memakai ulang berkas yang cocok (sehingga unduhan efektif turun ke ~`60–115 MiB` untuk `server.jar` + objek yang belum tercache, bergantung kondisi penyimpanan lokal — `UNVERIFIED`).
+- **Perkiraan penggunaan disk (`UNVERIFIED`)**:
+  - **Puncak sementara saat persiapan**: sekitar **`~1.4–2.0 GiB`** ruang kosong disarankan (unduhan mentah ~`676 MiB` + ekstraksi JAR/aset + unpack `server.jar` sementara di `.local/prepare-work/26.3/` + `.local/horizon-client/26.3/` + `engine-data.zip`).
+  - **Setelah selesai**: sekitar **`~0.9–1.3 GiB`** untuk data `.local/horizon-client/26.3/` + `engine-data.zip` + cache `.local/prepare-work/26.3/` (`UNVERIFIED`).
+- **Perkiraan durasi di `SM-N975F` (`UNVERIFIED`)**: sekitar **`~2–8 menit` total** pada Wi-Fi stabil (`~1–4 menit` unduhan/verifikasi paralel, `~15–45 detik` ekstrak & zip Rust `libblaze_prepare.so`, plus `~1–3 menit` kompilasi & eksekusi exporter + Mojang datagen di `:jvm` JRE 25 — `UNVERIFIED` pada perangkat nyata).
+
 ---
 
 ## 4. Uji Penolakan Akun Lokal & Peluncuran Normal `Play` (Stage D + Stage A)
@@ -52,7 +72,7 @@
    - **Lulus jika**: tombol **Skip / Lewati** offline pada dialog refresh akun tidak muncul untuk versi `Rust Edition`.
 3. **Uji peluncuran sukses dengan akun Microsoft**:
    - Nyalakan internet, pilih akun **Microsoft** yang valid dan versi **`26.3-Rust`**, lalu tekan **`Luncurkan`**.
-   - **Lulus jika**: `:rust` (`RustActivity`) langsung terbuka, tidak menjalankan JVM Java Minecraft, tidak menampilkan pesan *"This APK is missing its engine data. Install a complete build."*, dan menampilkan nama akun Microsoft dari launcher tanpa menu login/OAuth mandiri yang berfungsi di dalam engine.
+   - **Lulus jika**: `:rust` (`RustActivity`) terbuka dan **langsung** masuk ke loading/game Minecraft `26.3` tanpa berhenti di menu launcher native `Horizon Android` (menu internal `Horizon Android` hanya muncul saat membuka *Developer -> Jalankan Spike Rust Edition*), tidak menjalankan JVM Java Minecraft, tidak menampilkan pesan *"This APK is missing its engine data. Install a complete build."*, dan memakai akun Microsoft yang diserahkan dari Blaze Launcher tanpa OAuth mandiri di dalam engine.
 
 ---
 

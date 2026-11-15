@@ -107,13 +107,28 @@ object RustLaunchDispatcher {
 
         RustDiagnosticsCollector.recordRustEvent(
             context,
-            "stage_d_launch version=${version.getVersionName()} ${staged.summary}"
+            "stage_d_launch version=${version.getVersionName()} direct=true ${staged.summary}"
         )
-        val intent = Intent(context, RustActivity::class.java).apply {
-            if (context !is Activity) {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+        context.startActivity(buildLaunchIntent(context))
+    }
+
+    internal fun buildLaunchIntent(context: Context): Intent =
+        Intent(context, RustActivity::class.java).apply {
+            populateLaunchIntent(
+                isActivityContext = context is Activity,
+                setNewTaskFlag = { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) },
+                putDirectLaunchExtra = { key, value -> putExtra(key, value) }
+            )
         }
-        context.startActivity(intent)
+
+    internal fun populateLaunchIntent(
+        isActivityContext: Boolean,
+        setNewTaskFlag: () -> Unit,
+        putDirectLaunchExtra: (key: String, value: Boolean) -> Unit
+    ) {
+        putDirectLaunchExtra(RustActivity.EXTRA_DIRECT_LAUNCH, true)
+        if (!isActivityContext) {
+            setNewTaskFlag()
+        }
     }
 }

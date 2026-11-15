@@ -169,4 +169,35 @@ class StageDIntegrationTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun rustLaunchDispatcher_populateLaunchIntentMarksDirectLaunchAndNewTaskFlag() {
+        var addedNewTaskFromActivity = false
+        var directExtraKey: String? = null
+        var directExtraVal: Boolean? = null
+        RustLaunchDispatcher.populateLaunchIntent(
+            isActivityContext = true,
+            setNewTaskFlag = { addedNewTaskFromActivity = true },
+            putDirectLaunchExtra = { k, v ->
+                directExtraKey = k
+                directExtraVal = v
+            }
+        )
+        assertFalse(addedNewTaskFromActivity)
+        assertEquals(RustActivity.EXTRA_DIRECT_LAUNCH, directExtraKey)
+        assertEquals(true, directExtraVal)
+
+        var addedNewTaskFromApp = false
+        RustLaunchDispatcher.populateLaunchIntent(
+            isActivityContext = false,
+            setNewTaskFlag = { addedNewTaskFromApp = true },
+            putDirectLaunchExtra = { k, v ->
+                directExtraKey = k
+                directExtraVal = v
+            }
+        )
+        assertTrue(addedNewTaskFromApp)
+        assertEquals(RustActivity.EXTRA_DIRECT_LAUNCH, directExtraKey)
+        assertEquals(true, directExtraVal)
+    }
 }

@@ -117,8 +117,160 @@ jobs:
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
           cp "$REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
 
-          echo "=== Testing blaze-prepare (Stage B pure-Rust engine-data preparer) ==="
-          cargo test --locked --manifest-path blaze-prepare/Cargo.toml -- --nocapture
+          echo "=== Testing blaze-prepare (unit + synthetic oracle dump) ==="
+          ORACLE_DUMP=$(mktemp -d "${RUNNER_TEMP:-/tmp}/blaze-oracle-XXXXXX")
+          trap 'rm -rf "$ORACLE_DUMP"' EXIT
+          BLAZE_ORACLE_DUMP_DIR="$ORACLE_DUMP" \
+            cargo test --locked --manifest-path blaze-prepare/Cargo.toml -- --skip synthetic_4000_file_benchmark --nocapture
+
+          echo "=== Verifying blaze-prepare output parity with CI Python Oracle (synthetic input) ==="
+          python3 - "$ORACLE_DUMP" "$PWD/engine/starling" <<'PY'
+          import ast, hashlib, importlib.util, json, os, shutil, sys, tempfile, types, zipfile
+          from pathlib import Path
+
+          dump = Path(sys.argv[1])
+          starling = Path(sys.argv[2])
+          tools = starling / "tools"
+          sys.path.insert(0, str(tools))
+
+          import lab
+          import android_prepare
+          import android_build
+
+          def sha256_bytes(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          def sha256_file(path: Path) -> str:
+              return sha256_bytes(path.read_bytes())
+
+          # 1. Verify marker files and horizon-resources.json / horizon-prepare.json schema fields
+          res_dir = dump / "outputs" / "resources"
+          hr_raw = (res_dir / "horizon-resources.json").read_bytes()
+          hr = json.loads(hr_raw)
+          assert hr["schema"] == 7, f"Expected schema=7, got {hr.get('schema')}"
+          assert "output_version" not in hr, "output_version belongs only in horizon-prepare.json"
+          assert hr["minecraft"] == "26.3", hr.get("minecraft")
+          assert isinstance(hr["data_version"], int), hr.get("data_version")
+          for map_key, expected_names in [
+              ("health_files_sha256", ["damage-types.json", "damage-tags.json", "damage-catalog.json", "player-float-ids.json"]),
+              ("motion_files_sha256", ["movement-properties.nbt", "attributes.json", "landing-definitions.json"]),
+              ("render_files_sha256", ["render-definitions.json", "occlusion.nbt"]),
+          ]:
+              actual_map = hr.get(map_key)
+              assert isinstance(actual_map, dict) and set(actual_map.keys()) == set(expected_names), f"{map_key}: {actual_map}"
+              for fname, recorded_hash in actual_map.items():
+                  disk_hash = sha256_file(res_dir / fname)
+                  assert recorded_hash == disk_hash, f"{map_key}[{fname}] mismatch"
+          for key, fname in [
+              ("collision_sha256", "cached-collision.nbt"),
+              ("model_states_sha256", "model-states.json"),
+              ("facts_sha256", "facts.json"),
+              ("block_tags_sha256", "block-tags.json"),
+          ]:
+              assert hr[key] == sha256_file(res_dir / fname), f"{key} mismatch"
+          assert isinstance(hr.get("client_sha256"), str) and len(hr["client_sha256"]) == 64
+          assert isinstance(hr.get("server_sha256"), str) and len(hr["server_sha256"]) == 64
+          assert isinstance(hr.get("resource_files"), dict)
+
+          hp = json.loads((res_dir / "horizon-prepare.json").read_text())
+          assert hp == {"output_version": 3}, f"Unexpected horizon-prepare.json: {hp}"
+          ad = json.loads((res_dir / "android-downloads-v2.json").read_text())
+          assert ad == {"schema": 2}, f"Unexpected android-downloads-v2.json: {ad}"
+          ac = json.loads((res_dir / "audio-complete.json").read_text())
+          assert ac == {}, f"Unexpected audio-complete.json: {ac}"
+          print("ORACLE_MARKERS_OK schema=7 output_version=3")
+
+          # 2. Verify survival-rules.json byte/semantic parity against Starling bind_definitions()
+          surv_path = tools / "test_block_survival_parity.py"
+          tree = ast.parse(surv_path.read_text(encoding="utf-8"))
+          keep = []
+          for node in tree.body:
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(t, ast.Name) and t.id in {"CLASS_RULES", "VEGETATION_RULES"}
+                  for t in node.targets
+              ):
+                  keep.append(node)
+              elif isinstance(node, ast.FunctionDef) and node.name == "bind_definitions":
+                  keep.append(node)
+          ns = {}
+          exec(compile(ast.Module(body=keep, type_ignores=[]), str(surv_path), "exec"), ns)
+          cls_in = json.loads((dump / "inputs" / "survival-classes.json").read_text())
+          plc_in = json.loads((dump / "inputs" / "survival-placement-classes.json").read_text())
+          sup_in = json.loads((dump / "inputs" / "survival-support-tags.json").read_text())
+          py_rules = ns["bind_definitions"](cls_in, plc_in, sup_in)
+          rs_rules = json.loads((res_dir / "worldgen/blocks/survival-rules.json").read_text())
+          assert list(py_rules.keys()) == list(rs_rules.keys()), "survival-rules key order diverged"
+          assert py_rules == rs_rules, "survival-rules content diverged"
+          py_rules_sha = sha256_bytes(json.dumps(py_rules, separators=(",", ":"), ensure_ascii=False).encode())
+          rs_rules_sha = sha256_file(res_dir / "worldgen/blocks/survival-rules.json")
+          assert py_rules_sha == rs_rules_sha, f"survival-rules sha256 mismatch: {py_rules_sha} vs {rs_rules_sha}"
+          print(f"ORACLE_SURVIVAL_OK rules={len(rs_rules)} sha256={rs_rules_sha}")
+
+          # 3. Verify server bundler extraction parity (versions.list & libraries.list + per-file sha256)
+          unpacked = dump / "outputs" / "unpacked-server"
+          with zipfile.ZipFile(dump / "inputs" / "server.jar") as sjar:
+              for line in sjar.read("META-INF/versions.list").decode().splitlines():
+                  expected_sha, _ver, inner = line.split("\t")
+                  disk = unpacked / "server-game.jar"
+                  assert disk.is_file(), f"Missing extracted server version jar: {inner}"
+                  assert sha256_file(disk) == expected_sha
+                  assert sha256_bytes(sjar.read(f"META-INF/versions/{inner}")) == expected_sha
+              lib_count = 0
+              for line in sjar.read("META-INF/libraries.list").decode().splitlines():
+                  expected_sha, _coord, inner = line.split("\t")
+                  disk = unpacked / "libraries" / inner
+                  assert disk.is_file(), f"Missing extracted server library: {inner}"
+                  assert sha256_file(disk) == expected_sha
+                  assert sha256_bytes(sjar.read(f"META-INF/libraries/{inner}")) == expected_sha
+                  lib_count += 1
+          print(f"ORACLE_BUNDLER_OK libs={lib_count}")
+
+          # 4. Verify package_resources() and engine-data.zip generated_engine_file() parity
+          with tempfile.TemporaryDirectory() as td_root:
+              fake_root = Path(td_root)
+              (fake_root / "research-lock.json").write_text((dump / "inputs" / "research-lock.json").read_text())
+              fake_res = fake_root / ".local" / "horizon-client" / "26.3"
+              shutil.copytree(res_dir, fake_res)
+              private_dir = fake_root / ".local" / "android"
+              old_ap_root, old_lab_root = android_prepare.ROOT, lab.ROOT
+              android_prepare.ROOT = fake_root
+              lab.ROOT = fake_root
+              try:
+                  android_prepare.package_resources("26.3", private_dir)
+              finally:
+                  android_prepare.ROOT = old_ap_root
+                  lab.ROOT = old_lab_root
+
+              upstream_zip = private_dir / "serve" / "26.3.zip"
+              rust_all_zip = dump / "outputs" / "packaged-all.zip"
+              with zipfile.ZipFile(upstream_zip) as uz, zipfile.ZipFile(rust_all_zip) as rz:
+                  u_entries = sorted(n for n in uz.namelist() if not n.endswith("/"))
+                  r_entries = sorted(n for n in rz.namelist() if not n.endswith("/"))
+                  assert u_entries == r_entries, f"Entry mismatch: {set(u_entries) ^ set(r_entries)}"
+                  for name in u_entries:
+                      assert sha256_bytes(uz.read(name)) == sha256_bytes(rz.read(name)), f"SHA mismatch on {name}"
+              with zipfile.ZipFile(dump / "outputs" / "packaged-with-bootstrap.zip") as bz:
+                  b_entries = sorted(n for n in bz.namelist() if not n.endswith("/"))
+                  assert set(b_entries) == set(u_entries) | {"bootstrap.json"}
+                  assert json.loads(bz.read("bootstrap.json"))["version"] == "26.3"
+
+              expected_gen = sorted(
+                  p.relative_to(res_dir).as_posix()
+                  for p in res_dir.rglob("*")
+                  if p.is_file() and android_build.generated_engine_file(p.relative_to(res_dir).as_posix())
+              )
+              with zipfile.ZipFile(dump / "outputs" / "engine-data.zip") as ez:
+                  e_entries = sorted(n for n in ez.namelist() if not n.endswith("/"))
+                  assert e_entries == expected_gen, f"engine-data.zip entries differ: {set(e_entries) ^ set(expected_gen)}"
+                  for name in e_entries:
+                      assert sha256_bytes(ez.read(name)) == sha256_file(res_dir / name), f"engine-data mismatch: {name}"
+          print(f"ORACLE_ZIPS_OK package_resources_entries={len(u_entries)} engine_data_entries={len(e_entries)}")
+          PY
+          rm -rf "$ORACLE_DUMP"
+          trap - EXIT
+
+          echo "=== Running 4,000-file Rust (--release) benchmark on x86_64 runner ==="
+          cargo test --release --locked --manifest-path blaze-prepare/Cargo.toml synthetic_4000_file_benchmark -- --nocapture
 
           echo "=== Running 4,000-file Python baseline benchmark on runner ==="
           python3 - <<'PY'
@@ -194,3 +346,62 @@ jobs:
             ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
             ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
           if-no-files-found: error
+
+  bench-aarch64:
+    name: blaze-prepare --release benchmark (aarch64)
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (no submodules needed)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup Rust Toolchain (aarch64)
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run 4,000-file Rust (--release) and Python benchmarks (aarch64)
+        run: |
+          cargo test --release --locked --manifest-path blaze-prepare/Cargo.toml synthetic_4000_file_benchmark -- --nocapture
+          python3 - <<'PY'
+          import os, resource, tempfile, time, zipfile, zlib
+          with tempfile.TemporaryDirectory() as td:
+              in_zip = os.path.join(td, "in.jar")
+              ext = os.path.join(td, "ext")
+              out_zip = os.path.join(td, "out.zip")
+              t0 = time.perf_counter()
+              crcs = {}
+              with zipfile.ZipFile(in_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                  for i in range(4000):
+                      rel = f"assets/minecraft/models/gen_{i}.json"
+                      data = f'{{"id":{i},"tag":"minecraft:stone_{i}","ok":true}}'.encode()
+                      crcs[rel] = zlib.crc32(data) & 0xFFFFFFFF
+                      zf.writestr(rel, data)
+              t1 = time.perf_counter()
+              with zipfile.ZipFile(in_zip, "r") as zf:
+                  zf.extractall(ext)
+              t2 = time.perf_counter()
+              count = 0
+              for r, _, files in os.walk(ext):
+                  for fn in files:
+                      p = os.path.join(r, fn)
+                      rel = os.path.relpath(p, ext).replace(os.sep, "/")
+                      with open(p, "rb") as fh:
+                          assert (zlib.crc32(fh.read()) & 0xFFFFFFFF) == crcs[rel]
+                      count += 1
+              assert count == 4000
+              t3 = time.perf_counter()
+              with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
+                  for r, _, files in os.walk(ext):
+                      for fn in files:
+                          p = os.path.join(r, fn)
+                          rel = os.path.relpath(p, ext).replace(os.sep, "/")
+                          zf.write(p, rel)
+              t4 = time.perf_counter()
+              rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+              print(
+                  f"BENCH_PYTHON_4000_AARCH64 build_ms={int((t1-t0)*1000)} extract_ms={int((t2-t1)*1000)} "
+                  f"verify_ms={int((t3-t2)*1000)} zip_ms={int((t4-t3)*1000)} peak_rss_kb={rss_kb}"
+              )
+          PY
