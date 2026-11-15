@@ -79,7 +79,11 @@ object RustDiagnosticsCollector {
         filesDir = context.filesDir,
         statusDir = statusDir(context),
         historicalExits = readHistoricalRustExits(context),
-        logcatProvider = logcatProvider
+        logcatProvider = logcatProvider,
+        jvmWorkerLogFile = runCatching {
+            com.movtery.zalithlauncher.game.download.jvm_server.LATEST_PROCESS_LOG_FILE
+        }.getOrNull(),
+        nowMs = System.currentTimeMillis()
     )
 
     internal fun collectEngineDataDiagnosis(filesDir: File): String {
@@ -103,7 +107,9 @@ object RustDiagnosticsCollector {
         filesDir: File,
         statusDir: File,
         historicalExits: String = "",
-        logcatProvider: () -> String = { readSameUidLogcat() }
+        logcatProvider: () -> String = { readSameUidLogcat() },
+        jvmWorkerLogFile: File? = null,
+        nowMs: Long = System.currentTimeMillis()
     ): String = buildString {
         appendLine("=== :rust Process Status Trace ===")
         val statusText = runCatching {
@@ -119,7 +125,25 @@ object RustDiagnosticsCollector {
         appendLine()
         appendLine("=== Engine Data Check ===")
         appendLine(redactDiagnosticText(collectEngineDataDiagnosis(filesDir)))
-        appendLine(redactDiagnosticText(EngineDataPrepareTelemetry.formatForReport(filesDir)))
+        appendLine(redactDiagnosticText(EngineDataPrepareTelemetry.formatForReport(filesDir, nowMs = nowMs)))
+
+        val liveWorkerTail = jvmWorkerLogFile
+            ?.let { file ->
+                EngineDataPrepareSupport.readTailLines(file, EngineDataPrepareSupport.COPY_REPORT_LOG_TAIL_LINES)
+            }
+            .orEmpty()
+        val persistedWorkerTail = EngineDataPrepareTelemetry.load(filesDir)
+            ?.safeWorkerLogTail()
+            ?.takeLast(EngineDataPrepareSupport.COPY_REPORT_LOG_TAIL_LINES)
+            .orEmpty()
+        val workerTail = if (liveWorkerTail.isNotEmpty()) liveWorkerTail else persistedWorkerTail
+        if (workerTail.isNotEmpty()) {
+            appendLine()
+            appendLine("=== :jvm Worker Log Tail (Last ${EngineDataPrepareSupport.COPY_REPORT_LOG_TAIL_LINES} Lines, Redacted) ===")
+            workerTail.forEach { line ->
+                appendLine(redactDiagnosticText(line))
+            }
+        }
 
         val engineDiag = readStarlingDiagnosticTail(filesDir)
         val logcatRaw = logcatProvider().trim()

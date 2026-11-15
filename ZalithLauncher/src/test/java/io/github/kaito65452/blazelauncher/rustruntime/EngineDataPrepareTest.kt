@@ -18,10 +18,13 @@
 
 package io.github.kaito65452.blazelauncher.rustruntime
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -29,6 +32,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.CRC32
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
@@ -307,6 +312,325 @@ class EngineDataPrepareTest {
             assertEquals(768, EngineDataPrepareSupport.recommendJvmHeapMb(6L * 1024 * 1024 * 1024))
             assertEquals(640, EngineDataPrepareSupport.recommendJvmHeapMb(4L * 1024 * 1024 * 1024))
             assertEquals(512, EngineDataPrepareSupport.recommendJvmHeapMb(3L * 1024 * 1024 * 1024))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun javacVerboseGcFlagsConstantsAndClasspathReductionMatchSpec() {
+        assertEquals(15_000L, EngineDataPrepareSupport.DEFAULT_HEARTBEAT_INTERVAL_MS)
+        assertEquals(600_000L, EngineDataPrepareSupport.DEFAULT_JAVAC_STEP_TIMEOUT_MS)
+        assertEquals(40, EngineDataPrepareSupport.STALL_ERROR_TAIL_LINES)
+        assertEquals(60, EngineDataPrepareSupport.COPY_REPORT_LOG_TAIL_LINES)
+
+        val argFile = EngineDataPrepareSupport.formatJavacArgFile(
+            classpath = "/tmp/client.jar",
+            sourcePath = "/tmp/src",
+            outputDir = "/tmp/out",
+            javaSourceFiles = listOf(File("/tmp/src/A.java"))
+        )
+        assertTrue(argFile.contains("-verbose"))
+
+        val javacFlags = EngineDataPrepareSupport.buildJavacJvmFlags(1024)
+        assertTrue(javacFlags.contains("-Xlog:gc"))
+        assertTrue(javacFlags.contains("-Xmx1024M"))
+        assertTrue(javacFlags.contains("-Xms256M"))
+
+        val smallFlags = EngineDataPrepareSupport.buildJavacJvmFlags(192)
+        assertTrue(smallFlags.contains("-Xms192M"))
+        assertTrue(smallFlags.contains("-Xmx192M"))
+        assertEquals(768, EngineDataPrepareSupport.recommendRetryHeapMb(1024))
+        assertEquals(384, EngineDataPrepareSupport.recommendRetryHeapMb(512))
+
+        val fullCp = listOf(
+            "/cache/versions/26.3/client.jar",
+            "/cache/libs/gson-2.11.jar",
+            "/cache/libs/joml-1.10.jar",
+            "/cache/libs/lwjgl-3.3.3.jar",
+            "/cache/libs/lwjgl-opengl-3.3.3.jar",
+            "/cache/libs/netty-transport-4.1.jar",
+            "/cache/libs/icu4j-73.2.jar",
+            "/cache/libs/oshi-core-6.4.jar"
+        ).joinToString(":")
+        val reduced = EngineDataPrepareSupport.reduceClasspathForRetry(fullCp)
+        val reducedList = EngineDataPrepareSupport.splitClasspathEntries(reduced)
+        assertEquals(3, reducedList.size)
+        assertTrue(reducedList.contains("/cache/versions/26.3/client.jar"))
+        assertTrue(reducedList.contains("/cache/libs/gson-2.11.jar"))
+        assertTrue(reducedList.contains("/cache/libs/joml-1.10.jar"))
+        assertFalse(reduced.contains("lwjgl"))
+        assertFalse(reduced.contains("icu4j"))
+    }
+
+    @Test
+    fun jvmHeartbeatCapturesElapsedStepGcFreeHeapAndJavacState() = runBlocking {
+        val clockMs = AtomicLong(1_700_000_000_000L)
+        val capturedHeartbeats = mutableListOf<JvmWorkerHeartbeat>()
+        val gcLogLines = listOf(
+            "[parsing started SimpleFileObject[PrepareWorker.java]]",
+            "[0.410s][info][gc] GC(1) Pause Young (Normal) 320M->140M(512M) 5.2ms",
+            "[checking dev.horizonlab.parity.VanillaEntityModelExporter]"
+        )
+
+        val step = JvmStepSpec(
+            name = "Compiling client parity exporters (javac 25)",
+            jvmArgs = "${EngineDataPrepareSupport.buildJavacJvmFlags(1024)} -m jdk.compiler/com.sun.tools.javac.Main @client.args",
+            isJavac = true,
+            timeoutMs = 2_000L,
+            initialHeapMb = 1024,
+            classpathEntriesCount = 8
+        )
+
+        val result = EngineDataPrepareSupport.runJvmStepWithMonitor(
+            step = step,
+            heartbeatIntervalMs = 20L,
+            nowMs = { clockMs.get() },
+            runWorker = { _, _, _ ->
+                repeat(4) {
+                    delay(25L)
+                    clockMs.addAndGet(15_000L)
+                }
+                0
+            },
+            killWorker = {},
+            isWorkerAlive = { true },
+            readLogLines = { gcLogLines },
+            sampleFallbackFreeHeapMb = { 0L to "fallback" },
+            onHeartbeat = { hb, _, _ -> capturedHeartbeats.add(hb) }
+        )
+
+        assertTrue("Expected >= 3 heartbeats, got ${capturedHeartbeats.size}", capturedHeartbeats.size >= 3)
+        val activeHeartbeats = capturedHeartbeats.dropLast(1)
+        assertTrue(activeHeartbeats.all { it.javacRunning })
+        assertTrue(activeHeartbeats.all { it.currentStep == "Compiling client parity exporters (javac 25)" })
+        assertTrue(activeHeartbeats.all { it.freeHeapMb == 884L && it.freeHeapSource == "jvm-gc-log" })
+        assertTrue(capturedHeartbeats.any { it.elapsedSeconds >= 15L })
+        assertFalse(capturedHeartbeats.last().javacRunning)
+        assertEquals(1, result.attempts.size)
+        assertEquals("success", result.attempts.first().outcome)
+    }
+
+    @Test
+    fun copyReportShowsPhaseStartTimeHeartbeatAgeAndOnlyLast60WorkerLogLines() {
+        val root = Files.createTempDirectory("blaze-prepare-copy-report-60").toFile()
+        try {
+            val filesDir = File(root, "files").apply { mkdirs() }
+            val statusDir = File(root, "status").apply { mkdirs() }
+            val logFile = File(root, "latest_process.log")
+            val allLines = (1..150).map { i ->
+                when (i) {
+                    120 -> "worker_log_line_${"%03d".format(i)} [gc] Pause Young 200M->80M(512M) access_token=topSecretWorker1"
+                    135 -> "worker_log_line_${"%03d".format(i)} player 12345678-90ab-cdef-1234-567890abcdef"
+                    else -> "worker_log_line_${"%03d".format(i)} [loading java/lang/Object.class]"
+                }
+            }
+            logFile.writeText(allLines.joinToString("\n") + "\n")
+
+            val phaseStart = 1_700_000_000_000L
+            val hbTime = 1_700_000_045_000L
+            val reportTime = 1_700_000_057_000L
+            EngineDataPrepareTelemetry.save(
+                filesDir,
+                EngineDataPrepareMetrics(
+                    status = "running",
+                    minecraftVersion = "26.3",
+                    currentPhase = "jvm_exporters: Compiling client parity exporters (javac 25)",
+                    phaseStartMs = phaseStart,
+                    lastHeartbeatAtMs = hbTime,
+                    heartbeat = JvmWorkerHeartbeat(
+                        elapsedSeconds = 45L,
+                        currentStep = "Compiling client parity exporters (javac 25)",
+                        freeHeapMb = 432L,
+                        freeHeapSource = "jvm-gc-log",
+                        javacRunning = true,
+                        attempt = 1,
+                        recordedAtMs = hbTime
+                    ),
+                    updatedAtMs = hbTime
+                )
+            )
+
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                logcatProvider = { "" },
+                jvmWorkerLogFile = logFile,
+                nowMs = reportTime
+            )
+
+            assertTrue(report.contains("current_phase: jvm_exporters: Compiling client parity exporters (javac 25)"))
+            assertTrue(report.contains("phase_start_time:") && !report.contains("phase_start_time: unavailable"))
+            assertTrue(report.contains("last_heartbeat_age: 12s ago"))
+            assertTrue(report.contains("free_heap=432MB[jvm-gc-log]"))
+            assertTrue(report.contains("javac_running=true"))
+
+            assertFalse("Older line 001 must stay out of Copy report", report.contains("worker_log_line_001"))
+            assertFalse("Older line 090 must stay out of Copy report", report.contains("worker_log_line_090"))
+            assertTrue("Line 091 (60th from end) must appear in Copy report", report.contains("worker_log_line_091"))
+            assertTrue("Line 150 must appear in Copy report", report.contains("worker_log_line_150"))
+            assertFalse(report.contains("topSecretWorker1"))
+            assertFalse(report.contains("12345678-90ab-cdef-1234-567890abcdef"))
+            assertTrue(report.contains("12345678..."))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun javacTimeoutKillsBothAttemptsReportsLast40RedactedLinesAndAttemptHistory() = runBlocking {
+        val kills = AtomicInteger(0)
+        val launchedArgs = mutableListOf<String>()
+        val clockMs = AtomicLong(1_700_000_000_000L)
+        val logLines = (1..90).map { i ->
+            if (i == 85) "javac_line_${"%03d".format(i)} token=secretStall42"
+            else "javac_line_${"%03d".format(i)} [parsing VanillaMobDataExporter.java]"
+        }
+        val fullCp = "/mc/client.jar:/libs/gson.jar:/libs/lwjgl.jar:/libs/netty-transport.jar:/libs/icu4j.jar"
+        val step = JvmStepSpec(
+            name = "Compiling client parity exporters (javac 25)",
+            jvmArgs = "${EngineDataPrepareSupport.buildJavacJvmFlags(1024)} -m jdk.compiler/com.sun.tools.javac.Main @client.args",
+            isJavac = true,
+            timeoutMs = 80L,
+            initialHeapMb = 1024,
+            classpathEntriesCount = 5,
+            retryOnTimeout = JvmStepRetryConfig(
+                originalClasspath = fullCp,
+                initialHeapMb = 1024,
+                buildRetryJvmArgs = { reducedCp, loweredHeap ->
+                    "${EngineDataPrepareSupport.buildJavacJvmFlags(loweredHeap)} cp_count=${EngineDataPrepareSupport.countClasspathEntries(reducedCp)} cp=$reducedCp"
+                }
+            )
+        )
+
+        try {
+            EngineDataPrepareSupport.runJvmStepWithMonitor(
+                step = step,
+                heartbeatIntervalMs = 20L,
+                nowMs = { clockMs.addAndGet(20_000L) },
+                runWorker = { _, args, _ ->
+                    launchedArgs.add(args)
+                    delay(5_000L)
+                    0
+                },
+                killWorker = { kills.incrementAndGet() },
+                isWorkerAlive = { true },
+                readLogLines = { logLines },
+                sampleFallbackFreeHeapMb = { 200L to "proc-status" }
+            )
+            fail("Expected EngineDataPrepareException after 2 timed-out attempts")
+        } catch (e: EngineDataPrepareException) {
+            assertEquals(2, kills.get())
+            assertEquals(2, launchedArgs.size)
+            assertTrue(launchedArgs[0].contains("-Xmx1024M"))
+            assertTrue(launchedArgs[1].contains("-Xmx768M"))
+            assertTrue(launchedArgs[1].contains("cp_count=2"))
+            assertFalse(launchedArgs[1].contains("lwjgl"))
+
+            assertTrue(e.redactedMessage.contains("javac stalled after "))
+            assertTrue(e.redactedMessage.contains(" s"))
+            assertTrue(e.redactedMessage.contains("2 attempts"))
+            assertTrue(e.redactedDetails.contains("Attempt #1: outcome=timeout"))
+            assertTrue(e.redactedDetails.contains("Attempt #2: outcome=timeout"))
+            assertFalse("Line 050 must be excluded from 40-line stall tail", e.redactedDetails.contains("javac_line_050"))
+            assertTrue("Line 051 (40th from end) must be included", e.redactedDetails.contains("javac_line_051"))
+            assertTrue("Line 090 must be included", e.redactedDetails.contains("javac_line_090"))
+            assertFalse(e.redactedDetails.contains("secretStall42"))
+        }
+    }
+
+    @Test
+    fun javacTimeoutRetriesOnceWithSmallerClasspathAndLoweredXmxAndReportsBothAttempts() = runBlocking {
+        val root = Files.createTempDirectory("blaze-prepare-retry-success").toFile()
+        try {
+            val filesDir = File(root, "files").apply { mkdirs() }
+            val statusDir = File(root, "status").apply { mkdirs() }
+            val kills = AtomicInteger(0)
+            val attemptArgs = mutableListOf<String>()
+            val clockMs = AtomicLong(1_700_000_000_000L)
+
+            val fullCp = listOf(
+                "/mc/client.jar",
+                "/libs/gson.jar",
+                "/libs/joml.jar",
+                "/libs/lwjgl.jar",
+                "/libs/netty-transport.jar",
+                "/libs/icu4j.jar",
+                "/libs/oshi-core.jar"
+            ).joinToString(":")
+
+            val step = JvmStepSpec(
+                name = "Compiling client parity exporters (javac 25)",
+                jvmArgs = "${EngineDataPrepareSupport.buildJavacJvmFlags(1024)} cp=$fullCp",
+                isJavac = true,
+                timeoutMs = 80L,
+                initialHeapMb = 1024,
+                classpathEntriesCount = 7,
+                retryOnTimeout = JvmStepRetryConfig(
+                    originalClasspath = fullCp,
+                    initialHeapMb = 1024,
+                    buildRetryJvmArgs = { reducedCp, loweredHeap ->
+                        "${EngineDataPrepareSupport.buildJavacJvmFlags(loweredHeap)} cp=$reducedCp"
+                    }
+                )
+            )
+
+            val result = EngineDataPrepareSupport.runJvmStepWithMonitor(
+                step = step,
+                heartbeatIntervalMs = 20L,
+                nowMs = { clockMs.addAndGet(5_000L) },
+                runWorker = { attempt, args, _ ->
+                    attemptArgs.add(args)
+                    if (attempt == 1) {
+                        delay(5_000L)
+                        1
+                    } else {
+                        delay(25L)
+                        0
+                    }
+                },
+                killWorker = { kills.incrementAndGet() },
+                isWorkerAlive = { true },
+                readLogLines = { listOf("[0.200s][info][gc] GC(0) Pause Young 180M->90M(256M) 2ms") },
+                sampleFallbackFreeHeapMb = { 500L to "proc-status" }
+            )
+
+            assertEquals(1, kills.get())
+            assertEquals(2, result.attempts.size)
+            assertEquals("timeout", result.attempts[0].outcome)
+            assertEquals(1024, result.attempts[0].heapMb)
+            assertEquals(7, result.attempts[0].classpathEntries)
+            assertEquals("success", result.attempts[1].outcome)
+            assertEquals(768, result.attempts[1].heapMb)
+            assertEquals(3, result.attempts[1].classpathEntries)
+            assertTrue(attemptArgs[1].contains("-Xmx768M"))
+            assertFalse(attemptArgs[1].contains("lwjgl"))
+            assertEquals(1, result.warnings.size)
+            assertTrue(result.warnings.first().contains("attempt 1 timed out"))
+            assertTrue(result.warnings.first().contains("-Xmx768M"))
+
+            EngineDataPrepareTelemetry.save(
+                filesDir,
+                EngineDataPrepareMetrics(
+                    status = "ready",
+                    minecraftVersion = "26.3",
+                    currentPhase = "ready",
+                    phaseStartMs = 1_700_000_000_000L,
+                    lastHeartbeatAtMs = result.lastHeartbeat?.recordedAtMs ?: 0L,
+                    heartbeat = result.lastHeartbeat,
+                    stepAttempts = result.attempts,
+                    warnings = result.warnings,
+                    workerLogTail = result.logTail60
+                )
+            )
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                logcatProvider = { "" },
+                nowMs = (result.lastHeartbeat?.recordedAtMs ?: 0L) + 5_000L
+            )
+            assertTrue(report.contains("attempt #1 [Compiling client parity exporters (javac 25)]: outcome=timeout"))
+            assertTrue(report.contains("attempt #2 [Compiling client parity exporters (javac 25)]: outcome=success"))
         } finally {
             root.deleteRecursively()
         }
