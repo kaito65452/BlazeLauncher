@@ -10,11 +10,11 @@
 | Item | Status | Summary |
 |---|---|---|
 | **Y1** Upstream lock check (`android` & `starling`) | **GO** (verified via `gh api`) | Neither `android` (`fc5a3c5e`) nor `starling` (`09fa16c1`) includes `9f67e10ed013deeaad20ac3c800652765d493408` or `e99f9973047785b5a9d52eaf72020b97545053c9`; submodule pin left at `fa548eb7ab`. |
-| **Y2** Local patch `0007-pin-refresh-26.3.patch` & APK packaging | **PENDING CI RUN** | Patch adds `9f67e10e...` to `accepted_manifest_sha1` and `e99f9973...` to `accepted_asset_index_sha1`; `client_sha1`/`server_sha1` unchanged; `ci.yml`/`nightly.yml`/`release.yml` apply patch cleanly at build time. |
-| **Y3** `blaze-prepare` pin rules + task menu warning + Copy report | **PENDING CI RUN** | Enforces manifest list + asset-index list + strict `client_sha1`/`server_sha1`; flags local-refresh pins as `"local pin refresh, not verified by upstream"` in UI and `=== Engine Data Check ===`. |
-| **Y4** Guard Check 12 (`scripts/guard.sh` + `scripts/test_guards.sh`) | **PENDING GUARD RUN** | Rejects `0007` touching anything outside `accepted_manifest_sha1` / `accepted_asset_index_sha1` in `research-lock.json`; self-tested against `client_sha1`, unrelated-field, and wrong-file patches. |
-| **Y5** Descriptive error messages & redaction | **PENDING CI RUN** | Reports file hashed (`reuse from <gameHome>` vs `work cache` vs `direct download`), computed hash, expected/accepted list, and plain-language next step; preserves 40-hex SHA-1 while scrubbing tokens & full UUIDs. |
-| **Y6** Synthetic Rust & Kotlin verification tests | **PENDING CI RUN** | Tests `(i)` accepted drift + warning, `(ii)` unlisted manifest, `(iii)` unlisted asset index, `(iv)` client/server mismatch, `(v)` warning reaching Copy report builder. |
+| **Y2** Local patch `0007-pin-refresh-26.3.patch` & APK packaging | **GO** (verified in CI `43704222119`) | Patch adds `9f67e10e...` to `accepted_manifest_sha1` and `e99f9973...` to `accepted_asset_index_sha1`; `client_sha1`/`server_sha1` unchanged; `ci.yml`/`nightly.yml`/`release.yml` apply patch cleanly at build time and CI verified both hashes inside built APK `assets/research-lock.json`. |
+| **Y3** `blaze-prepare` pin rules + task menu warning + Copy report | **GO** (verified in CI `43704222119` & `43704222099`) | Enforces manifest list + asset-index list + strict `client_sha1`/`server_sha1`; flags local-refresh pins as `"local pin refresh, not verified by upstream"` in UI and `=== Engine Data Check ===`. |
+| **Y4** Guard Check 12 (`scripts/guard.sh` + `scripts/test_guards.sh`) | **GO** (verified in `43704222099`) | Rejects `0007` touching anything outside `accepted_manifest_sha1` / `accepted_asset_index_sha1` in `research-lock.json`; self-tested (`PASS=43 FAIL=0`) against `client_sha1`, unrelated-field, and wrong-file patches. |
+| **Y5** Descriptive error messages & redaction | **GO** (verified in CI `43704222119`) | Reports file hashed (`reuse from <gameHome>` vs `work cache` vs `direct download`), computed hash, expected/accepted list, and plain-language next step; preserves 40-hex SHA-1 while scrubbing tokens & full UUIDs. |
+| **Y6** Synthetic Rust & Kotlin verification tests | **GO** (verified in CI `43704222119` & `43704222099`) | Tests `(i)` accepted drift + warning, `(ii)` unlisted manifest, `(iii)` unlisted asset index, `(iv)` client/server mismatch, `(v)` warning reaching Copy report builder. |
 | **Y7** Upstream follow-up in `docs/UPSTREAM_QUESTION.md` | **GO** | Appended question `(e)` on `research-lock.json` refresh workflow and `starling` branch coverage (`DRAFT ONLY`). |
 | Device end-to-end 26.3 preparation (`SM-N975F`) | **UNVERIFIED** | Requires physical device run with newly signed CI APK. |
 
@@ -51,4 +51,41 @@
 
 ## CI & Verification Evidence
 
-*(Populated after CI completes on `feat/overnight-stages`.)*
+Verified on commit `c4d6a7b5f6111c3485faf3967c648b6670c5a048` (`feat/overnight-stages`):
+
+- **CI Run URL**: `https://github.com/kaito65452/BlazeLauncher/actions/runs/43704222119` (`success`)
+- **Parallel Fast Checks URL**: `https://github.com/kaito65452/BlazeLauncher/actions/runs/43704222099` (`success`)
+- **Artifacts (`43704222119`)**:
+  - `signed-apks` — ID `14158956631` (`378295180` bytes)
+  - `horizon-engine-arm64` — ID `14158213826` (`28109055` bytes)
+- **Signing & Version Check (`ci` job `132787052656`)**:
+```text
+Building with versionCode=27514348 versionName=2.6_hotfix-***.c4d6a7b5
+✓ Release APK manifest verified non-debuggable (android:debuggable=false).
+apkanalyzer manifest debuggable (ZalithLauncher/build/outputs/apk/release/BlazeLauncher-2.6_hotfix-***.c4d6a7b5.apk): false
+APK size report for ZalithLauncher/build/outputs/apk/release/BlazeLauncher-2.6_hotfix-***.c4d6a7b5.apk: total=381897008 bytes (364.21 MiB)
+  verified bundled assets/research-lock.json includes 26.3 local pin refresh hashes
+V2 Signer: certificate SHA-256 digest: 5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc
+✓ Signing certificate SHA-256 matched 5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc.
+```
+- **Rust Tests & Python Oracle (`engine` job `132781729508`) & `aarch64` benchmark (`132781729265`)**:
+```text
+test pin_mismatch_and_cancellation_clean_partials ... ok
+test task_y6_manifest_and_asset_index_drift_policy_synthetic ... ok
+test zl2_game_home_reuse_avoids_redundant_downloads ... ok
+test full_phase1_and_phase2_with_mock_http_and_engine_data_zip_parity ... ok
+test synthetic_parity_export_for_ci_oracle ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.11s
+ORACLE_MARKERS_OK schema=7 output_version=3
+ORACLE_SURVIVAL_OK rules=76 sha256=0093bcac1434e0da19b3f789903173d36ba3be5ae3b36a6d05e816449c8045bd
+ORACLE_BUNDLER_OK libs=1
+ORACLE_ZIPS_OK package_resources_entries=87 engine_data_entries=33
+test synthetic_4000_file_benchmark ... ok
+```
+- **Guards & Self-Tests (`132781729412`) & JVM Unit Tests (`132781729210`)**:
+```text
+=== Summary: PASS=43 FAIL=0 ===
+=== Scope Guard Checks Passed ===
+./gradlew testDebugUnitTest --no-daemon --stacktrace -> BUILD SUCCESSFUL in 5m 8s
+```
+- **UNVERIFIED (Device-only)**: End-to-end 26.3 preparation on physical device (`SM-N975F`) using the new CI-signed APK (`versionCode=27514348 > 27502022`).
