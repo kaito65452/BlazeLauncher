@@ -7,8 +7,7 @@
 //! (`VmHWM`), and deterministic SHA-256 inventory metadata without embedding or leaking Mojang data.
 
 use blaze_prepare::bundler::JavaPlan;
-use blaze_prepare::files::{peak_rss_kb, sha256_file, CancelFlag};
-use blaze_prepare::lock::redact_sensitive;
+use blaze_prepare::files::{peak_rss_kb, redact_sensitive, sha256_file, CancelFlag};
 use blaze_prepare::resources::{is_prepared, run_phase1, run_phase2_finalize, PrepareConfig};
 use serde::Serialize;
 use std::collections::BTreeMap;
