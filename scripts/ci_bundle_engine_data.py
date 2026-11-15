@@ -111,10 +111,14 @@ def download_to_file(opener, url: str, dest: Path, expected_sha1: str, allowed_h
     tmp.replace(dest)
 
 
-def accepted_hashes(pins: dict, primary_key: str, list_key: str) -> set[str]:
-    vals = {pins[primary_key].lower()}
+def accepted_hashes(pins: dict, primary_key: str | None, list_key: str) -> set[str]:
+    vals: set[str] = set()
+    if primary_key and pins.get(primary_key):
+        vals.add(str(pins[primary_key]).lower())
     for extra in pins.get(list_key, []):
-        vals.add(extra.lower())
+        vals.add(str(extra).lower())
+    if not vals:
+        raise RuntimeError(f"No pinned hashes found for {primary_key or list_key} in research-lock.json")
     return vals
 
 
