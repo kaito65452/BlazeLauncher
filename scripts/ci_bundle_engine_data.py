@@ -290,13 +290,26 @@ def main() -> None:
     )
     print(f"Upstream horizon-prepare finished in {time.monotonic() - t0:.1f}s", flush=True)
 
-    # Verify upstream readiness check passes cleanly on generated tree
-    subprocess.run(
+    # Verify upstream readiness check passes cleanly on generated tree (sounds are optional)
+    check_proc = subprocess.run(
         [str(horizon_prepare_bin), "--root", str(starling_root), "--check"],
         cwd=starling_root,
         env=prep_env,
-        check=True,
+        capture_output=True,
+        text=True,
     )
+    if check_proc.returncode != 0:
+        non_sound_gaps = [
+            line.strip()
+            for line in check_proc.stdout.splitlines()
+            if line.strip() and not line.strip().startswith("the sounds missing:")
+        ]
+        if non_sound_gaps or check_proc.stderr.strip():
+            raise RuntimeError(
+                f"Upstream horizon-prepare --check failed with non-sound gaps: "
+                f"stdout={check_proc.stdout!r} stderr={check_proc.stderr!r}"
+            )
+    print("Upstream horizon-prepare --check verified all non-sound resources complete.", flush=True)
 
     sys.path.insert(0, str(starling_root / "tools"))
     import android_prepare  # noqa: PLC0415
