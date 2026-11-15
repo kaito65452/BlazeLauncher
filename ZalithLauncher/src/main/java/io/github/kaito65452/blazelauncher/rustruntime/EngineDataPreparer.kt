@@ -210,51 +210,95 @@ object EngineDataPreparer {
             try {
                 runPreparation(appContext)
             } catch (_: CancellationException) {
-                val cancelledMetrics = EngineDataPrepareMetrics(
-                    status = "cancelled",
-                    minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
-                    updatedAtMs = System.currentTimeMillis()
-                )
-                EngineDataPrepareTelemetry.save(appContext.filesDir, cancelledMetrics)
-                _uiState.value = PrepareUiState(
-                    running = false,
-                    phase = appContext.getString(R.string.developer_prepare_cancelled),
-                    prepared = isPreparedFallback(appContext.filesDir)
-                )
+                recordCancelled(appContext)
             } catch (e: EngineDataPrepareException) {
-                _uiState.value = PrepareUiState(
-                    running = false,
-                    phase = appContext.getString(R.string.developer_prepare_failed),
-                    detail = e.redactedMessage,
-                    prepared = isPreparedFallback(appContext.filesDir),
-                    redactedError = e.redactedDetails
-                )
+                recordPrepareFailure(appContext, e)
             } catch (t: Throwable) {
-                val errDetails = EngineDataPrepareSupport.buildRedactedErrorDetails(
-                    stepName = _uiState.value.phase.ifBlank { "prepare" },
-                    reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
-                )
-                EngineDataPrepareTelemetry.save(
-                    appContext.filesDir,
-                    EngineDataPrepareMetrics(
-                        status = "failed",
-                        minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
-                        lastError = errDetails,
-                        updatedAtMs = System.currentTimeMillis()
-                    )
-                )
-                _uiState.value = PrepareUiState(
-                    running = false,
-                    phase = appContext.getString(R.string.developer_prepare_failed),
-                    detail = RustDiagnosticsCollector.redactDiagnosticText(t.message ?: t.javaClass.simpleName),
-                    prepared = isPreparedFallback(appContext.filesDir),
-                    redactedError = errDetails
-                )
+                recordUnexpectedFailure(appContext, t)
             } finally {
                 activeFlag.set(false)
                 activeJob = null
             }
         }
+    }
+
+    /**
+     * Runs engine-data preparation sequentially inside a [GameInstaller] or [GameLaunchFlow] task.
+     */
+    suspend fun prepareFromInstaller(
+        context: Context,
+        onStatusUpdate: ((phase: String, fraction: Float?) -> Unit)? = null
+    ): Phase2OutputJson {
+        val appContext = context.applicationContext
+        check(activeFlag.compareAndSet(false, true)) {
+            "Engine data preparation is already in progress."
+        }
+        return try {
+            runPreparation(appContext, onStatusUpdate)
+        } catch (ce: CancellationException) {
+            runCatching {
+                if (BlazePrepareNative.ensureLoaded()) {
+                    BlazePrepareNative.nativeRequestCancel()
+                }
+            }
+            recordCancelled(appContext)
+            throw ce
+        } catch (e: EngineDataPrepareException) {
+            recordPrepareFailure(appContext, e)
+            throw e
+        } catch (t: Throwable) {
+            recordUnexpectedFailure(appContext, t)
+            throw t
+        } finally {
+            activeFlag.set(false)
+        }
+    }
+
+    private fun recordCancelled(appContext: Context) {
+        val cancelledMetrics = EngineDataPrepareMetrics(
+            status = "cancelled",
+            minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
+            updatedAtMs = System.currentTimeMillis()
+        )
+        EngineDataPrepareTelemetry.save(appContext.filesDir, cancelledMetrics)
+        _uiState.value = PrepareUiState(
+            running = false,
+            phase = appContext.getString(R.string.developer_prepare_cancelled),
+            prepared = isPreparedFallback(appContext.filesDir)
+        )
+    }
+
+    private fun recordPrepareFailure(appContext: Context, e: EngineDataPrepareException) {
+        _uiState.value = PrepareUiState(
+            running = false,
+            phase = appContext.getString(R.string.developer_prepare_failed),
+            detail = e.redactedMessage,
+            prepared = isPreparedFallback(appContext.filesDir),
+            redactedError = e.redactedDetails
+        )
+    }
+
+    private fun recordUnexpectedFailure(appContext: Context, t: Throwable) {
+        val errDetails = EngineDataPrepareSupport.buildRedactedErrorDetails(
+            stepName = _uiState.value.phase.ifBlank { "prepare" },
+            reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+        )
+        EngineDataPrepareTelemetry.save(
+            appContext.filesDir,
+            EngineDataPrepareMetrics(
+                status = "failed",
+                minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
+                lastError = errDetails,
+                updatedAtMs = System.currentTimeMillis()
+            )
+        )
+        _uiState.value = PrepareUiState(
+            running = false,
+            phase = appContext.getString(R.string.developer_prepare_failed),
+            detail = RustDiagnosticsCollector.redactDiagnosticText(t.message ?: t.javaClass.simpleName),
+            prepared = isPreparedFallback(appContext.filesDir),
+            redactedError = errDetails
+        )
     }
 
     fun cancel(context: Context) {

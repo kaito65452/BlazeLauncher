@@ -99,6 +99,9 @@ class GameLauncher(
     }
 
     override suspend fun launch(screenSize: IntSize): Int {
+        check(version.getRuntime() != com.movtery.zalithlauncher.game.version.installed.GameRuntime.RUST) {
+            "Rust Edition versions must launch via RustLaunchDispatcher (:rust process)"
+        }
         if (!Renderers.isCurrentRendererValid()) {
             Renderers.setCurrentRenderer(version.getRenderer())
         }

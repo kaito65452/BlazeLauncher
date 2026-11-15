@@ -35,6 +35,7 @@ import com.movtery.zalithlauncher.game.account.microsoft.validateAccessToken
 import com.movtery.zalithlauncher.game.account.refreshMicrosoft
 import com.movtery.zalithlauncher.game.version.download.DownloadMode
 import com.movtery.zalithlauncher.game.version.download.MinecraftDownloader
+import com.movtery.zalithlauncher.game.version.installed.GameRuntime
 import com.movtery.zalithlauncher.game.version.installed.Version
 import com.movtery.zalithlauncher.game.version.installed.VersionFolders
 import com.movtery.zalithlauncher.game.version.mod.AllModReader
@@ -42,6 +43,9 @@ import com.movtery.zalithlauncher.ui.activities.runGame
 import com.movtery.zalithlauncher.ui.androidText
 import com.movtery.zalithlauncher.utils.network.isNetworkAvailable
 import com.movtery.zalithlauncher.viewmodel.ErrorViewModel
+import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPrepareSupport
+import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPreparer
+import io.github.kaito65452.blazelauncher.rustruntime.RustLaunchDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -92,6 +96,15 @@ class GameLaunchFlow(scope: CoroutineScope) {
         }
 
         val account = AccountsManager.currentAccountFlow.value ?: return
+        if (version.getRuntime() == GameRuntime.RUST && !account.isMicrosoftAccount()) {
+            submitError(
+                ErrorViewModel.ThrowableMessage(
+                    title = context.getString(R.string.generic_error),
+                    message = context.getString(R.string.rust_microsoft_account_required)
+                )
+            )
+            return
+        }
 
         taskExecutor.executePhasesAsync(
             onStart = {
@@ -134,15 +147,33 @@ class GameLaunchFlow(scope: CoroutineScope) {
         exitActivity: () -> Unit,
         submitError: (ErrorViewModel.ThrowableMessage) -> Unit
     ): TaskFlowExecutor.TaskPhase {
+        val isRustRuntime = version.getRuntime() == GameRuntime.RUST
         //检查是否联网，根据这个条件决定是否校验账号
-        //以及，没有联网时，让微软账号、外置账号作为离线账号登录
+        //以及，没有联网时，仅 Java 版本允许让微软账号、外置账号作为离线账号登录
         val hasNetwork = isNetworkAvailable(context)
-        if (!hasNetwork && !account.isLocalAccount()) {
+        if (!isRustRuntime && !hasNetwork && !account.isLocalAccount()) {
             version.offlineAccountLogin = true
         }
+        val effectiveSkipRefresh = if (isRustRuntime) false else skipAccountRefresh
+        val checkNeeded = AccountsManager.isLaunchCheckNeeded(account)
 
         return buildPhase {
-            if (hasNetwork && !skipAccountRefresh && AccountsManager.isLaunchCheckNeeded(account)) {
+            if (isRustRuntime && (!hasNetwork && checkNeeded)) {
+                addTask(
+                    icon = R.drawable.ic_login,
+                    title = androidText(R.string.account_logging_in, account.username),
+                    dispatcher = Dispatchers.IO
+                ) {
+                    throw LaunchCheckFailed(
+                        account,
+                        IllegalStateException(
+                            "Internet connection is required to verify your Microsoft account before launching Rust Edition."
+                        )
+                    )
+                }
+            }
+
+            if (hasNetwork && !effectiveSkipRefresh && checkNeeded) {
                 //账号管理页正在刷新该账号时，直接使用现有凭据启动
                 addTask(
                     icon = R.drawable.ic_login,
@@ -166,7 +197,25 @@ class GameLaunchFlow(scope: CoroutineScope) {
                 }
             }
 
-            if (!version.skipGameIntegrityCheck()) {
+            if (isRustRuntime) {
+                if (!EngineDataPrepareSupport.isPreparedFallback(context.filesDir)) {
+                    addTask(
+                        icon = R.drawable.ic_build_outlined,
+                        title = androidText(R.string.rust_engine_data_preparing)
+                    ) { task ->
+                        EngineDataPreparer.prepareFromInstaller(context) { phase, fraction ->
+                            if (fraction != null) {
+                                task.updateProgress(fraction.coerceIn(0f, 1f))
+                            } else {
+                                task.updateProgress(-1f)
+                            }
+                            if (phase.isNotBlank()) {
+                                task.updateMessage(androidText(phase))
+                            }
+                        }
+                    }
+                }
+            } else if (!version.skipGameIntegrityCheck()) {
                 //校验并修复游戏文件
                 addTask(
                     icon = R.drawable.ic_assignment_filled,
@@ -183,10 +232,14 @@ class GameLaunchFlow(scope: CoroutineScope) {
             addTask(
                 icon = R.drawable.ic_rocket_launch_filled,
                 title = androidText(R.string.main_launch_game)
-            ) { task ->
-                checkEnableTouchProxy(version)
+            ) { _ ->
+                if (isRustRuntime) {
+                    RustLaunchDispatcher.launchRustVersion(context, version, account)
+                } else {
+                    checkEnableTouchProxy(version)
 
-                runGame(context, version, account)
+                    runGame(context, version, account)
+                }
                 exitActivity()
             }
         }

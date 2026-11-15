@@ -57,6 +57,9 @@ for file in $CHANGED_FILES; do
         ZalithLauncher/src/main/java/com/movtery/zalithlauncher/setting/AllSettings.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/AboutInfoScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/settings/LauncherSettingsScreen.kt)
             # Developer Mode persistence, 5-tap version unlock, and diagnostics-only Settings section
             ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/version/installed/VersionConfig.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/version/installed/Version.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/download/game/GameDownloadInfo.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/download/game/GameInstaller.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/GameLaunchFlow.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/GameLauncher.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/download/game/DownloadGameWithAddonScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/VersionsManageElements.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/LauncherElements.kt)
+            # Stage D runtime field, installer selector & Stage B task, Rust Edition launch dispatch, and version badge
+            ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores
             ;;

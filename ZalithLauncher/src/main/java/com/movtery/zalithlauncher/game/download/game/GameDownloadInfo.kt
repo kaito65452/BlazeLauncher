@@ -26,6 +26,7 @@ import com.movtery.zalithlauncher.game.addons.modloader.forgelike.forge.ForgeVer
 import com.movtery.zalithlauncher.game.addons.modloader.forgelike.neoforge.NeoForgeVersion
 import com.movtery.zalithlauncher.game.addons.modloader.modlike.ModVersion
 import com.movtery.zalithlauncher.game.addons.modloader.optifine.OptiFineVersion
+import com.movtery.zalithlauncher.game.version.installed.GameRuntime
 
 data class GameDownloadInfo(
     /** Minecraft 版本 */
@@ -44,4 +45,6 @@ data class GameDownloadInfo(
     val quilt: QuiltVersion? = null,
     val quiltAPI: ModVersion? = null,
     val cleanroom: CleanroomVersion? = null,
+    /** Runtime target for this installed version (`java` default or `rust`). */
+    val runtime: GameRuntime = GameRuntime.JAVA,
 )

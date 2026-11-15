@@ -1492,4 +1492,13 @@
     <string name="developer_prepare_failed">Preparation failed</string>
     <string name="developer_prepare_cancel">Cancel</string>
     <string name="developer_prepare_copy_details">Copy details</string>
+    <string name="rust_runtime_selector_title">Runtime</string>
+    <string name="rust_runtime_java">Java Edition</string>
+    <string name="rust_runtime_java_summary">Standard JVM runtime with mod loader support</string>
+    <string name="rust_runtime_rust">Rust Edition (Experimental)</string>
+    <string name="rust_runtime_rust_summary">Native Starling Rust engine (requires Microsoft account, no Java mod loaders)</string>
+    <string name="rust_edition_modloaders_disabled">Java mod loaders are disabled when Rust Edition is selected.</string>
+    <string name="rust_microsoft_account_required">Rust Edition requires a verified Microsoft account.</string>
+    <string name="download_game_install_rust_engine_data">Preparing %s Rust Edition engine data</string>
+    <string name="rust_engine_data_preparing">Preparing Rust Edition engine data</string>
 </resources>

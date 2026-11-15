@@ -55,8 +55,10 @@ import com.movtery.zalithlauncher.game.path.getGameHome
 import com.movtery.zalithlauncher.game.path.getVersionsHome
 import com.movtery.zalithlauncher.game.version.download.BaseMinecraftDownloader
 import com.movtery.zalithlauncher.game.version.download.MinecraftDownloader
+import com.movtery.zalithlauncher.game.version.installed.GameRuntime
 import com.movtery.zalithlauncher.game.version.installed.VersionConfig
 import com.movtery.zalithlauncher.game.version.installed.VersionFolders
+import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPreparer
 import com.movtery.zalithlauncher.path.PathManager
 import com.movtery.zalithlauncher.ui.AndroidStringText
 import com.movtery.zalithlauncher.ui.androidText
@@ -258,14 +260,15 @@ class GameInstaller(
         val tempGameVersionsDir = File(tempMinecraftDir, "versions")
         val tempClientDir = File(tempGameVersionsDir, info.gameVersion)
 
-        //ModLoader临时目录
-        val optifineDir = info.optifine?.let { File(tempGameVersionsDir, it.version) }
-        val forgeDir = info.forge?.let { File(tempGameVersionsDir, "forge-${it.versionName}") }
-        val neoforgeDir = info.neoforge?.let { File(tempGameVersionsDir, "neoforge-${it.versionName}") }
-        val fabricDir = info.fabric?.let { File(tempGameVersionsDir, "fabric-loader-${it.version}-${info.gameVersion}") }
-        val legacyFabricDir = info.legacyFabric?.let { File(tempGameVersionsDir, "legacy-fabric-loader-${it.version}-${info.gameVersion}") }
-        val quiltDir = info.quilt?.let { File(tempGameVersionsDir, "quilt-loader-${it.version}-${info.gameVersion}") }
-        val cleanroomDir = info.cleanroom?.let { File(tempGameVersionsDir, "cleanroom-${it.version}-${info.gameVersion}") }
+        //ModLoader临时目录 (Rust Edition 固定为纯净原版客户端)
+        val isRust = info.runtime == GameRuntime.RUST
+        val optifineDir = if (isRust) null else info.optifine?.let { File(tempGameVersionsDir, it.version) }
+        val forgeDir = if (isRust) null else info.forge?.let { File(tempGameVersionsDir, "forge-${it.versionName}") }
+        val neoforgeDir = if (isRust) null else info.neoforge?.let { File(tempGameVersionsDir, "neoforge-${it.versionName}") }
+        val fabricDir = if (isRust) null else info.fabric?.let { File(tempGameVersionsDir, "fabric-loader-${it.version}-${info.gameVersion}") }
+        val legacyFabricDir = if (isRust) null else info.legacyFabric?.let { File(tempGameVersionsDir, "legacy-fabric-loader-${it.version}-${info.gameVersion}") }
+        val quiltDir = if (isRust) null else info.quilt?.let { File(tempGameVersionsDir, "quilt-loader-${it.version}-${info.gameVersion}") }
+        val cleanroomDir = if (isRust) null else info.cleanroom?.let { File(tempGameVersionsDir, "cleanroom-${it.version}-${info.gameVersion}") }
 
         //Mods临时目录
         val tempModsDir = File(tempGameDir, ".temp_mods")
@@ -376,12 +379,39 @@ class GameInstaller(
                         createVanillaFilesCopyTask(
                             tempMinecraftDir = pathConfig.tempMinecraftDir,
                             onComplete = {
-                                onInstalled(pathConfig.targetClientDir)
-                                targetClientDir = null
+                                if (info.runtime != GameRuntime.RUST) {
+                                    onInstalled(pathConfig.targetClientDir)
+                                    targetClientDir = null
+                                }
                             }
                         )
                     }
                 )
+
+                if (info.runtime == GameRuntime.RUST) {
+                    addTask(
+                        id = "Install.RustEngineData",
+                        title = androidText(R.string.download_game_install_rust_engine_data, info.gameVersion),
+                        icon = R.drawable.ic_build_outlined
+                    ) { task ->
+                        VersionConfig.parseConfig(pathConfig.targetClientDir).apply {
+                            this.runtime = GameRuntime.RUST.wireName
+                            saveWithThrowable()
+                        }
+                        EngineDataPreparer.prepareFromInstaller(context) { phase, fraction ->
+                            if (fraction != null) {
+                                task.updateProgress(fraction.coerceIn(0f, 1f))
+                            } else {
+                                task.updateProgress(-1f)
+                            }
+                            if (phase.isNotBlank()) {
+                                task.updateMessage(androidText(phase))
+                            }
+                        }
+                        onInstalled(pathConfig.targetClientDir)
+                        targetClientDir = null
+                    }
+                }
             }
         )
     }
@@ -524,6 +554,8 @@ class GameInstaller(
         cleanroomDir: File?,
         tempModsDir: File
     ) {
+        if (info.runtime == GameRuntime.RUST) return
+
         // OptiFine 安装
         info.optifine?.let { optifineVersion ->
             if (forgeDir == null && fabricDir == null) {

@@ -103,6 +103,11 @@ class VersionConfig(
     var touchVibrateDuration: Int = 100
     @SerializedName("touchVibrateKind")
     var touchVibrateKind: VibrationHandler.VibrateKind? = null
+    @SerializedName("runtime")
+    var runtime: String = GameRuntime.JAVA.wireName
+        get() = GameRuntime.fromWire(field).wireName
+
+    fun getRuntime(): GameRuntime = GameRuntime.fromWire(runtime)
 
     constructor(
         filePath: File,
@@ -122,6 +127,7 @@ class VersionConfig(
         ramAllocation: Int = -1,
         touchVibrateDuration: Int = 100,
         touchVibrateKind: VibrationHandler.VibrateKind? = null,
+        runtime: String = GameRuntime.JAVA.wireName,
     ) : this(filePath) {
         this.isolationType = isolationType
         this.skipGameIntegrityCheck = skipGameIntegrityCheck
@@ -139,6 +145,7 @@ class VersionConfig(
         this.ramAllocation = ramAllocation
         this.touchVibrateDuration = touchVibrateDuration
         this.touchVibrateKind = touchVibrateKind
+        this.runtime = GameRuntime.fromWire(runtime).wireName
     }
 
     fun copy(): VersionConfig = VersionConfig(
@@ -159,6 +166,7 @@ class VersionConfig(
         ramAllocation,
         touchVibrateDuration,
         touchVibrateKind,
+        GameRuntime.fromWire(runtime).wireName,
     )
 
     fun save() {
@@ -219,6 +227,7 @@ class VersionConfig(
             writeInt(ramAllocation)
             writeInt(touchVibrateDuration)
             writeInt(touchVibrateKind?.ordinal ?: -1)
+            writeString(GameRuntime.fromWire(runtime).wireName)
         }
     }
 
@@ -241,6 +250,7 @@ class VersionConfig(
             val ramAllocation = parcel.readInt()
             val touchVibrateDuration = parcel.readInt()
             val touchVibrateKind = VibrationHandler.VibrateKind.entries.getOrNull(parcel.readInt())
+            val runtime = GameRuntime.fromWire(parcel.readString()).wireName
 
             return VersionConfig(
                 versionPath,
@@ -260,6 +270,7 @@ class VersionConfig(
                 ramAllocation,
                 touchVibrateDuration,
                 touchVibrateKind,
+                runtime,
             )
         }
 
@@ -325,6 +336,18 @@ enum class GraphicsApi(
     /** 强制切换到Vulkan，覆盖游戏原有设定 */
     @SerializedName("VULKAN")
     VULKAN("Vulkan", "\"vulkan\"")
+}
+
+enum class GameRuntime(val wireName: String) {
+    @SerializedName("java")
+    JAVA("java"),
+    @SerializedName("rust")
+    RUST("rust");
+
+    companion object {
+        fun fromWire(value: String?): GameRuntime =
+            entries.firstOrNull { it.wireName.equals(value?.trim(), ignoreCase = true) } ?: JAVA
+    }
 }
 
 private fun getSettingStateNotNull(type: SettingState?) = type ?: SettingState.FOLLOW_GLOBAL

@@ -228,6 +228,8 @@ class Version(
     fun getTouchVibrateDuration(): Int? = versionConfig.touchVibrateDuration.takeIf { it >= 80 }
 
     fun getTouchVibrateKind(): VibrationHandler.VibrateKind = versionConfig.touchVibrateKind ?: VibrationHandler.VibrateKind.default
+
+    fun getRuntime(): GameRuntime = versionConfig.getRuntime()
 }
 
 /** 通过版本文件夹获取启动器版本标识文件夹 */

@@ -101,27 +101,54 @@ object RustSessionHandoff {
         return handoffSession(account.username, account.profileId, account.accessToken, bridge)
     }
 
-    fun prepareSpikeLaunch(context: Context) {
-        val target = pendingSessionFile(context)
-        val account = runCatching { AccountsManager.currentAccountFlow.value }.getOrNull()
-        if (account == null || !account.isMicrosoftAccount() ||
-            account.accessToken.isBlank() || account.accessToken == "0" ||
-            !isValidPlayerName(account.username)
-        ) {
+    fun prepareAccountLaunch(context: Context, account: Account?): SessionHandoffResult {
+        if (account == null) {
             clearPendingSessionFiles(context)
-            return
+            return SessionHandoffResult(false, "Rejected: no active ZL2 account selected")
+        }
+        if (!account.isMicrosoftAccount()) {
+            clearPendingSessionFiles(context)
+            return SessionHandoffResult(false, "Rejected: Rust Edition requires a Microsoft account")
+        }
+        if (account.accessToken.isBlank() || account.accessToken == "0") {
+            clearPendingSessionFiles(context)
+            return SessionHandoffResult(false, "Rejected: Microsoft session has no live token")
+        }
+        if (!isValidPlayerName(account.username)) {
+            clearPendingSessionFiles(context)
+            return SessionHandoffResult(false, "Rejected: invalid Microsoft profile name")
         }
         val normalizedUuid = normalizeUuidOrNull(account.profileId) ?: run {
             clearPendingSessionFiles(context)
-            return
+            return SessionHandoffResult(false, "Rejected: invalid Microsoft profile UUID")
         }
+        return stageSessionPayload(
+            context = context,
+            user = account.username.trim(),
+            normalizedUuid = normalizedUuid,
+            accessToken = account.accessToken
+        )
+    }
+
+    fun prepareSpikeLaunch(context: Context) {
+        val account = runCatching { AccountsManager.currentAccountFlow.value }.getOrNull()
+        prepareAccountLaunch(context, account)
+    }
+
+    private fun stageSessionPayload(
+        context: Context,
+        user: String,
+        normalizedUuid: String,
+        accessToken: String
+    ): SessionHandoffResult {
+        val target = pendingSessionFile(context)
         val payload = JSONObject().apply {
-            put("name", account.username.trim())
+            put("name", user)
             put("uuid", normalizedUuid)
-            put("access_token", account.accessToken)
+            put("access_token", accessToken)
         }.toString()
 
-        runCatching {
+        return runCatching {
             val partial = File(target.parentFile, "$PENDING_SESSION_FILE.tmp")
             partial.writeText(payload)
             partial.setReadable(false, false)
@@ -134,14 +161,15 @@ object RustSessionHandoff {
                 target.setReadable(true, true)
                 partial.delete()
             }
-        }.onFailure { err ->
-            clearPendingSessionFiles(context)
-            Log.w(
-                TAG,
-                redactSensitiveData(
-                    "Could not stage Microsoft session for :rust: ${err.message}"
-                )
+            SessionHandoffResult(
+                true,
+                "Staged MS session for :rust (uuidPrefix=${normalizedUuid.take(8)}..., tokenLen=${accessToken.length})"
             )
+        }.getOrElse { err ->
+            clearPendingSessionFiles(context)
+            val redacted = redactSensitiveData("Could not stage Microsoft session for :rust: ${err.message}")
+            Log.w(TAG, redacted)
+            SessionHandoffResult(false, redacted)
         }
     }
 

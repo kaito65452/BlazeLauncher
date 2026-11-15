@@ -945,6 +945,14 @@ fun CommonVersionInfoLayout(
                             text = versionInfo.minecraftVersion,
                             style = MaterialTheme.typography.labelSmall,
                         )
+                        if (version.getRuntime() == com.movtery.zalithlauncher.game.version.installed.GameRuntime.RUST) {
+                            LittleTextLabel(
+                                text = stringResource(R.string.rust_edition),
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                textStyle = MaterialTheme.typography.labelSmall
+                            )
+                        }
                         versionInfo.loaderInfo?.let { loaderInfo ->
                             Text(
                                 text = loaderInfo.loader.displayName,

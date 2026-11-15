@@ -21,6 +21,8 @@ package com.movtery.zalithlauncher.ui.screens.content.download.game
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,6 +39,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +52,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
@@ -73,8 +78,10 @@ import com.movtery.zalithlauncher.game.addons.modloader.forgelike.neoforge.NeoFo
 import com.movtery.zalithlauncher.game.addons.modloader.optifine.OptiFineVersion
 import com.movtery.zalithlauncher.game.addons.modloader.optifine.OptiFineVersions
 import com.movtery.zalithlauncher.game.download.game.GameDownloadInfo
+import com.movtery.zalithlauncher.game.version.installed.GameRuntime
 import com.movtery.zalithlauncher.game.version.installed.VersionsManager
 import com.movtery.zalithlauncher.game.version.installed.VersionsManager.isVersionExists
+import io.github.kaito65452.blazelauncher.rustruntime.RustEditionCatalog
 import com.movtery.zalithlauncher.ui.base.BaseScreen
 import com.movtery.zalithlauncher.ui.components.AnimatedColumn
 import com.movtery.zalithlauncher.ui.components.SimpleTextInputField
@@ -256,6 +263,33 @@ fun DownloadGameWithAddonScreen(
             swapIn = isVisible
         )
 
+        val context = LocalContext.current
+        val supportsRustEdition = remember(key.gameVersion) {
+            RustEditionCatalog.isSupportedGameVersion(context, key.gameVersion)
+        }
+        var selectedRuntime by remember(key.gameVersion) { mutableStateOf(GameRuntime.JAVA) }
+        val effectiveRuntime = if (supportsRustEdition) selectedRuntime else GameRuntime.JAVA
+
+        fun selectRuntime(next: GameRuntime) {
+            val resolved = if (supportsRustEdition) next else GameRuntime.JAVA
+            selectedRuntime = resolved
+            if (resolved == GameRuntime.RUST) {
+                viewModel.currentAddon.run {
+                    optifineVersion.value = null
+                    forgeVersion.value = null
+                    neoforgeVersion.value = null
+                    fabricVersion.value = null
+                    fabricAPIVersion.value = null
+                    legacyFabricVersion.value = null
+                    legacyFabricAPIVersion.value = null
+                    quiltVersion.value = null
+                    quiltAPIVersion.value = null
+                    cleanroomVersion.value = null
+                }
+                viewModel.refreshIcon()
+            }
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -268,33 +302,36 @@ fun DownloadGameWithAddonScreen(
                 itemContainerColor = cardColor(),
                 itemContentColor = onCardColor(),
                 gameVersion = key.gameVersion,
+                selectedRuntime = effectiveRuntime,
                 currentAddon = viewModel.currentAddon,
                 refreshIcon = viewModel.refreshIcon,
                 refreshErrorCheck = refreshErrorCheck,
                 onInstall = { customVersionName ->
+                    val isRust = effectiveRuntime == GameRuntime.RUST
                     onInstall(
                         GameDownloadInfo(
                             gameVersion = key.gameVersion,
                             customVersionName = customVersionName,
                             overwrite = isVersionExists(customVersionName, true),
-                            optifine = viewModel.currentAddon.optifineVersion.value,
-                            forge = viewModel.currentAddon.forgeVersion.value,
-                            neoforge = viewModel.currentAddon.neoforgeVersion.value
+                            optifine = if (isRust) null else viewModel.currentAddon.optifineVersion.value,
+                            forge = if (isRust) null else viewModel.currentAddon.forgeVersion.value,
+                            neoforge = if (isRust) null else viewModel.currentAddon.neoforgeVersion.value
                                 .takeIf { loaderSupports.isNeoForgeSupports },
-                            fabric = viewModel.currentAddon.fabricVersion.value
+                            fabric = if (isRust) null else viewModel.currentAddon.fabricVersion.value
                                 .takeIf { loaderSupports.isFabricSupports },
-                            fabricAPI = viewModel.currentAddon.fabricAPIVersion.value
+                            fabricAPI = if (isRust) null else viewModel.currentAddon.fabricAPIVersion.value
                                 .takeIf { loaderSupports.isFabricSupports },
-                            legacyFabric = viewModel.currentAddon.legacyFabricVersion.value
+                            legacyFabric = if (isRust) null else viewModel.currentAddon.legacyFabricVersion.value
                                 .takeIf { loaderSupports.isLegacyFabricSupports },
-                            legacyFabricAPI = viewModel.currentAddon.legacyFabricAPIVersion.value
+                            legacyFabricAPI = if (isRust) null else viewModel.currentAddon.legacyFabricAPIVersion.value
                                 .takeIf { loaderSupports.isLegacyFabricSupports },
-                            quilt = viewModel.currentAddon.quiltVersion.value
+                            quilt = if (isRust) null else viewModel.currentAddon.quiltVersion.value
                                 .takeIf { loaderSupports.isQuiltSupports },
-                            quiltAPI = viewModel.currentAddon.quiltAPIVersion.value
+                            quiltAPI = if (isRust) null else viewModel.currentAddon.quiltAPIVersion.value
                                 .takeIf { loaderSupports.isQuiltSupports },
-                            cleanroom = viewModel.currentAddon.cleanroomVersion.value
-                                .takeIf { loaderSupports.isCleanroomSupports }
+                            cleanroom = if (isRust) null else viewModel.currentAddon.cleanroomVersion.value
+                                .takeIf { loaderSupports.isCleanroomSupports },
+                            runtime = effectiveRuntime
                         )
                     )
                 }
@@ -307,6 +344,27 @@ fun DownloadGameWithAddonScreen(
                 isVisible = isVisible
             ) { scope ->
                 Spacer(Modifier)
+
+                if (supportsRustEdition) {
+                    AnimatedItem(scope) { yOffset ->
+                        RustRuntimeSelectorCard(
+                            modifier = Modifier.offset { IntOffset(x = 0, y = yOffset.roundToPx()) },
+                            selectedRuntime = effectiveRuntime,
+                            containerColor = cardColor(),
+                            contentColor = onCardColor(),
+                            onSelectRuntime = ::selectRuntime
+                        )
+                    }
+                }
+
+                if (effectiveRuntime == GameRuntime.RUST) {
+                    AnimatedItem(scope) { yOffset ->
+                        AddonWarningItem(
+                            modifier = Modifier.offset { IntOffset(x = 0, y = yOffset.roundToPx()) },
+                            text = stringResource(R.string.rust_edition_modloaders_disabled)
+                        )
+                    }
+                } else {
 
                 AnimatedItem(scope) { yOffset ->
                     OptiFineList(
@@ -531,6 +589,7 @@ fun DownloadGameWithAddonScreen(
                         ) { viewModel.reloadQuiltAPI() }
                     }
                 }
+                }
 
                 Spacer(Modifier)
             }
@@ -544,6 +603,7 @@ private fun ScreenHeader(
     itemContainerColor: Color,
     itemContentColor: Color,
     gameVersion: String,
+    selectedRuntime: GameRuntime,
     currentAddon: CurrentAddon,
     refreshIcon: Any? = null,
     refreshErrorCheck: Any? = null,
@@ -565,6 +625,7 @@ private fun ScreenHeader(
 
             AutoChangeVersionName(
                 gameVersion = gameVersion,
+                selectedRuntime = selectedRuntime,
                 currentAddon = currentAddon,
                 editedByUser = editedByUser,
                 changeValue = {
@@ -742,6 +803,61 @@ private fun VersionIconPreview(
     )
 }
 
+@Composable
+private fun RustRuntimeSelectorCard(
+    modifier: Modifier = Modifier,
+    selectedRuntime: GameRuntime,
+    containerColor: Color,
+    contentColor: Color,
+    onSelectRuntime: (GameRuntime) -> Unit
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = containerColor,
+        contentColor = contentColor
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.rust_runtime_selector_title),
+                style = MaterialTheme.typography.titleSmall
+            )
+            listOf(
+                Triple(GameRuntime.JAVA, R.string.rust_runtime_java, R.string.rust_runtime_java_summary),
+                Triple(GameRuntime.RUST, R.string.rust_runtime_rust, R.string.rust_runtime_rust_summary)
+            ).forEach { (runtime, titleRes, summaryRes) ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelectRuntime(runtime) }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedRuntime == runtime,
+                        onClick = { onSelectRuntime(runtime) }
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(titleRes),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = stringResource(summaryRes),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = contentColor.copy(alpha = 0.75f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * 根据当前已选择的Addon，自动修改版本名称
  * @param editedByUser 版本名称是否已被用户修改，如果用户已经修改过版本名称，则阻止自动修改
@@ -749,11 +865,13 @@ private fun VersionIconPreview(
 @Composable
 private fun AutoChangeVersionName(
     gameVersion: String,
+    selectedRuntime: GameRuntime,
     currentAddon: CurrentAddon,
     editedByUser: Boolean,
     changeValue: (String) -> Unit = {}
 ) {
     LaunchedEffect(
+        selectedRuntime,
         currentAddon.optifineVersion.value,
         currentAddon.forgeVersion.value,
         currentAddon.neoforgeVersion.value,
@@ -763,6 +881,11 @@ private fun AutoChangeVersionName(
         currentAddon.cleanroomVersion.value,
     ) {
         if (editedByUser) return@LaunchedEffect
+
+        if (selectedRuntime == GameRuntime.RUST) {
+            changeValue("$gameVersion-Rust")
+            return@LaunchedEffect
+        }
 
         fun formatModloader(name: String, version: String) = "$name $version"
         fun formatOptiFine(optifine: OptiFineVersion) = formatModloader(ModLoader.OPTIFINE.displayName, optifine.realVersion)

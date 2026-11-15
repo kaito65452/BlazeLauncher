@@ -1422,4 +1422,13 @@
     <string name="developer_prepare_failed">Persiapan gagal</string>
     <string name="developer_prepare_cancel">Batal</string>
     <string name="developer_prepare_copy_details">Salin detail</string>
+    <string name="rust_runtime_selector_title">Runtime</string>
+    <string name="rust_runtime_java">Java Edition</string>
+    <string name="rust_runtime_java_summary">Runtime JVM standar dengan dukungan mod loader</string>
+    <string name="rust_runtime_rust">Rust Edition (Eksperimental)</string>
+    <string name="rust_runtime_rust_summary">Engine Rust Starling native (wajib akun Microsoft, tanpa mod loader Java)</string>
+    <string name="rust_edition_modloaders_disabled">Mod loader Java dinonaktifkan saat Rust Edition dipilih.</string>
+    <string name="rust_microsoft_account_required">Rust Edition memerlukan akun Microsoft yang terverifikasi.</string>
+    <string name="download_game_install_rust_engine_data">Menyiapkan data engine Rust Edition %s</string>
+    <string name="rust_engine_data_preparing">Menyiapkan data engine Rust Edition</string>
 </resources>

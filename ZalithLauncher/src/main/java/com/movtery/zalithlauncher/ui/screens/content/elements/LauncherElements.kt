@@ -299,8 +299,23 @@ fun LaunchGameOperation(
 
                 val quickPlay = operation.quickPlay
 
-                AccountsManager.currentAccountFlow.value ?: run {
+                val activeAccount = AccountsManager.currentAccountFlow.value ?: run {
                     launchGameViewModel.updateOperation(LaunchGameOperation.NoAccount)
+                    return@LaunchedEffect
+                }
+
+                if (version.getRuntime() == com.movtery.zalithlauncher.game.version.installed.GameRuntime.RUST) {
+                    if (!activeAccount.isMicrosoftAccount()) {
+                        submitError(
+                            ErrorViewModel.ThrowableMessage(
+                                title = activity.getString(R.string.generic_error),
+                                message = activity.getString(R.string.rust_microsoft_account_required)
+                            )
+                        )
+                        launchGameViewModel.updateOperation(LaunchGameOperation.None)
+                        return@LaunchedEffect
+                    }
+                    launchGameViewModel.updateOperation(LaunchGameOperation.RealLaunch(version, quickPlay))
                     return@LaunchedEffect
                 }
 
@@ -416,16 +431,20 @@ fun LaunchGameOperation(
         }
         is LaunchGameOperation.AccountRefreshFailed -> {
             val state = operation
+            val allowSkip = state.version.getRuntime() != com.movtery.zalithlauncher.game.version.installed.GameRuntime.RUST
             AccountRefreshFailedDialog(
                 error = state.error,
+                allowSkip = allowSkip,
                 onSkip = {
-                    launchGameViewModel.updateOperation(
-                        LaunchGameOperation.RealLaunch(
-                            state.version,
-                            state.quickPlay,
-                            skipAccountRefresh = true
+                    if (allowSkip) {
+                        launchGameViewModel.updateOperation(
+                            LaunchGameOperation.RealLaunch(
+                                state.version,
+                                state.quickPlay,
+                                skipAccountRefresh = true
+                            )
                         )
-                    )
+                    }
                 },
                 onRetry = {
                     launchGameViewModel.updateOperation(LaunchGameOperation.RealLaunch(state.version, state.quickPlay))
@@ -460,6 +479,7 @@ fun LaunchGameOperation(
 @Composable
 private fun AccountRefreshFailedDialog(
     error: Throwable,
+    allowSkip: Boolean = true,
     onSkip: () -> Unit,
     onRetry: () -> Unit,
     onCancel: () -> Unit
@@ -502,11 +522,13 @@ private fun AccountRefreshFailedDialog(
                             text = accountErrorText(error),
                             style = MaterialTheme.typography.bodyMedium
                         )
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text(
-                            text = stringResource(R.string.account_refresh_failed_skip_message),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+                        if (allowSkip) {
+                            Spacer(modifier = Modifier.size(8.dp))
+                            Text(
+                                text = stringResource(R.string.account_refresh_failed_skip_message),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.size(16.dp))
 
@@ -521,12 +543,14 @@ private fun AccountRefreshFailedDialog(
                         ) {
                             MarqueeText(text = stringResource(R.string.account_refresh_failed_retry))
                         }
-                        PositionFilledTonalButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            position = ButtonPosition.Middle,
-                            onClick = onSkip
-                        ) {
-                            MarqueeText(text = stringResource(R.string.account_refresh_failed_skip))
+                        if (allowSkip) {
+                            PositionFilledTonalButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                position = ButtonPosition.Middle,
+                                onClick = onSkip
+                            ) {
+                                MarqueeText(text = stringResource(R.string.account_refresh_failed_skip))
+                            }
                         }
                         PositionFilledTonalButton(
                             modifier = Modifier.fillMaxWidth(),
