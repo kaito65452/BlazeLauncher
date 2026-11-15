@@ -78,6 +78,10 @@ struct MockHttp {
 impl MockHttp {
     fn start(routes: HashMap<String, Vec<u8>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::start_with_listener(listener, routes)
+    }
+
+    fn start_with_listener(listener: TcpListener, routes: HashMap<String, Vec<u8>>) -> Self {
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1601,7 +1605,6 @@ fn bundled_prepare_end_to_end_skips_server_and_stamps_all_markers() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
-    drop(listener);
 
     let world = make_synthetic_world(&base);
     let mut routes = HashMap::new();
@@ -1622,7 +1625,7 @@ fn bundled_prepare_end_to_end_skips_server_and_stamps_all_markers() {
         world.control_png.clone(),
     );
     // Intentionally omit /server.jar and /client-lib.jar so any fetch would 404 & fail.
-    let srv = MockHttp::start_at(addr, routes);
+    let srv = MockHttp::start_with_listener(listener, routes);
 
     let lock_path = dir.path().join("research-lock.json");
     let controls_path = dir.path().join("bedrock-controls.json");
