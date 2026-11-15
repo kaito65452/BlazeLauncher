@@ -108,9 +108,10 @@ Nightly versionCode: 27321741
 ✓ Verification passed: Produced versionCode (27483401) > Nightly versionCode (27321741).
 ```
 
-Local offline Termux verification (`cargo test --offline --locked --manifest-path blaze-prepare/Cargo.toml`):
-- `4 passed; 0 failed` (`pin_mismatch_and_cancellation_clean_partials`, `zl2_game_home_reuse_avoids_redundant_downloads`, `full_phase1_and_phase2_with_mock_http_and_engine_data_zip_parity`, `synthetic_4000_file_benchmark`), 0 compiler warnings.
-- Local `aarch64` debug benchmark: `BENCH_RUST_4000 build_ms=2428 extract_ms=4907 verify_ms=347 zip_ms=3349 peak_rss_kb=15516` vs local Termux Python: `BENCH_PYTHON_4000 build_ms=967 extract_ms=1384 verify_ms=389 zip_ms=1384 peak_rss_kb=21272`.
+Historical offline verification prior to CI migration ran `blaze-prepare` tests on Termux, which is **now deprecated and forbidden on mobile dev devices** due to thermal/ANR watchdog limits. All `blaze-prepare`, benchmark, and APK checks run strictly in GitHub Actions:
+- Unit & Python oracle tests + X2 host audit + release/fast `.so` build: **`.github/workflows/rust-engine.yml`** (`engine` job).
+- Release 4,000-file synthetic benchmark (`x86_64` & `aarch64`): **`.github/workflows/rust-engine.yml`** (`engine` and `bench-aarch64` jobs).
+- Release-signed APK assembly, R8, `guard.sh`, cert SHA-256, and monotonic `versionCode`: **`.github/workflows/ci.yml`** (`ci` job).
 
 ---
 
@@ -119,4 +120,4 @@ Local offline Termux verification (`cargo test --offline --locked --manifest-pat
 1. End-to-end live download & preparation of Minecraft `26.3` engine-data on `SM-N975F` (Android 12) via Developer -> `"Prepare engine data (spike)"` (Piston Meta fetch, ZL2 `<gameHome>` reuse, `Internal-25` `:jvm` `javac` compilation + execution of vanilla datagen & 26 Starling MIT parity exporters, Phase 2 bundling into `<filesDir>/engine-data/26.3/`).
 2. Live `:rust` (`RustActivity`) boot from prepared on-device `<filesDir>/engine-data` without `"This APK is missing its engine data. Install a complete build."`.
 3. Device-measured wall-clock seconds, cancel-cleanup verification (zero lingering `.partial` files / `:jvm` child processes), and `:jvm`/`libblaze_prepare.so` `VmHWM` on `SM-N975F`.
-4. Optimized `--release` 4,000-file synthetic timing on ARM64 hardware (measured benchmarks ran on CI `ubuntu-latest` x86_64 and local debug Cargo test).
+4. Physical device I/O speed on `SM-N975F` UFS flash (synthetic `--release` `x86_64` and `aarch64` CI benchmarks now run in `.github/workflows/rust-engine.yml`).

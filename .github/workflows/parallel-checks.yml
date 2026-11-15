@@ -27,7 +27,8 @@ jobs:
 
       - name: Run Guards, Self-Tests, and Scope Guard
         run: |
-          chmod +x scripts/guard.sh scripts/scope_guard.sh scripts/test_guards.sh
+          chmod +x scripts/guard.sh scripts/scope_guard.sh scripts/test_guards.sh scripts/check_no_zero_files.sh
+          bash -n scripts/*.sh
           ENGINE_BUILD_ENABLED=1 ./scripts/guard.sh
           ./scripts/test_guards.sh
           BASE_BRANCH="${{ github.base_ref || 'main' }}"

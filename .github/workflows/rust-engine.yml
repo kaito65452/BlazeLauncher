@@ -22,6 +22,7 @@ jobs:
           submodules: recursive
 
       - name: Verify Pinned Engine Submodule & Apply Patches
+        id: submodule
         run: |
           if [ ! -d "engine/starling" ] || [ ! -s "engine/starling/Cargo.toml" ]; then
             echo "ERROR: engine/starling submodule is missing or empty!" >&2
@@ -38,6 +39,7 @@ jobs:
             git -C engine/starling apply --check "$PWD/$p"
             git -C engine/starling apply "$PWD/$p"
           done
+          echo "sha=$ACTUAL_SHA" >> "$GITHUB_OUTPUT"
           echo "✓ Patches applied cleanly to $EXPECTED_SHA"
 
       - name: Run Engine License Hygiene Guards
@@ -58,19 +60,43 @@ jobs:
             rustup target add aarch64-linux-android
           )
 
-      - name: Cache Cargo & Target
+      - name: Cache Prebuilt libhorizon_android.so (arm64-v8a)
+        id: cache-horizon-so
+        uses: actions/cache@v4
+        with:
+          path: engine/starling/target/aarch64-linux-android/release/libhorizon_android.so
+          key: ${{ runner.os }}-horizon-so-arm64-${{ steps.submodule.outputs.sha }}-${{ hashFiles('engine/patches/*.patch', 'engine/starling/Cargo.lock') }}
+
+      - name: Cache Prebuilt libblaze_prepare.so (arm64-v8a)
+        id: cache-prepare-so
+        uses: actions/cache@v4
+        with:
+          path: blaze-prepare/target/aarch64-linux-android/release/libblaze_prepare.so
+          key: ${{ runner.os }}-prepare-so-arm64-${{ steps.submodule.outputs.sha }}-${{ hashFiles('engine/patches/*.patch', 'blaze-prepare/Cargo.toml', 'blaze-prepare/Cargo.lock', 'blaze-prepare/src/**/*.rs') }}
+
+      - name: Cache Cargo Registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine/starling/Cargo.lock', 'blaze-prepare/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo Target (NDK miss only)
+        if: steps.cache-horizon-so.outputs.cache-hit != 'true' || steps.cache-prepare-so.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
             engine/starling/target
             blaze-prepare/target
-          key: ${{ runner.os }}-cargo-starling-arm64-${{ hashFiles('engine/starling/Cargo.lock', 'engine/patches/*.patch', 'blaze-prepare/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-target-arm64-${{ steps.submodule.outputs.sha }}-${{ hashFiles('engine/patches/*.patch', 'engine/starling/Cargo.lock', 'blaze-prepare/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-starling-arm64-
+            ${{ runner.os }}-cargo-target-arm64-
 
       - name: Setup cargo-ndk and Android NDK
+        if: steps.cache-horizon-so.outputs.cache-hit != 'true' || steps.cache-prepare-so.outputs.cache-hit != 'true'
         run: |
           if ! command -v cargo-ndk >/dev/null 2>&1; then
             cargo install cargo-ndk --locked
@@ -84,38 +110,50 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
 
       - name: Build Engine (arm64-v8a) and Report Sizes
+        env:
+          HORIZON_SO_CACHE_HIT: ${{ steps.cache-horizon-so.outputs.cache-hit }}
+          PREPARE_SO_CACHE_HIT: ${{ steps.cache-prepare-so.outputs.cache-hit }}
         run: |
-          echo "=== Building unoptimized/unstripped baseline (profile=fast) ==="
-          (
-            cd engine/starling
-            cargo ndk -t arm64-v8a --platform 28 build \
-              --profile fast \
-              --manifest-path Cargo.toml \
-              --package horizon-android
-          )
-
-          FAST_SO="engine/starling/target/aarch64-linux-android/fast/libhorizon_android.so"
-          BEFORE_BYTES=$(stat -c%s "$FAST_SO")
-
-          echo "=== Building optimized release (lto=fat, codegen-units=1, panic=abort, strip=true, opt-level=3) ==="
-          (
-            cd engine/starling
-            cargo ndk -t arm64-v8a --platform 28 build \
-              --release \
-              --manifest-path Cargo.toml \
-              --package horizon-android
-          )
-
           REL_SO="engine/starling/target/aarch64-linux-android/release/libhorizon_android.so"
-          AFTER_BYTES=$(stat -c%s "$REL_SO")
+          if [ "${HORIZON_SO_CACHE_HIT:-false}" = "true" ] && [ -s "$REL_SO" ]; then
+            BEFORE_BYTES="cached"
+            AFTER_BYTES=$(stat -c%s "$REL_SO")
+            echo "✓ Cache hit: restored prebuilt libhorizon_android.so ($AFTER_BYTES bytes); skipping cargo-ndk rebuild."
+          else
+            echo "=== Building unoptimized/unstripped baseline (profile=fast) ==="
+            (
+              cd engine/starling
+              cargo ndk -t arm64-v8a --platform 28 build \
+                --profile fast \
+                --manifest-path Cargo.toml \
+                --package horizon-android
+            )
 
-          echo "=== Native Library Size Report (arm64-v8a) ==="
-          ls -lh "$FAST_SO" "$REL_SO"
-          echo "libhorizon_android.so before (fast, unstripped): $BEFORE_BYTES bytes"
-          echo "libhorizon_android.so after (release, lto=fat, panic=abort, strip=true): $AFTER_BYTES bytes"
+            FAST_SO="engine/starling/target/aarch64-linux-android/fast/libhorizon_android.so"
+            BEFORE_BYTES=$(stat -c%s "$FAST_SO")
+
+            echo "=== Building optimized release (lto=fat, codegen-units=1, panic=abort, strip=true, opt-level=3) ==="
+            (
+              cd engine/starling
+              cargo ndk -t arm64-v8a --platform 28 build \
+                --release \
+                --manifest-path Cargo.toml \
+                --package horizon-android
+            )
+
+            AFTER_BYTES=$(stat -c%s "$REL_SO")
+
+            echo "=== Native Library Size Report (arm64-v8a) ==="
+            ls -lh "$FAST_SO" "$REL_SO"
+            echo "libhorizon_android.so before (fast, unstripped): $BEFORE_BYTES bytes"
+            echo "libhorizon_android.so after (release, lto=fat, panic=abort, strip=true): $AFTER_BYTES bytes"
+          fi
 
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
           cp "$REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
+
+          echo "=== Testing horizon-prepare (pinned + patched submodule unit tests) ==="
+          cargo test --locked --manifest-path engine/starling/Cargo.toml -p horizon-prepare -- --nocapture
 
           echo "=== Testing blaze-prepare (unit + synthetic oracle dump) ==="
           ORACLE_DUMP=$(mktemp -d "${RUNNER_TEMP:-/tmp}/blaze-oracle-XXXXXX")
@@ -397,23 +435,31 @@ jobs:
           rm -rf "$X2_TMP"
           trap - EXIT
 
-          echo "=== Building blaze-prepare (arm64-v8a fast vs release) ==="
-          (
-            cd blaze-prepare
-            cargo ndk -t arm64-v8a --platform 28 build --profile fast --locked --manifest-path Cargo.toml
-            cargo ndk -t arm64-v8a --platform 28 build --release --locked --manifest-path Cargo.toml
-          )
           PREP_FAST_SO="blaze-prepare/target/aarch64-linux-android/fast/libblaze_prepare.so"
           PREP_REL_SO="blaze-prepare/target/aarch64-linux-android/release/libblaze_prepare.so"
-          PREP_BEFORE_BYTES=$(stat -c%s "$PREP_FAST_SO")
-          PREP_AFTER_BYTES=$(stat -c%s "$PREP_REL_SO")
-          ls -lh "$PREP_FAST_SO" "$PREP_REL_SO"
-          echo "libblaze_prepare.so before (fast, unstripped): $PREP_BEFORE_BYTES bytes"
-          echo "libblaze_prepare.so after (release, lto=fat, panic=abort, strip=true): $PREP_AFTER_BYTES bytes"
+          if [ "${PREPARE_SO_CACHE_HIT:-false}" = "true" ] && [ -s "$PREP_REL_SO" ]; then
+            PREP_BEFORE_BYTES="cached"
+            PREP_AFTER_BYTES=$(stat -c%s "$PREP_REL_SO")
+            echo "✓ Cache hit: restored prebuilt libblaze_prepare.so ($PREP_AFTER_BYTES bytes); skipping cargo-ndk rebuild."
+          else
+            echo "=== Building blaze-prepare (arm64-v8a fast vs release) ==="
+            (
+              cd blaze-prepare
+              cargo ndk -t arm64-v8a --platform 28 build --profile fast --locked --manifest-path Cargo.toml
+              cargo ndk -t arm64-v8a --platform 28 build --release --locked --manifest-path Cargo.toml
+            )
+            PREP_BEFORE_BYTES=$(stat -c%s "$PREP_FAST_SO")
+            PREP_AFTER_BYTES=$(stat -c%s "$PREP_REL_SO")
+            ls -lh "$PREP_FAST_SO" "$PREP_REL_SO"
+            echo "libblaze_prepare.so before (fast, unstripped): $PREP_BEFORE_BYTES bytes"
+            echo "libblaze_prepare.so after (release, lto=fat, panic=abort, strip=true): $PREP_AFTER_BYTES bytes"
+          fi
           cp "$PREP_REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
 
           {
             echo "### Rust Engine Build (arm64-v8a)"
+            echo "- horizon .so cache hit: \`${HORIZON_SO_CACHE_HIT:-false}\`"
+            echo "- prepare .so cache hit: \`${PREPARE_SO_CACHE_HIT:-false}\`"
             echo "- libhorizon_android.so fast/unstripped: \`$BEFORE_BYTES\` bytes"
             echo "- libhorizon_android.so release/stripped: \`$AFTER_BYTES\` bytes"
             echo "- libblaze_prepare.so fast/unstripped: \`$PREP_BEFORE_BYTES\` bytes"

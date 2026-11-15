@@ -296,5 +296,5 @@ Automated unit tests in `AccountCompatibilityTest.kt` verify that Offline and El
   - Verify the error dialog displays localized title and the `[Debug Details]` section showing failing step and sanitized response.
   - Verify no plain access tokens or user codes appear in debug details or logcat.
 - [ ] **Test 4: Release Build Failure Verification [UNVERIFIED]**
-  - Run `./gradlew assembleRelease` without `MS_CLIENT_ID` set.
-  - Verify build halts with: `BUILD FAILED: Microsoft Client ID is missing or blank for release build!`.
+  - Verified strictly in GitHub Actions (`.github/workflows/ci.yml` when `MS_CLIENT_ID` secret is unset; do NOT run `./gradlew` locally on device).
+  - Verify CI build halts with: `BUILD FAILED: Microsoft Client ID is missing or blank for release build!`.

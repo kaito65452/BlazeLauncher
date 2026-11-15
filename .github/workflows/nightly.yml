@@ -31,8 +31,9 @@ jobs:
 
       - name: Run Guard Scripts
         run: |
-          chmod +x scripts/guard.sh scripts/scope_guard.sh
+          chmod +x scripts/guard.sh scripts/scope_guard.sh scripts/test_guards.sh scripts/check_no_zero_files.sh
           ./scripts/guard.sh
+          ./scripts/test_guards.sh
           ./scripts/scope_guard.sh main
 
       - name: Apply Engine Pin Refresh Patch to Bundled Lock

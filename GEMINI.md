@@ -2,6 +2,14 @@
 
 Blaze Launcher is a Minecraft: Java Edition launcher for Android based on Zalith Launcher 2 (ZL2), integrating the Starling/Horizon Rust engine.
 
+## Device Load Rules (highest priority; the agent runs on my phone)
+
+My phone froze and rebooted during a previous run because of heavy local work (ANR, then watchdog reset).
+- FORBIDDEN on the device: cargo build/test/check/clippy, gradle/gradlew, javac/java, NDK builds, benchmarks, python data processing, large downloads, anything running longer than ~20 s or using more than ~300 MB RAM.
+- ALLOWED on the device: reading/editing files, git, gh, bash scripts/guard.sh, bash scripts/test_guards.sh, bash scripts/scope_guard.sh, cargo fmt --check, short grep/sed checks.
+- Everything else (compilation, unit tests, benchmarks, real-data preflight) runs ONLY in GitHub Actions. Push, then read logs with gh run view --log-failed. Poll CI at most once per minute. Batch fixes into one commit instead of many small pushes.
+- Anything not verified locally is UNVERIFIED, never "passed".
+
 ## Core Rules
 
 1. **Compile Only Through Workflows**: This environment (Termux/phone) cannot compile full Android APKs or native code. All compilation, unit tests, and releases must run strictly through GitHub Actions workflows.

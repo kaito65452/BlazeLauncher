@@ -60,8 +60,8 @@ Conclusion: No JNI `GlobalRef` leak exists in upstream Starling or Blaze patches
 
 ## Verification & UNVERIFIED Items
 
-- **Local checks (pre-commit)**: `bash scripts/scope_guard.sh main` (exit `0`), `bash scripts/test_guards.sh` (`PASS=39 FAIL=0`), `ENGINE_BUILD_ENABLED=1 bash scripts/guard.sh` (exit `0`).
-- **CI checks**: `Parallel Fast Checks` (`43668835071`) green; `CI` (`43668835050`) green, `libhorizon_android.so` release `52,019,160` bytes, `libblaze_prepare.so` release `2,846,936` bytes.
+- **Fast CI checks (`Parallel Fast Checks` `43668835071`)**: `bash scripts/scope_guard.sh main`, `bash scripts/test_guards.sh` (`PASS=39 FAIL=0`), `ENGINE_BUILD_ENABLED=1 bash scripts/guard.sh`, and `:app:testDebugUnitTest` run exclusively in GitHub Actions (`.github/workflows/parallel-checks.yml`; do not run full `guard.sh` or builds on mobile dev devices).
+- **Build & Engine CI checks (`CI` `43668835050`)**: `libhorizon_android.so` release `52,019,160` bytes, `libblaze_prepare.so` release `2,846,936` bytes.
 - **`UNVERIFIED` (physical device `SM-N975F` required)**:
   - Interactive Android SAF document picker round-trip (`requestCode=4101`) through `RustActivity.onActivityResult` -> `nativeDocumentResult` on device.
   - On-screen soft keyboard `adjustResize` viewport reflow, punch-hole cutout padding (`SHORT_EDGES`), and edge back-gesture exclusion strips on `SM-N975F`.

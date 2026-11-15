@@ -32,7 +32,21 @@
 
 ### X2 — Transient Minecraft 26.3 Host Audit (CI)
 - Added transient X2 audit step in [rust-engine.yml](file:///data/data/com.termux/files/home/BlazeLauncher/.github/workflows/rust-engine.yml) fetching catalog, 26.3 version JSON, and asset index into an auto-cleaned temporary directory, logging only distinct `(field, host)` pairs and asserting zero hosts outside `ALLOWED_DOWNLOAD_HOSTS`.
-- Live CI results: *pending first CI push of this stage (will be filled from `gh run view --log`)*.
+- Live CI results (`CI` run [`43718712434`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712434), job `engine / engine` `132825771482`):
+  ```text
+  X2_ALLOWED_HOSTS=['launcher.mojang.com', 'launchermeta.mojang.com', 'libraries.minecraft.net', 'piston-data.mojang.com', 'piston-meta.mojang.com', 'raw.githubusercontent.com', 'resources.download.minecraft.net']
+  X2_HOST_PAIR field=DEFAULT_CATALOG_URL host=piston-meta.mojang.com
+  X2_HOST_PAIR field=assetIndex.objects[*].hash -> OBJECTS_BASE_URL host=resources.download.minecraft.net
+  X2_HOST_PAIR field=assetIndex.url host=piston-meta.mojang.com
+  X2_HOST_PAIR field=bedrock_controls.BASE_URL host=raw.githubusercontent.com
+  X2_HOST_PAIR field=downloads.client.url host=piston-data.mojang.com
+  X2_HOST_PAIR field=downloads.server.url host=piston-data.mojang.com
+  X2_HOST_PAIR field=libraries[*].downloads.artifact.url host=libraries.minecraft.net
+  X2_HOST_PAIR field=logging.client.file.url host=piston-data.mojang.com
+  X2_HOST_PAIR field=version_manifest_v2.versions[id=26.3].url host=piston-meta.mojang.com
+  X2_DISTINCT_HOSTS=['libraries.minecraft.net', 'piston-data.mojang.com', 'piston-meta.mojang.com', 'raw.githubusercontent.com', 'resources.download.minecraft.net'] asset_object_count=5149
+  ```
+  All 5 distinct live MC `26.3` hosts match `ALLOWED_DOWNLOAD_HOSTS` (`0` unexpected hosts).
 
 ### X3 — Actionable Redacted Diagnostics
 - URL/host/redirect errors in [lock.rs](file:///data/data/com.termux/files/home/BlazeLauncher/blaze-prepare/src/lock.rs) and [download.rs](file:///data/data/com.termux/files/home/BlazeLauncher/blaze-prepare/src/download.rs) report:
@@ -48,7 +62,10 @@
   - Lookalike/suffix/prefix/trailing-dot/subdomain hosts, `http://`, non-443 ports, `user:pass@`, empty-user `@`, and malformed URLs are rejected even with `allow_loopback=true`.
   - Loopback mock HTTP server verifies 302 redirects to untrusted host, `http://`, userinfo, and `>5` redirect loop fail immediately with zero retries and no query-token leak.
   - Mandatory SHA-1 mismatch rejection on valid loopback fetch.
-- Executed via CI (`rust-engine.yml` -> `blaze-prepare-tests`); *UNVERIFIED until CI completes*.
+- Executed via CI (`CI` run [`43718712434`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712434), job `engine / engine` `132825771482`):
+  - `test task_x4_download_host_allowlist_and_redirect_security_synthetic ... ok`
+  - `test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.19s` (`ORACLE_MARKERS_OK schema=7 output_version=3`)
+  - Release 4,000-file benchmark (`aarch64` & `x86_64`): `1 passed; 0 failed` (`3.06s` x86_64, `1.66s` aarch64).
 
 ### X5 — Static Preflight of Post-Download `Install.RustEngineData` Path
 Traced end-to-end across [GameInstaller.kt](file:///data/data/com.termux/files/home/BlazeLauncher/ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/download/game/GameInstaller.kt), [EngineDataPreparer.kt](file:///data/data/com.termux/files/home/BlazeLauncher/ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/rustruntime/EngineDataPreparer.kt), [JvmLauncher.kt](file:///data/data/com.termux/files/home/BlazeLauncher/ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/JvmLauncher.kt), [Launcher.kt](file:///data/data/com.termux/files/home/BlazeLauncher/ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/Launcher.kt), and [resources.rs](file:///data/data/com.termux/files/home/BlazeLauncher/blaze-prepare/src/resources.rs):
@@ -72,7 +89,12 @@ Traced end-to-end across [GameInstaller.kt](file:///data/data/com.termux/files/h
 
 ---
 
-## CI Verification (Pending / Updated After Push)
-- Local fast checks before push: `scripts/check_no_zero_files.sh`, `scripts/scope_guard.sh`
-- CI workflows triggered on push: `parallel-checks.yml`, `ci.yml`, `rust-engine.yml`
-- CI run URL / APK / X2 host output: *to be recorded after CI completion*.
+## CI Verification (Commit `21af392b`)
+- Local fast checks before push: `scripts/check_no_zero_files.sh`, `scripts/scope_guard.sh` (`=== Scope Guard Checks Passed ===`)
+- **`Parallel Fast Checks` Run**: [`https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712111`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712111) (`status: completed`, `conclusion: success`)
+  - `Guards & Self-Tests` (`132825770862`): `=== Summary: PASS=46 FAIL=0 ===`, `✓ All changed files match scope guard allowlist.`
+  - `JVM Unit Tests` (`132825770869`): `success` (`testDebugUnitTest` incl. `failedPhaseAndRedactedErrorReachBothDetailsAndCopyReport`)
+- **`CI` Run**: [`https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712434`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43718712434) (`status: completed`, `conclusion: success`)
+  - `engine / engine` (`132825771482`): `22m 32s` (`13:23:02Z` -> `13:45:34Z`), artifact `horizon-engine-arm64` ID `14164242776` (`28116607` bytes)
+  - `ci` (`132831726156`): `14m 38s` (`13:45:37Z` -> `14:00:15Z`), `versionCode=27524844` (`> 27321741`), `android:debuggable=false`, `157 .so files scanned`, cert SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`, artifact `signed-apks` ID `14163849778` (`378303665` bytes).
+- **UNVERIFIED items**: on-device `:jvm` execution on physical phone (`SM-N975F`), Android LMK/memory pressure under `Internal-25` JDK, real Mojang 26.3 pipeline run (covered on desktop in Stage 3 / Task P and on phone afterward).
