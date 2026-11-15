@@ -467,11 +467,13 @@ fn run() -> Result<(), String> {
         download_workers: 6,
     };
 
-    let mut last_phase = String::new();
+    let last_phase = std::sync::Mutex::new(String::new());
     let phase1 = run_phase1(&cfg, &cancel, &|phase, done, total| {
-        if phase != last_phase {
-            println!("PREFLIGHT_PHASE1 stage={phase} progress={done}/{total}");
-            last_phase = phase.to_string();
+        if let Ok(mut prev) = last_phase.lock() {
+            if prev.as_str() != phase {
+                println!("PREFLIGHT_PHASE1 stage={phase} progress={done}/{total}");
+                *prev = phase.to_string();
+            }
         }
     })?;
     println!(
@@ -490,11 +492,13 @@ fn run() -> Result<(), String> {
         args.heap_mb,
     )?;
 
-    let mut last_p2 = String::new();
+    let last_p2 = std::sync::Mutex::new(String::new());
     let phase2 = run_phase2_finalize(&cfg, &cancel, &|phase, done, total| {
-        if phase != last_p2 {
-            println!("PREFLIGHT_PHASE2 stage={phase} progress={done}/{total}");
-            last_p2 = phase.to_string();
+        if let Ok(mut prev) = last_p2.lock() {
+            if prev.as_str() != phase {
+                println!("PREFLIGHT_PHASE2 stage={phase} progress={done}/{total}");
+                *prev = phase.to_string();
+            }
         }
     })?;
     println!(
