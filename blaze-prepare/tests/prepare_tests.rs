@@ -1607,24 +1607,10 @@ fn bundled_prepare_end_to_end_skips_server_and_stamps_all_markers() {
     let base = format!("http://{addr}");
 
     let world = make_synthetic_world(&base);
-    let mut routes = HashMap::new();
-    routes.insert("/catalog.json".to_string(), br#"{"versions":[]}"#.to_vec());
-    routes.insert("/manifest.json".to_string(), world.manifest_bytes.clone());
-    routes.insert("/client.jar".to_string(), world.client_jar.clone());
-    routes.insert("/34.json".to_string(), world.asset_index_bytes.clone());
-    routes.insert(
-        format!("/{}/{}", &world.obj_sound_sha1[..2], world.obj_sound_sha1),
-        world.obj_sound.clone(),
-    );
-    routes.insert(
-        format!("/{}/{}", &world.obj_pano_sha1[..2], world.obj_pano_sha1),
-        world.obj_pano.clone(),
-    );
-    routes.insert(
-        "/controls/resource_pack/textures/gui/controls/jump.png".to_string(),
-        world.control_png.clone(),
-    );
-    // Intentionally omit /server.jar and /client-lib.jar so any fetch would 404 & fail.
+    let mut routes = routes_for(&world, &base);
+    // Intentionally remove /server.jar and /client-lib.jar so any fetch would 404 & fail.
+    routes.remove("/server.jar");
+    routes.remove("/client-lib.jar");
     let srv = MockHttp::start_with_listener(listener, routes);
 
     let lock_path = dir.path().join("research-lock.json");
