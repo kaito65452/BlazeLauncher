@@ -121,23 +121,116 @@ object RustDiagnosticsCollector {
         appendLine(redactDiagnosticText(collectEngineDataDiagnosis(filesDir)))
         appendLine(redactDiagnosticText(EngineDataPrepareTelemetry.formatForReport(filesDir)))
 
+        val engineDiag = readStarlingDiagnosticTail(filesDir)
+        val logcatRaw = logcatProvider().trim()
+
+        appendLine()
+        appendLine("=== Render Startup & Exit Summary ===")
+        appendLine(
+            redactDiagnosticText(
+                extractRenderStartupSummary(
+                    logcatText = logcatRaw,
+                    diagText = engineDiag,
+                    historicalExitsText = historicalExits
+                )
+            )
+        )
+
         if (historicalExits.isNotBlank()) {
             appendLine()
             appendLine("=== :rust Historical Process Exits ===")
             appendLine(redactDiagnosticText(historicalExits))
         }
 
-        val engineDiag = readStarlingDiagnosticTail(filesDir)
         if (engineDiag.isNotBlank()) {
             appendLine()
             appendLine("=== Starling Diagnostic Log Tail (Redacted) ===")
             appendLine(redactDiagnosticText(engineDiag))
         }
 
-        val logcatTail = redactDiagnosticText(logcatProvider().trim())
+        val logcatTail = redactDiagnosticText(logcatRaw)
         appendLine()
         appendLine("=== :rust Logcat Tail (Redacted) ===")
         appendLine(logcatTail.ifBlank { "(No matching same-UID Horizon/BlazeRustSpike logcat lines)" })
+    }
+
+    internal fun formatExitReasonLabel(reasonCode: Int): String = when (reasonCode) {
+        1 -> "EXIT_SELF"
+        2 -> "SIGNALED"
+        3 -> "LOW_MEMORY"
+        4 -> "CRASH"
+        5 -> "CRASH_NATIVE"
+        6 -> "ANR"
+        7 -> "INITIALIZATION_FAILURE"
+        8 -> "PERMISSION_CHANGE"
+        9 -> "EXCESSIVE_RESOURCE_USAGE"
+        10 -> "USER_REQUESTED"
+        11 -> "USER_STOPPED"
+        12 -> "DEPENDENCY_DIED"
+        13 -> "OTHER"
+        else -> "UNKNOWN"
+    }
+
+    internal fun extractRenderStartupSummary(
+        logcatText: String,
+        diagText: String,
+        historicalExitsText: String = ""
+    ): String {
+        val combined = buildString {
+            if (diagText.isNotBlank()) appendLine(diagText)
+            if (logcatText.isNotBlank()) appendLine(logcatText)
+        }
+        val pipelineMatch = Regex("""pipelines_created_ms=(\d+)([^\r\n]*)""")
+            .findAll(combined)
+            .lastOrNull()
+        val pipelineStr = if (pipelineMatch != null) {
+            "pipelines_created_ms=${pipelineMatch.groupValues[1]}${pipelineMatch.groupValues[2].trimEnd()}"
+        } else {
+            "pipelines_created_ms=unavailable (no BlazePerf pipeline sample captured yet)"
+        }
+
+        val surfaceMatch = Regex("""surface_to_first_frame_ms=(\d+)(?:\s+backend=([^\s]+))?(?:\s+adapter=([^\r\n]+))?""")
+            .findAll(combined)
+            .lastOrNull()
+        val firstFrameFallback = Regex("""Horizon:\s+first frame after\s+(\d+)\s+ms""")
+            .findAll(combined)
+            .lastOrNull()
+        val rendererFallback = Regex("""Horizon renderer:\s+([^\r\n(]+)\(([^,\r\n]+),\s*([^)\r\n]+)\)""")
+            .findAll(combined)
+            .lastOrNull()
+
+        val surfaceStr = if (surfaceMatch != null) {
+            val ms = surfaceMatch.groupValues[1]
+            val backend = surfaceMatch.groupValues[2].ifBlank {
+                rendererFallback?.groupValues?.getOrNull(3)?.trim().orEmpty().ifBlank { "unknown" }
+            }
+            val adapter = surfaceMatch.groupValues[3].ifBlank {
+                rendererFallback?.groupValues?.getOrNull(1)?.trim().orEmpty().ifBlank { "unknown" }
+            }
+            "surface_to_first_frame_ms=$ms backend=$backend adapter=$adapter"
+        } else if (firstFrameFallback != null) {
+            val backend = rendererFallback?.groupValues?.getOrNull(3)?.trim().orEmpty().ifBlank { "unknown" }
+            val adapter = rendererFallback?.groupValues?.getOrNull(1)?.trim().orEmpty().ifBlank { "unknown" }
+            "surface_to_first_frame_ms=unavailable (engine first_frame_after_ms=${firstFrameFallback.groupValues[1]}) backend=$backend adapter=$adapter"
+        } else {
+            "surface_to_first_frame_ms=unavailable backend=unknown adapter=unknown"
+        }
+
+        val exitFirstLine = historicalExitsText
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.isNotEmpty() }
+        val exitStr = if (exitFirstLine != null) {
+            val codeMatch = Regex("""reason=(\d+)""").find(exitFirstLine)
+            val reasonLabel = codeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { code ->
+                "${formatExitReasonLabel(code)}($code)"
+            } ?: "unparsed"
+            "last_rust_exit=$reasonLabel [$exitFirstLine]"
+        } else {
+            "last_rust_exit=none recorded"
+        }
+
+        return listOf(pipelineStr, surfaceStr, exitStr).joinToString("\n")
     }
 
     private fun readHistoricalRustExits(context: Context): String {

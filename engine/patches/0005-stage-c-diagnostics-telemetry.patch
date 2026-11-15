@@ -1,0 +1,63 @@
+diff --git a/crates/horizon-client-render/src/gfx.rs b/crates/horizon-client-render/src/gfx.rs
+index 1a752e61ea..b8befbe72e 100644
+--- a/crates/horizon-client-render/src/gfx.rs
++++ b/crates/horizon-client-render/src/gfx.rs
+@@ -1715,6 +1715,7 @@ const NO_GPU_DRIVER: &str = "No Vulkan or OpenGL graphics driver found: Horizon
+ /// driver: it leaves no panic or crash report, so the log's last line is the
+ /// only sign of where the game stopped. The log file is written unbuffered;
+ /// the flush is for loggers that buffer.
++static SURFACE_START_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+ fn startup_step(step: std::fmt::Arguments) {
+     log::info!("Horizon renderer: {step}");
+     log::logger().flush();
+@@ -1911,6 +1912,7 @@ impl Renderer {
+                         wgpu::PresentMode::Fifo
+                     }
+                 });
++            *SURFACE_START_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+             if previous.is_none() {
+                 startup_step(format_args!(
+                     "device ready; configuring the surface ({}x{} {:?}, {:?})",
+@@ -1962,6 +1964,7 @@ impl Renderer {
+         let offscreen = surface
+             .is_none()
+             .then(|| Self::offscreen_target(&device, &config));
++        let pipeline_started = Instant::now();
+         if previous.is_none() {
+             startup_step(format_args!("creating the pipelines"));
+         }
+@@ -3688,6 +3691,14 @@ impl Renderer {
+             config.format.remove_srgb_suffix(),
+             panorama_faces,
+         );
++        let pipeline_ms = pipeline_started.elapsed().as_millis();
++        log::info!(
++            "BlazePerf pipelines_created_ms={pipeline_ms} initial={} multi_draw={} occlusion_culling={} gpu_timer={}",
++            previous.is_none(),
++            on_off(multi_draw),
++            on_off(cull.is_some()),
++            on_off(gpu_timer.is_some()),
++        );
+         if previous.is_none() {
+             startup_step(format_args!(
+                 "pipelines ready (multi-draw {}, occlusion culling {}, GPU timer {})",
+@@ -8861,6 +8872,19 @@ impl Renderer {
+                 startup_step(format_args!("presenting the first frame"));
+             }
+             self.queue.present(surface_frame);
++            if first_frame {
++                let surface_ms = SURFACE_START_AT
++                    .lock()
++                    .unwrap_or_else(|e| e.into_inner())
++                    .take()
++                    .map_or(0, |started| started.elapsed().as_millis());
++                let info = self.adapter.get_info();
++                log::info!(
++                    "BlazePerf surface_to_first_frame_ms={surface_ms} backend={:?} adapter={}",
++                    info.backend,
++                    info.name
++                );
++            }
+             if self.hdr.is_some()
+                 && let Some(marker) = self.hdr_marker.take()
+             {

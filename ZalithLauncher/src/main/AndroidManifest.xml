@@ -129,7 +129,8 @@
             android:exported="false"
             android:launchMode="standard"
             android:process=":rust"
-            android:screenOrientation="sensorLandscape">
+            android:screenOrientation="sensorLandscape"
+            android:windowSoftInputMode="adjustResize">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="horizon_android" />
