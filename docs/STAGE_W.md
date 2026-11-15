@@ -1,6 +1,6 @@
 # Stage 2 Delivery Report (`docs/STAGE_W.md`) — Task W: All Tests & Checks Run in CI
 
-> **Status**: Implementation Complete (`feat/overnight-stages`); cache-hit `after` wall-clock measured on subsequent non-engine commit push (Stage 3).
+> **Status**: Verified in CI (`Parallel Fast Checks` [`43722497942`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43722497942), [`43729106696`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106696); `CI` [`43722497912`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43722497912) & cache-hit [`43729106715`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106715)).
 
 ---
 
@@ -70,8 +70,16 @@ Every check documented in `docs/*.md`, `scripts/`, or agent rules is mapped belo
   - `engine / engine` (`132825771482`): **`22m 32s`** (`13:23:02Z` -> `13:45:34Z`)
   - `ci` (`132831726156`): **`14m 38s`** (`13:45:37Z` -> `14:00:15Z`)
   - Total end-to-end `CI`: **`37m 13s`**
-- **After `.so` caching (miss vs hit on Stage 2 / Stage 3)**:
-  - Stage 2 push populates `horizon-so-arm64` & `prepare-so-arm64` caches; Stage 3 push (non-engine change) will hit both `.so` caches and record exact `after` wall-clock here.
+- **After `.so` caching — cold miss populating caches** (Stage 2 commit `b3ca46af`, CI run [`43722497912`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43722497912)):
+  - `engine / engine` (`132837295714`): **`36m 38s`** (cold Cargo cache miss rebuilding both `.so`s and saving `horizon-so-arm64-*` & `prepare-so-arm64-*` caches; `horizon-prepare` `56 + 1 + 1 passed`)
+  - `bench-aarch64`: **`1m 22s`**
+  - `ci` (`132847492191`): **`9m 55s`** (`versionCode=27528268`, `horizon-engine-arm64` ID `14165444175`, `signed-apks` ID `14166921670`)
+- **After `.so` caching — cache HIT on non-engine change** (Stage 3 commit `0b6c5305`, CI run [`43729106715`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106715)):
+  - `engine / engine` (`132857396069`): **`3m 17s`** (**`85.4%` faster** than `22m 32s` uncached baseline)
+    - Observed cache logs: `Cache hit: restored prebuilt libhorizon_android.so (52021912 bytes); skipping cargo-ndk rebuild.` and `Cache hit: restored prebuilt libblaze_prepare.so (2877848 bytes); skipping cargo-ndk rebuild.`
+    - `horizon-prepare` (`56 + 1 + 1 passed`), `blaze-prepare` tests (`6 passed`), `examples/preflight.rs` compilation, Python oracle (`ORACLE_MARKERS_OK schema=7 output_version=3`), X2 Mojang host audit (`5149` objects), and release benchmark (`2.28s`) still ran in full.
+  - `bench-aarch64` (`132857396255`): **`1m 27s`** (`1.78s` benchmark run)
+  - `ci` (`132858378479`): **`12m 24s`** (`versionCode=27530606`, `horizon-engine-arm64` ID `14167028992`, `signed-apks` ID `14167928768`)
 
 ---
 
@@ -79,7 +87,7 @@ Every check documented in `docs/*.md`, `scripts/`, or agent rules is mapped belo
 
 ### Workflows Changed
 - `.github/workflows/parallel-checks.yml` (added `bash -n scripts/*.sh`; expected wall-clock: ~`1m` guards, ~`5m–7m` JVM unit tests).
-- `.github/workflows/rust-engine.yml` (added `horizon-prepare` unit tests + strict `.so` caching; expected wall-clock: ~`22m` on `.so` cache miss, expected ~`3m–5m` on `.so` cache hit + `ci` APK assembly ~`14m`).
+- `.github/workflows/rust-engine.yml` (added `horizon-prepare` unit tests + strict `.so` caching; observed wall-clock: `22m 32s`–`36m 38s` on `.so` cache miss, **`3m 17s` observed on `.so` cache hit** in run `43729106715` + `ci` APK assembly `9m 55s`–`14m 38s`).
 - `.github/workflows/nightly.yml` & `.github/workflows/release.yml` (added `./scripts/test_guards.sh` + `bash -n`-ready chmods; expected +`<5s`).
 
 ### Tests Excluded / Unable to Run in CI (with Reasons)

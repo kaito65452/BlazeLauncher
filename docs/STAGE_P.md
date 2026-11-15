@@ -1,6 +1,6 @@
 # Stage 3 Delivery Report (`docs/STAGE_P.md`) — Task P: Real-Data Preflight in CI
 
-> **Status**: Workflow & Preflight Runner Committed; Real-Data Dispatch Execution Pending Push CI & `workflow_dispatch`
+> **Status**: Workflow, Preflight Runner (`examples/preflight.rs`), & Hygiene Guard Check 13 Verified in CI ([`43729106696`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106696), [`43729106715`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106715)); Live `workflow_dispatch` Execution (`P3`, `P5`, `P6`) **BLOCKED** Pending Default-Branch (`main`) Merge
 
 ---
 

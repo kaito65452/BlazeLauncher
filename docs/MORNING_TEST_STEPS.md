@@ -8,8 +8,12 @@
 
 ## 1. Unduh & Pasang APK Rilis Terbaru (Uji Update In-Place)
 
-1. Buka GitHub Actions repositori `kaito65452/BlazeLauncher`, pilih workflow **`CI`** paling atas yang berstatus **hijau (`success`)** pada branch **`feat/overnight-stages`** (untuk kode Stage D terbaru lihat run `43673263364` atau run hijau terbaru setelah dokumentasi).
+1. Buka GitHub Actions repositori `kaito65452/BlazeLauncher`, pilih workflow **`CI`** paling atas yang berstatus **hijau (`success`)** pada branch **`feat/overnight-stages`** (run hijau terbaru setelah Task X/W/P — misalnya run [`43729106715`](https://github.com/kaito65452/BlazeLauncher/actions/runs/43729106715) `versionCode=27530606` atau run lebih baru di atasnya).
 2. Unduh artifact bernama **`signed-apks`**, lalu ekstrak file APK **`BlazeLauncher-*.apk`**.
+   > **Catatan Perbaikan Terbaru (Task X / W / P)**:
+   > - Masalah sebelumnya di APK `27516547` (`Untrusted download host: libraries.minecraft.net`) sudah diperbaiki di Task X (`blaze-prepare/src/download.rs`) bersama refresh hash manifest/asset index 26.3 (`0007-pin-refresh-26.3.patch`). Error yang masih muncul sekarang menampilkan host pelanggar, URL tanpa token/query, daftar host yang diizinkan, dan langkah lanjut.
+   > - Jangan menjalankan `cargo`, `gradle`, atau build berat secara lokal di HP; seluruh kompilasi & unit test berjalan di CI (`Parallel Fast Checks` & `CI`).
+   > - Preflight real-data 26.3 di CI (`preflight-real.yml`) belum bisa di-dispatch di GitHub Actions sampai branch ini di-merge ke `main` (aturan GitHub untuk workflow `workflow_dispatch`), jadi uji instalasi di device tetap menjadi verifikasi akhir di Android `:jvm` `Internal-25`.
 3. Pasang APK langsung menimpa aplikasi Blaze Launcher yang sudah terpasang di **SM-N975F** (**jangan** uninstall terlebih dahulu):
    - **Lulus jika**: Android memasang sebagai pembaruan (update in-place) tanpa error konflik signature atau downgrade `versionCode`, dan seluruh akun/pengaturan lama tetap ada.
 
