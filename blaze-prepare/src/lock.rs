@@ -292,9 +292,10 @@ pub fn validate_version_manifest_with_source(
         .get("assetIndex")
         .and_then(|a| a.get("sha1"))
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("Version JSON ({source_label}) missing assetIndex.sha1"))?;
-    validate_sha1_hex(asset_index_sha1, "manifest assetIndex.sha1")?;
-    if !lock_wrapper.asset_index_accepted(asset_index_sha1) {
+        .ok_or_else(|| format!("Version JSON ({source_label}) missing assetIndex.sha1"))?
+        .to_string();
+    validate_sha1_hex(&asset_index_sha1, "manifest assetIndex.sha1")?;
+    if !lock_wrapper.asset_index_accepted(&asset_index_sha1) {
         return Err(crate::files::redact_sensitive(&format!(
             "Asset index sha1 ({asset_index_sha1}) referenced by {source_label} is not accepted by research-lock.json (accepted: [{}]). Next step: Mojang republished the {} asset index; verify jars still match upstream pins and update accepted_asset_index_sha1 via an explicit lock refresh.",
             lock_wrapper.accepted_asset_index_list_display(),
@@ -305,7 +306,7 @@ pub fn validate_version_manifest_with_source(
         manifest,
         ManifestValidationInfo {
             manifest_sha1: actual_sha1,
-            asset_index_sha1: asset_index_sha1.to_string(),
+            asset_index_sha1,
         },
     ))
 }

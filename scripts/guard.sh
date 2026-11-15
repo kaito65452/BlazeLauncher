@@ -822,11 +822,22 @@ if not added_hashes:
     print(f"ERROR: Patch {patch_path} adds no hashes to accepted lists!", file=sys.stderr)
     sys.exit(1)
 
-# 3. Structural JSON verification when base research-lock.json is available
+# 3. Structural JSON verification against clean submodule HEAD (or base_lock on disk)
 if os.path.isfile(base_lock):
+    orig_text = None
+    lock_dir = os.path.dirname(os.path.abspath(base_lock))
+    lock_name = os.path.basename(base_lock)
+    head_res = subprocess.run(
+        ["git", "-C", lock_dir, "show", f"HEAD:{lock_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if head_res.returncode == 0 and head_res.stdout:
+        orig_text = head_res.stdout
+    else:
+        orig_text = open(base_lock, "r", encoding="utf-8").read()
     with tempfile.TemporaryDirectory() as td:
         target = os.path.join(td, "research-lock.json")
-        orig_text = open(base_lock, "r", encoding="utf-8").read()
         with open(target, "w", encoding="utf-8") as fh:
             fh.write(orig_text)
         res = subprocess.run(
