@@ -170,7 +170,7 @@ jobs:
               assert hr[key] == sha256_file(res_dir / fname), f"{key} mismatch"
           assert isinstance(hr.get("client_sha256"), str) and len(hr["client_sha256"]) == 64
           assert isinstance(hr.get("server_sha256"), str) and len(hr["server_sha256"]) == 64
-          assert isinstance(hr.get("resource_files"), dict)
+          assert isinstance(hr.get("resource_files"), int) and hr["resource_files"] > 0
 
           hp = json.loads((res_dir / "horizon-prepare.json").read_text())
           assert hp == {"output_version": 3}, f"Unexpected horizon-prepare.json: {hp}"
@@ -199,9 +199,9 @@ jobs:
           sup_in = json.loads((dump / "inputs" / "survival-support-tags.json").read_text())
           py_rules = ns["bind_definitions"](cls_in, plc_in, sup_in)
           rs_rules = json.loads((res_dir / "worldgen/blocks/survival-rules.json").read_text())
-          assert list(py_rules.keys()) == list(rs_rules.keys()), "survival-rules key order diverged"
           assert py_rules == rs_rules, "survival-rules content diverged"
-          py_rules_sha = sha256_bytes(json.dumps(py_rules, separators=(",", ":"), ensure_ascii=False).encode())
+          # tools/prepare_output.py canonicalizes JSON with sort_keys=True; serde_json uses BTreeMap sorted keys
+          py_rules_sha = sha256_bytes(json.dumps(py_rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
           rs_rules_sha = sha256_file(res_dir / "worldgen/blocks/survival-rules.json")
           assert py_rules_sha == rs_rules_sha, f"survival-rules sha256 mismatch: {py_rules_sha} vs {rs_rules_sha}"
           print(f"ORACLE_SURVIVAL_OK rules={len(rs_rules)} sha256={rs_rules_sha}")
