@@ -101,6 +101,7 @@ struct PreflightSummary {
 
 struct CliArgs {
     files_dir: PathBuf,
+    game_home: Option<PathBuf>,
     lock_path: PathBuf,
     controls_manifest: PathBuf,
     parity_sources: PathBuf,
@@ -111,6 +112,7 @@ struct CliArgs {
 
 fn parse_args() -> Result<CliArgs, String> {
     let mut files_dir = None;
+    let mut game_home = None;
     let mut lock_path = None;
     let mut controls_manifest = None;
     let mut parity_sources = None;
@@ -128,6 +130,7 @@ fn parse_args() -> Result<CliArgs, String> {
         };
         match key.as_ref() {
             "--files-dir" => files_dir = Some(PathBuf::from(next_val("--files-dir", &mut it)?)),
+            "--game-home" => game_home = Some(PathBuf::from(next_val("--game-home", &mut it)?)),
             "--lock-path" => lock_path = Some(PathBuf::from(next_val("--lock-path", &mut it)?)),
             "--controls-manifest" => {
                 controls_manifest = Some(PathBuf::from(next_val("--controls-manifest", &mut it)?))
@@ -150,6 +153,7 @@ fn parse_args() -> Result<CliArgs, String> {
 
     Ok(CliArgs {
         files_dir: files_dir.ok_or("Missing --files-dir")?,
+        game_home,
         lock_path: lock_path.ok_or("Missing --lock-path")?,
         controls_manifest: controls_manifest.ok_or("Missing --controls-manifest")?,
         parity_sources: parity_sources.ok_or("Missing --parity-sources")?,
@@ -456,10 +460,11 @@ fn run() -> Result<(), String> {
 
     let cfg = PrepareConfig {
         files_dir: args.files_dir.clone(),
-        game_home: None,
+        game_home: args.game_home.clone(),
         lock_path: args.lock_path.clone(),
         controls_manifest_path: args.controls_manifest.clone(),
         parity_sources_dir: Some(args.parity_sources.clone()),
+        bundled_engine_data_zip: None,
         catalog_url: None,
         objects_base_url: None,
         controls_base_url: None,

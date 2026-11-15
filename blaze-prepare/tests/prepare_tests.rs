@@ -12,8 +12,8 @@ use blaze_prepare::lock::{
     LOCAL_REFRESHED_ASSET_INDEX_SHA1, LOCAL_REFRESHED_MANIFEST_SHA1,
 };
 use blaze_prepare::resources::{
-    is_generated_engine_file, is_prepared, package_resources_zip, run_phase1, run_phase2_finalize,
-    PrepareConfig,
+    is_generated_engine_file, is_prepared, package_resources_zip, run_bundled_prepare, run_phase1,
+    run_phase2_finalize, validate_bundled_engine_data_zip, verify_readiness_markers, PrepareConfig,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -491,6 +491,7 @@ fn full_phase1_and_phase2_with_mock_http_and_engine_data_zip_parity() {
         lock_path: lock_path.clone(),
         controls_manifest_path: controls_path.clone(),
         parity_sources_dir: None,
+        bundled_engine_data_zip: None,
         catalog_url: Some(format!("{actual_base}/catalog.json")),
         objects_base_url: Some(actual_base.clone()),
         controls_base_url: Some(format!("{actual_base}/controls")),
@@ -673,6 +674,7 @@ fn zl2_game_home_reuse_avoids_redundant_downloads() {
         lock_path,
         controls_manifest_path: controls_path,
         parity_sources_dir: None,
+        bundled_engine_data_zip: None,
         catalog_url: Some(format!("{base}/catalog.json")),
         objects_base_url: Some(base.clone()),
         controls_base_url: Some(format!("{base}/controls")),
@@ -758,6 +760,7 @@ fn pin_mismatch_and_cancellation_clean_partials() {
         lock_path,
         controls_manifest_path: controls_path,
         parity_sources_dir: None,
+        bundled_engine_data_zip: None,
         catalog_url: Some(format!("{base}/catalog.json")),
         objects_base_url: Some(base.clone()),
         controls_base_url: Some(format!("{base}/controls")),
@@ -913,6 +916,7 @@ fn synthetic_parity_export_for_ci_oracle() {
         lock_path: lock_path.clone(),
         controls_manifest_path: controls_path,
         parity_sources_dir: None,
+        bundled_engine_data_zip: None,
         catalog_url: Some(format!("{actual_base}/catalog.json")),
         objects_base_url: Some(actual_base.clone()),
         controls_base_url: Some(format!("{actual_base}/controls")),
@@ -1508,4 +1512,169 @@ fn task_x4_download_host_allowlist_and_redirect_security_synthetic() {
 
     stop.store(true, Ordering::Relaxed);
     let _ = srv.join();
+}
+
+fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+    let f = fs::File::create(path).unwrap();
+    let mut zw = ZipWriter::new(f);
+    let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    for (name, data) in entries {
+        zw.start_file(*name, opts).unwrap();
+        zw.write_all(data).unwrap();
+    }
+    zw.finish().unwrap();
+}
+
+#[test]
+fn bundled_engine_data_validator_enforces_exact_allowlist() {
+    let dir = TempDir::new("k7-validate");
+    let manifest_ok = br#"{"schema":7,"minecraft":"26.3"}"#;
+    let ok_zip = dir.path().join("ok.zip");
+    write_test_zip(
+        &ok_zip,
+        &[
+            ("horizon-resources.json", manifest_ok),
+            ("facts.json", b"{}"),
+            ("items.json", br#"{"minecraft:stone":{}}"#),
+            ("registries.json", b"{}"),
+            ("commands.json", b"{}"),
+            ("model-states.json", b"{}"),
+            ("cached-collision.nbt", b"nbt"),
+            ("worldgen/block_flags.json", b"[]"),
+            ("worldgen/blocks/survival-rules.json", br#"{"minecraft:stone":{}}"#),
+            ("biome-parameters/overworld.json", b"{}"),
+        ],
+    );
+    let entries = validate_bundled_engine_data_zip(&ok_zip, "26.3").expect("allowlisted bundle passes");
+    assert_eq!(entries.len(), 10);
+
+    // Reject wrong MC version, .jar, .png, .ogg, assets/minecraft tree, extra file, horizon-prepare.json
+    let bad_version_zip = dir.path().join("bad-ver.zip");
+    write_test_zip(
+        &bad_version_zip,
+        &[
+            ("horizon-resources.json", br#"{"schema":7,"minecraft":"26.2"}"#),
+            ("facts.json", b"{}"),
+            ("items.json", b"{}"),
+            ("registries.json", b"{}"),
+            ("commands.json", b"{}"),
+            ("model-states.json", b"{}"),
+            ("cached-collision.nbt", b"nbt"),
+            ("worldgen/block_flags.json", b"[]"),
+        ],
+    );
+    assert!(validate_bundled_engine_data_zip(&bad_version_zip, "26.3").is_err());
+
+    for bad_name in [
+        "extra-unexpected.json",
+        "evil.jar",
+        "dev/horizonlab/parity/Foo.class",
+        "assets/minecraft/textures/block/stone.png",
+        "assets/minecraft/sounds/dig/stone1.ogg",
+        "horizon-prepare.json",
+    ] {
+        let bad_zip = dir.path().join("bad-entry.zip");
+        write_test_zip(
+            &bad_zip,
+            &[
+                ("horizon-resources.json", manifest_ok),
+                ("facts.json", b"{}"),
+                ("items.json", b"{}"),
+                ("registries.json", b"{}"),
+                ("commands.json", b"{}"),
+                ("model-states.json", b"{}"),
+                ("cached-collision.nbt", b"nbt"),
+                ("worldgen/block_flags.json", b"[]"),
+                (bad_name, b"x"),
+            ],
+        );
+        let err = validate_bundled_engine_data_zip(&bad_zip, "26.3")
+            .err()
+            .unwrap_or_else(|| panic!("Expected error for forbidden entry {bad_name}"));
+        assert!(err.contains("Forbidden entry"), "bad_name={bad_name} err={err}");
+    }
+}
+
+#[test]
+fn bundled_prepare_end_to_end_skips_server_and_stamps_all_markers() {
+    let dir = TempDir::new("k7-e2e");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    drop(listener);
+
+    let world = make_synthetic_world(&base);
+    let mut routes = HashMap::new();
+    routes.insert("/catalog.json".to_string(), br#"{"versions":[]}"#.to_vec());
+    routes.insert("/manifest.json".to_string(), world.manifest_bytes.clone());
+    routes.insert("/client.jar".to_string(), world.client_jar.clone());
+    routes.insert("/34.json".to_string(), world.asset_index_bytes.clone());
+    routes.insert(
+        format!("/{}/{}", &world.obj_sound_sha1[..2], world.obj_sound_sha1),
+        world.obj_sound.clone(),
+    );
+    routes.insert(
+        format!("/{}/{}", &world.obj_pano_sha1[..2], world.obj_pano_sha1),
+        world.obj_pano.clone(),
+    );
+    routes.insert(
+        "/controls/resource_pack/textures/gui/controls/jump.png".to_string(),
+        world.control_png.clone(),
+    );
+    // Intentionally omit /server.jar and /client-lib.jar so any fetch would 404 & fail.
+    let srv = MockHttp::start_at(addr, routes);
+
+    let lock_path = dir.path().join("research-lock.json");
+    let controls_path = dir.path().join("bedrock-controls.json");
+    let bundled_zip = dir.path().join("bundled-engine-data.zip");
+    fs::write(&lock_path, &world.lock_json).unwrap();
+    fs::write(&controls_path, &world.controls_json).unwrap();
+    write_test_zip(
+        &bundled_zip,
+        &[
+            ("horizon-resources.json", br#"{"schema":7,"minecraft":"26.3"}"#),
+            ("facts.json", br#"{"states":[["minecraft:air",0,0]]}"#),
+            ("items.json", br#"{"minecraft:stone":{},"minecraft:dirt":{}}"#),
+            ("registries.json", b"{}"),
+            ("commands.json", b"{}"),
+            ("model-states.json", b"{}"),
+            ("cached-collision.nbt", b"nbt"),
+            ("worldgen/block_flags.json", b"[[0,0]]"),
+            ("worldgen/blocks/survival-rules.json", br#"{"minecraft:stone":{}}"#),
+        ],
+    );
+
+    let files_dir = dir.path().join("files");
+    fs::create_dir_all(&files_dir).unwrap();
+    let cfg = PrepareConfig {
+        files_dir: files_dir.clone(),
+        game_home: None,
+        lock_path,
+        controls_manifest_path: controls_path,
+        parity_sources_dir: None,
+        bundled_engine_data_zip: Some(bundled_zip),
+        catalog_url: Some(format!("{}/catalog.json", srv.base_url)),
+        objects_base_url: Some(srv.base_url.clone()),
+        controls_base_url: Some(format!("{}/controls", srv.base_url)),
+        allow_loopback: true,
+        download_workers: 2,
+    };
+
+    let out = run_bundled_prepare(&cfg, &CancelFlag::new(), &|_, _, _| {})
+        .expect("run_bundled_prepare succeeds without server.jar or libs");
+    assert!(is_prepared(&files_dir, "26.3"));
+    let target = PathBuf::from(&out.target_resources_dir);
+    verify_readiness_markers(&target, "26.3").expect("all readiness markers valid");
+    assert!(files_dir.join("engine-data.zip").is_file());
+    assert!(target.join("block-tags.json").is_file());
+    assert!(target.join("damage-types.json").is_file());
+    assert!(target.join("damage-tags.json").is_file());
+    assert!(target.join("worldgen/noises.json").is_file());
+    assert!(target.join("worldgen/structure/minecraft/village/test.nbt").is_file());
+    assert_eq!(out.items_count, 2);
+    assert_eq!(out.survival_rules_count, 1);
+
+    let hits = srv.hits.lock().unwrap();
+    assert!(!hits.iter().any(|p| p == "/server.jar"), "server.jar must never be fetched: {hits:?}");
+    assert!(!hits.iter().any(|p| p == "/client-lib.jar"), "client libraries must never be fetched: {hits:?}");
 }

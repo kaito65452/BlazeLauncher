@@ -1416,7 +1416,9 @@
     <string name="developer_copy_report">Salin laporan</string>
     <string name="developer_copy_report_summary">Salin laporan kapabilitas perangkat dan diagnostik :rust</string>
     <string name="developer_prepare_title">Siapkan data engine (spike)</string>
-    <string name="developer_prepare_summary">Siapkan data engine 26.3 langsung di perangkat dari unduhan Mojang</string>
+    <string name="developer_prepare_summary">Siapkan data engine 26.3 dari berkas game Mojang</string>
+    <string name="developer_prepare_summary_bundled">Instalasi cepat dari engine-data.zip bawaan APK + aset klien Mojang (tanpa javac/datagen di perangkat)</string>
+    <string name="developer_prepare_summary_slow">Jalur lambat/eksperimental javac + datagen di perangkat (engine-data.zip bawaan tidak tersedia)</string>
     <string name="developer_prepare_ready">Data engine 26.3 siap</string>
     <string name="developer_prepare_cancelled">Persiapan dibatalkan</string>
     <string name="developer_prepare_failed">Persiapan gagal</string>
@@ -1431,4 +1433,6 @@
     <string name="rust_microsoft_account_required">Rust Edition memerlukan akun Microsoft yang terverifikasi.</string>
     <string name="download_game_install_rust_engine_data">Menyiapkan data engine Rust Edition %s</string>
     <string name="rust_engine_data_preparing">Menyiapkan data engine Rust Edition</string>
+    <string name="rust_engine_data_preparing_bundled">Membuka paket tabel engine Rust Edition bawaan (tanpa javac)</string>
+    <string name="rust_engine_data_preparing_slow">Menyiapkan data engine Rust Edition di perangkat (jalur lambat/eksperimental javac + datagen)</string>
 </resources>

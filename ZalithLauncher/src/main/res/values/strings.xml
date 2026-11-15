@@ -1486,7 +1486,9 @@
     <string name="developer_copy_report">Copy report</string>
     <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
     <string name="developer_prepare_title">Prepare engine data (spike)</string>
-    <string name="developer_prepare_summary">Prepare 26.3 engine data on-device using downloaded Mojang files</string>
+    <string name="developer_prepare_summary">Prepare 26.3 engine data from Mojang game files</string>
+    <string name="developer_prepare_summary_bundled">Fast install from APK-bundled engine-data.zip + Mojang client assets (no on-device javac/datagen)</string>
+    <string name="developer_prepare_summary_slow">Slow/experimental on-device javac + datagen fallback (bundled engine-data.zip absent)</string>
     <string name="developer_prepare_ready">26.3 engine data ready</string>
     <string name="developer_prepare_cancelled">Preparation cancelled</string>
     <string name="developer_prepare_failed">Preparation failed</string>
@@ -1501,4 +1503,6 @@
     <string name="rust_microsoft_account_required">Rust Edition requires a verified Microsoft account.</string>
     <string name="download_game_install_rust_engine_data">Preparing %s Rust Edition engine data</string>
     <string name="rust_engine_data_preparing">Preparing Rust Edition engine data</string>
+    <string name="rust_engine_data_preparing_bundled">Unpacking bundled Rust Edition engine tables (no javac)</string>
+    <string name="rust_engine_data_preparing_slow">Preparing Rust Edition engine data on-device (slow/experimental javac + datagen)</string>
 </resources>

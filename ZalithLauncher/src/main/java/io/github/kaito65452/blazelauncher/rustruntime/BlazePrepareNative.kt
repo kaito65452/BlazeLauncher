@@ -31,6 +31,7 @@ data class PrepareConfigJson(
     @SerializedName("lock_path") val lockPath: String,
     @SerializedName("controls_manifest_path") val controlsManifestPath: String,
     @SerializedName("parity_sources_dir") val paritySourcesDir: String? = null,
+    @SerializedName("bundled_engine_data_zip") val bundledEngineDataZip: String? = null,
     @SerializedName("catalog_url") val catalogUrl: String? = null,
     @SerializedName("objects_base_url") val objectsBaseUrl: String? = null,
     @SerializedName("controls_base_url") val controlsBaseUrl: String? = null,
@@ -160,6 +161,7 @@ object BlazePrepareNative {
 
     @JvmStatic external fun nativePreparePhase1(configJson: String): String
     @JvmStatic external fun nativePreparePhase2(configJson: String): String
+    @JvmStatic external fun nativePrepareFromBundledZip(configJson: String): String
     @JvmStatic external fun nativeRequestCancel()
     @JvmStatic external fun nativeResetCancel()
     @JvmStatic external fun nativeGetProgressJson(): String

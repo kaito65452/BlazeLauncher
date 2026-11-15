@@ -17,6 +17,8 @@ permissions:
 jobs:
   engine:
     uses: ./.github/workflows/rust-engine.yml
+    with:
+      bundle_engine_data: ${{ vars.BUNDLE_ENGINE_DATA == 'true' }}
 
   ci:
     needs: engine
@@ -69,6 +71,31 @@ jobs:
             ls -lh "$SO_PATH"
             echo "$SO_PATH bytes: $(stat -c%s "$SO_PATH")"
           done
+
+      - name: Download Host Bundle Tools (K1/K2/K6)
+        if: vars.BUNDLE_ENGINE_DATA == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-host-tools
+          path: .local/ci-host-tools
+
+      - name: Set up JDK 25 (Engine Data Prepare)
+        if: vars.BUNDLE_ENGINE_DATA == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "25"
+
+      - name: Build & Reconcile Bundled assets/engine-data.zip (K1/K2)
+        if: vars.BUNDLE_ENGINE_DATA == 'true'
+        run: |
+          chmod +x .local/ci-host-tools/horizon-prepare .local/ci-host-tools/blaze-prepare-preflight
+          python3 scripts/ci_bundle_engine_data.py \
+            --horizon-prepare .local/ci-host-tools/horizon-prepare \
+            --blaze-preflight .local/ci-host-tools/blaze-prepare-preflight \
+            --java-home "$JAVA_HOME" \
+            --work-dir "$RUNNER_TEMP/blaze-bundle-work" \
+            --out-asset ZalithLauncher/src/main/assets/engine-data.zip
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -144,6 +171,8 @@ jobs:
 
       - name: Verify APK License Hygiene and Non-Debuggable Release
         if: steps.oauth_check.outputs.has_client_id == 'true'
+        env:
+          BUNDLE_ENGINE_DATA: ${{ vars.BUNDLE_ENGINE_DATA || 'false' }}
         run: |
           APK_LIST=$(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | sort)
           if [ -z "$APK_LIST" ]; then
@@ -304,4 +333,14 @@ jobs:
         with:
           name: signed-apks
           path: ZalithLauncher/build/outputs/apk/release/*.apk
+          retention-days: 3
           if-no-files-found: error
+
+      - name: Clean Transient Runner Data (K1/K2)
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/blaze-bundle-work" \
+                 "engine/starling/.local" \
+                 ".local/ci-host-tools" \
+                 "ZalithLauncher/src/main/assets/engine-data.zip"
+          echo "✓ Cleaned transient runner downloads and staged engine-data bundle."

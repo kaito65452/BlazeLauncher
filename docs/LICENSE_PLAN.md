@@ -128,3 +128,16 @@ When Option 1 fonts are packaged in `ZalithLauncher/src/main/assets/fonts/`:
 ## 5. Summary Verdict (Technical Screening, Not Legal Advice)
 - **Raw `starling/android` (`fa548eb7ab`) + `feat/blaze-ui`**: **NO** (unremediated OFL font embedding + Mojang assets/unclear voicechat icons).
 - **Remediated `starling/android` (`fa548eb7ab`) + `BlazeNativeBridge` JNI source only + Option 1 unbundled fonts + CI guard + `assets/THIRD_PARTY_NOTICES.md`**: **READY TO PROCEED TO IMPLEMENTATION ON USER GO-AHEAD** (once the remediation edits to `horizon-theme` / `ui_theme.rs` and the minimal `BlazeNativeBridge` import are applied under `engine/starling/` in Phase A.2+).
+
+---
+
+## 6. Task K Decision Record: Optional CI-Bundled `assets/engine-data.zip` *(Technical Screening, Not Legal Advice)*
+
+- **Baseline rule (`BUNDLE_ENGINE_DATA` unset or `false`)**: Zero Mojang files or generated engine tables enter git, the APK, or CI artifacts; tables are prepared on-device by `blaze-prepare` + `:jvm`.
+- **Task K exception (`BUNDLE_ENGINE_DATA=true`, gated by GitHub repository variable + K4 Check 11)**:
+  - Mirrors upstream Starling's public release approach (`engine/starling/tools/android_prepare.py:117-164`, `engine/starling/tools/android_build.py:49-93`, `.github/workflows/android-dev.yml:105-115`).
+  - Transiently downloads pinned Mojang `26.3` inputs on the CI runner (strictly checked against `ALLOWED_DOWNLOAD_HOSTS` and `research-lock.json` SHA-1 pins, never cached or uploaded, deleted in `if: always()`), runs upstream `horizon-prepare` (desktop JDK 25), and packages ONLY the exact allowlisted generated `.json`/`.nbt` tables from `tools/android_build.py:generated_engine_file` into `assets/engine-data.zip`.
+  - Contains **zero** `.class`, `.jar`, `.png`, `.ogg`, `assets/minecraft/**`, `data/**`, wallpapers, skins, or voicechat assets. Raw client/server JARs and Mojang assets continue to be fetched/verified on-device from official Mojang hosts at install/launch time.
+- **Residual copyright / redistribution risk *(technical screening, not legal advice)***:
+  - The bundled files are generated tables produced by Starling/Mojang exporters from Mojang `26.3` vanilla game code (items, entity models, block collision/occlusion NBT, biome parameters, facts, etc.). Whether those functional compatibility tables constitute independently distributable facts/schemas or derivative data subject to Mojang EULA/copyright restrictions remains open in [`docs/UPSTREAM_QUESTION.md`](UPSTREAM_QUESTION.md) items **(a)** and **(d)**.
+  - **Project owner decision**: The repository owner (`kaito65452`) explicitly reviewed this trade-off because on-device `javac` compilation of the 26 exporters hung/stalled on physical ARM64 Android hardware (`SM-N975F`), chose to follow upstream Starling's public APK model for Task K (`BUNDLE_ENGINE_DATA=true`), and accepted responsibility for distributing generated APK builds under that configuration. Reversible cleanly at any time via `gh variable set BUNDLE_ENGINE_DATA --body "false"`.

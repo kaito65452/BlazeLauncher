@@ -134,5 +134,8 @@ jobs:
 
       - name: Upload Signed APKs to Nightly Release
         run: |
+          for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | sort); do
+            ./scripts/guard.sh --check-release-upload "$apk"
+          done
           echo "Uploading release APKs to nightly release..."
           gh release upload nightly ZalithLauncher/build/outputs/apk/release/*.apk --clobber

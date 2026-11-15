@@ -5,7 +5,9 @@
 //! JNI exports for `io.github.kaito65452.blazelauncher.rustruntime.BlazePrepareNative`.
 
 use crate::files::{peak_rss_kb, CancelFlag};
-use crate::resources::{is_prepared, run_phase1, run_phase2_finalize, PrepareConfig};
+use crate::resources::{
+    is_prepared, run_bundled_prepare, run_phase1, run_phase2_finalize, PrepareConfig,
+};
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
@@ -53,12 +55,10 @@ fn make_jstring(env: &mut JNIEnv, text: &str) -> jstring {
     }
 }
 
-/// Starts Phase 1 preparation from a JSON-encoded `PrepareConfig` and returns a JSON result envelope.
-#[no_mangle]
-pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_BlazePrepareNative_nativePreparePhase1(
+fn run_prepare_op<T: serde::Serialize>(
     mut env: JNIEnv,
-    _class: JClass,
     config_json: JString,
+    op: impl FnOnce(&PrepareConfig) -> Result<T, String>,
 ) -> jstring {
     let raw: String = match env.get_string(&config_json) {
         Ok(s) => s.into(),
@@ -69,10 +69,7 @@ pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_Blaze
         Err(e) => return make_jstring(&mut env, &json_err(&format!("Invalid PrepareConfig JSON: {e}"))),
     };
 
-    let res = run_phase1(&cfg, cancel_flag(), &|phase, done, total| {
-        set_progress(phase, done, total);
-    });
-    let out = match res {
+    let out = match op(&cfg) {
         Ok(ok) => match serde_json::to_value(ok) {
             Ok(v) => json_ok(v),
             Err(e) => json_err(&e.to_string()),
@@ -82,33 +79,46 @@ pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_Blaze
     make_jstring(&mut env, &out)
 }
 
-/// Runs Phase 2 post-Java assembly + `engine-data.zip` packaging + atomic activation.
+/// Starts Phase 1 preparation from a JSON-encoded `PrepareConfig` and returns a JSON result envelope.
 #[no_mangle]
-pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_BlazePrepareNative_nativePreparePhase2(
-    mut env: JNIEnv,
+pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_BlazePrepareNative_nativePreparePhase1(
+    env: JNIEnv,
     _class: JClass,
     config_json: JString,
 ) -> jstring {
-    let raw: String = match env.get_string(&config_json) {
-        Ok(s) => s.into(),
-        Err(e) => return make_jstring(&mut env, &json_err(&format!("Invalid config string: {e}"))),
-    };
-    let cfg: PrepareConfig = match serde_json::from_str(&raw) {
-        Ok(c) => c,
-        Err(e) => return make_jstring(&mut env, &json_err(&format!("Invalid PrepareConfig JSON: {e}"))),
-    };
+    run_prepare_op(env, config_json, |cfg| {
+        run_phase1(cfg, cancel_flag(), &|phase, done, total| {
+            set_progress(phase, done, total);
+        })
+    })
+}
 
-    let res = run_phase2_finalize(&cfg, cancel_flag(), &|phase, done, total| {
-        set_progress(phase, done, total);
-    });
-    let out = match res {
-        Ok(ok) => match serde_json::to_value(ok) {
-            Ok(v) => json_ok(v),
-            Err(e) => json_err(&e.to_string()),
-        },
-        Err(e) => json_err(&e),
-    };
-    make_jstring(&mut env, &out)
+/// Runs Phase 2 post-Java assembly + `engine-data.zip` packaging + atomic activation.
+#[no_mangle]
+pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_BlazePrepareNative_nativePreparePhase2(
+    env: JNIEnv,
+    _class: JClass,
+    config_json: JString,
+) -> jstring {
+    run_prepare_op(env, config_json, |cfg| {
+        run_phase2_finalize(cfg, cancel_flag(), &|phase, done, total| {
+            set_progress(phase, done, total);
+        })
+    })
+}
+
+/// Runs fast-path preparation from an APK-bundled `engine-data.zip` (skips javac/datagen/server.jar).
+#[no_mangle]
+pub extern "system" fn Java_io_github_kaito65452_blazelauncher_rustruntime_BlazePrepareNative_nativePrepareFromBundledZip(
+    env: JNIEnv,
+    _class: JClass,
+    config_json: JString,
+) -> jstring {
+    run_prepare_op(env, config_json, |cfg| {
+        run_bundled_prepare(cfg, cancel_flag(), &|phase, done, total| {
+            set_progress(phase, done, total);
+        })
+    })
 }
 
 #[no_mangle]

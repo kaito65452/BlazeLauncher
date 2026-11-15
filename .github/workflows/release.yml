@@ -85,6 +85,10 @@ jobs:
 
       - name: Publish GitHub Release
         run: |
+          for apk in $(find ZalithLauncher/build/outputs/apk/release -name "*.apk" | sort); do
+            ./scripts/guard.sh --check-release-apk "$apk"
+            ./scripts/guard.sh --check-release-upload "$apk"
+          done
           TAG="${GITHUB_REF_NAME:-v2.6.0}"
           gh release create "$TAG" \
             ZalithLauncher/build/outputs/apk/release/*.apk \

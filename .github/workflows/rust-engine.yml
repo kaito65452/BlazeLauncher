@@ -2,6 +2,11 @@ name: Rust Engine
 
 on:
   workflow_call:
+    inputs:
+      bundle_engine_data:
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
 
 permissions:
@@ -473,6 +478,34 @@ jobs:
           path: |
             ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
             ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
+          if-no-files-found: error
+
+      - name: Cache Host Bundle Tools (K6)
+        id: cache-host-tools
+        if: inputs.bundle_engine_data == true
+        uses: actions/cache@v4
+        with:
+          path: .local/ci-host-tools
+          key: ${{ runner.os }}-ci-host-tools-${{ steps.submodule.outputs.sha }}-${{ hashFiles('engine/patches/*.patch', 'engine/starling/Cargo.lock', 'engine/starling/crates/horizon-prepare/**', 'blaze-prepare/Cargo.toml', 'blaze-prepare/Cargo.lock', 'blaze-prepare/src/**', 'blaze-prepare/examples/**') }}
+
+      - name: Build Host Desktop Tools (horizon-prepare + preflight)
+        if: inputs.bundle_engine_data == true && (steps.cache-host-tools.outputs.cache-hit != 'true')
+        run: |
+          cargo build --locked --release --manifest-path engine/starling/Cargo.toml -p horizon-prepare
+          cargo build --locked --release --manifest-path blaze-prepare/Cargo.toml --example preflight
+          mkdir -p .local/ci-host-tools
+          cp engine/starling/target/release/horizon-prepare .local/ci-host-tools/horizon-prepare
+          cp blaze-prepare/target/release/examples/preflight .local/ci-host-tools/blaze-prepare-preflight
+          chmod +x .local/ci-host-tools/horizon-prepare .local/ci-host-tools/blaze-prepare-preflight
+
+      - name: Upload Host Bundle Tools Artifact
+        if: inputs.bundle_engine_data == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-host-tools
+          path: |
+            .local/ci-host-tools/horizon-prepare
+            .local/ci-host-tools/blaze-prepare-preflight
           if-no-files-found: error
 
   bench-aarch64:

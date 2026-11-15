@@ -535,6 +535,80 @@ expect_fail "Check 11 APK check rejects .py bundled into APK assets" "disallowed
     bash scripts/guard.sh --check-apk "$BAD_APK_PY"
 
 echo ""
+echo "=== 7b. K4 Bundled engine-data.zip Check 11 Self-Tests ==="
+
+make_k4_apk() {
+    local out_apk="$1"
+    local asset_path="$2"
+    local extra_entry="${3:-}"
+    python3 - "$SYNTH_NEG_BASE" "$out_apk" "$asset_path" "$extra_entry" <<'PY'
+import io, sys, zipfile
+src, dst, asset_path, extra_entry = sys.argv[1:5]
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w", compression=zipfile.ZIP_DEFLATED) as nz:
+    nz.writestr("horizon-resources.json", b'{"schema":7,"minecraft":"26.3"}')
+    nz.writestr("facts.json", b"{}")
+    nz.writestr("items.json", b"{}")
+    nz.writestr("registries.json", b"{}")
+    nz.writestr("commands.json", b"{}")
+    nz.writestr("model-states.json", b"{}")
+    nz.writestr("cached-collision.nbt", b"nbt")
+    nz.writestr("worldgen/block_flags.json", b"[]")
+    if extra_entry:
+        nz.writestr(extra_entry, b"bad")
+with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w", compression=zipfile.ZIP_STORED) as zout:
+    for item in zin.infolist():
+        zout.writestr(item.filename, zin.read(item.filename))
+    zout.writestr(asset_path, inner.getvalue())
+PY
+}
+
+K4_BUNDLE_DOC="$TMP_ROOT/ENGINE_DATA_BUNDLE.md"
+printf '# test placeholder doc\n' > "$K4_BUNDLE_DOC"
+
+K4_OK_APK="$TMP_ROOT/k4_ok.apk"
+make_k4_apk "$K4_OK_APK" "assets/engine-data.zip" ""
+expect_pass "K4 Check 11 accepts valid allowlisted assets/engine-data.zip when BUNDLE_ENGINE_DATA=true" \
+    env BUNDLE_ENGINE_DATA=true GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_OK_APK"
+
+# K4 negative 1: extra non-allowlisted file inside engine-data.zip
+K4_BAD_EXTRA="$TMP_ROOT/k4_bad_extra.apk"
+make_k4_apk "$K4_BAD_EXTRA" "assets/engine-data.zip" "extra-unknown-table.json"
+expect_fail "K4 Check 11 (1) rejects extra file inside assets/engine-data.zip" "Disallowed entry inside assets/engine-data.zip: extra-unknown-table.json" \
+    env BUNDLE_ENGINE_DATA=true GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_BAD_EXTRA"
+
+# K4 negative 2: .jar inside engine-data.zip
+K4_BAD_JAR="$TMP_ROOT/k4_bad_jar.apk"
+make_k4_apk "$K4_BAD_JAR" "assets/engine-data.zip" "client.jar"
+expect_fail "K4 Check 11 (2) rejects .jar inside assets/engine-data.zip" "Disallowed entry inside assets/engine-data.zip: client.jar" \
+    env BUNDLE_ENGINE_DATA=true GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_BAD_JAR"
+
+# K4 negative 3: texture/sound (.png / .ogg) inside engine-data.zip
+K4_BAD_PNG="$TMP_ROOT/k4_bad_png.apk"
+make_k4_apk "$K4_BAD_PNG" "assets/engine-data.zip" "assets/minecraft/textures/block/stone.png"
+expect_fail "K4 Check 11 (3) rejects texture/sound inside assets/engine-data.zip" "Disallowed entry inside assets/engine-data.zip" \
+    env BUNDLE_ENGINE_DATA=true GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_BAD_PNG"
+
+# K4 negative 4: renamed or relocated asset tree
+K4_BAD_RENAMED="$TMP_ROOT/k4_bad_renamed.apk"
+make_k4_apk "$K4_BAD_RENAMED" "assets/other/engine-data.zip" ""
+expect_fail "K4 Check 11 (4) rejects relocated assets/other/engine-data.zip" "disallowed asset entries" \
+    env BUNDLE_ENGINE_DATA=true GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_BAD_RENAMED"
+
+# K4 negative 5: BUNDLE_ENGINE_DATA off with assets/engine-data.zip present
+expect_fail "K4 Check 11 (5) rejects assets/engine-data.zip when BUNDLE_ENGINE_DATA != true" "BUNDLE_ENGINE_DATA != 'true'" \
+    env BUNDLE_ENGINE_DATA=false GUARD_ENGINE_DATA_DOC_PATH="$K4_BUNDLE_DOC" bash scripts/guard.sh --check-apk "$K4_OK_APK"
+
+# K4 negative 6: git-tracked engine-data.zip committed in repo
+K4_BAD_GIT="$TMP_ROOT/k4_bad_git_repo"
+mkdir -p "$K4_BAD_GIT/subdir"
+git -C "$K4_BAD_GIT" init -q
+touch "$K4_BAD_GIT/subdir/engine-data.zip"
+git -C "$K4_BAD_GIT" add subdir/engine-data.zip
+expect_fail "K4 Check 11 (6) rejects git-tracked engine-data.zip" "forbidden git-tracked engine-data zip" \
+    env GUARD_CHECK11_ONLY_DIR="$K4_BAD_GIT" bash scripts/guard.sh
+
+echo ""
 echo "=== 8. Check 12 Self-Tests (0007 local pin refresh patch scope guard) ==="
 
 if [ -f "engine/patches/0007-pin-refresh-26.3.patch" ]; then
@@ -639,6 +713,64 @@ open(sys.argv[2], "w").write(s)
 PY
 expect_fail "Preflight hygiene check rejects actions/cache in preflight-real.yml" "Forbidden 'actions/cache'" \
     bash scripts/check_preflight_workflow.sh "$BAD_PREFLIGHT_CACHE"
+
+echo ""
+echo "=== 11. K8 Nightly/Release/CI Bundle Isolation Self-Tests ==="
+
+expect_pass "Check 14 accepts repo .github/workflows" \
+    env GUARD_CHECK14_ONLY_DIR=".github/workflows" bash scripts/guard.sh
+
+K8_WF_NIGHTLY_VAR="$TMP_ROOT/k8_wf_nightly_var"
+cp -a ".github/workflows" "$K8_WF_NIGHTLY_VAR"
+printf '\n# %s\n' "BUNDLE_ENGINE_DATA" >> "$K8_WF_NIGHTLY_VAR/nightly.yml"
+expect_fail "Check 14 rejects nightly.yml referencing BUNDLE_ENGINE_DATA" "nightly/release workflow must never reference" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_NIGHTLY_VAR" bash scripts/guard.sh
+
+K8_WF_RELEASE_VAR="$TMP_ROOT/k8_wf_release_var"
+cp -a ".github/workflows" "$K8_WF_RELEASE_VAR"
+printf '\n      env:\n        FLAG: ${{ vars.BUNDLE_ENGINE_DATA }}\n' >> "$K8_WF_RELEASE_VAR/release.yml"
+expect_fail "Check 14 rejects release.yml referencing BUNDLE_ENGINE_DATA" "nightly/release workflow must never reference" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_RELEASE_VAR" bash scripts/guard.sh
+
+K8_WF_NIGHTLY_MOJANG="$TMP_ROOT/k8_wf_nightly_mojang"
+cp -a ".github/workflows" "$K8_WF_NIGHTLY_MOJANG"
+printf '\n# curl https://piston-meta.mojang.com/mc/game/version_manifest_v2.json\n' >> "$K8_WF_NIGHTLY_MOJANG/nightly.yml"
+expect_fail "Check 14 rejects nightly.yml referencing Mojang download host" "nightly/release workflow must never reference" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_NIGHTLY_MOJANG" bash scripts/guard.sh
+
+K8_WF_RELEASE_MOJANG="$TMP_ROOT/k8_wf_release_mojang"
+cp -a ".github/workflows" "$K8_WF_RELEASE_MOJANG"
+printf '\n# https://resources.download.minecraft.net/00/0000\n' >> "$K8_WF_RELEASE_MOJANG/release.yml"
+expect_fail "Check 14 rejects release.yml referencing Mojang resources host" "nightly/release workflow must never reference" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_RELEASE_MOJANG" bash scripts/guard.sh
+
+K8_WF_NO_UPLOAD_GUARD="$TMP_ROOT/k8_wf_no_upload_guard"
+cp -a ".github/workflows" "$K8_WF_NO_UPLOAD_GUARD"
+python3 - "$K8_WF_NO_UPLOAD_GUARD/release.yml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("--check-release-upload", "--check-release-apk")
+open(p, "w").write(s)
+PY
+expect_fail "Check 14 rejects release upload workflow missing --check-release-upload" "must run scripts/guard.sh --check-release-upload" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_NO_UPLOAD_GUARD" bash scripts/guard.sh
+
+K8_WF_NO_RETENTION="$TMP_ROOT/k8_wf_no_retention"
+cp -a ".github/workflows" "$K8_WF_NO_RETENTION"
+python3 - "$K8_WF_NO_RETENTION/ci.yml" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read().replace("retention-days: 3", "retention-days: 30")
+open(p, "w").write(s)
+PY
+expect_fail "Check 14 rejects ci.yml signed-apks without retention-days: 3" "must specify retention-days: 3" \
+    env GUARD_CHECK14_ONLY_DIR="$K8_WF_NO_RETENTION" bash scripts/guard.sh
+
+expect_fail "Check 14 --check-release-upload rejects APK built with assets/engine-data.zip even if BUNDLE_ENGINE_DATA=true" "GitHub Release upload forbids APK built with assets/engine-data.zip" \
+    env BUNDLE_ENGINE_DATA=true bash scripts/guard.sh --check-release-upload "$K4_OK_APK"
+
+expect_pass "Check 14 --check-release-upload accepts clean release APK without bundle even if BUNDLE_ENGINE_DATA=true" \
+    env BUNDLE_ENGINE_DATA=true bash scripts/guard.sh --check-release-upload "$REL_FALSE_APK"
 
 echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="

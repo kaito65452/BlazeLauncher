@@ -44,3 +44,5 @@ ZalithLauncher/src/main/jniLibs/arm64-v8a/libblaze_prepare.so
 engine/starling/target/
 blaze-prepare/target/
 debug-apks/
+ZalithLauncher/src/main/assets/engine-data.zip
+.local/ci-host-tools/

@@ -635,4 +635,106 @@ class EngineDataPrepareTest {
             root.deleteRecursively()
         }
     }
+
+    private fun buildZipFile(dest: File, entries: Map<String, ByteArray>) {
+        ZipOutputStream(BufferedOutputStream(FileOutputStream(dest))).use { zos ->
+            entries.forEach { (name, payload) ->
+                zos.putNextEntry(ZipEntry(name))
+                zos.write(payload)
+                zos.closeEntry()
+            }
+        }
+    }
+
+    @Test
+    fun bundledEngineDataLayoutValidatorAcceptsAllowlistedAndRejectsForbiddenEntries() {
+        val root = Files.createTempDirectory("blaze-k7-bundle-layout").toFile()
+        try {
+            val baseEntries = linkedMapOf(
+                "horizon-resources.json" to """{"schema":7,"minecraft":"26.3"}""".toByteArray(),
+                "facts.json" to "{}".toByteArray(),
+                "items.json" to """{"minecraft:stone":{}}""".toByteArray(),
+                "registries.json" to "{}".toByteArray(),
+                "commands.json" to "{}".toByteArray(),
+                "model-states.json" to "{}".toByteArray(),
+                "cached-collision.nbt" to "nbt".toByteArray(),
+                "worldgen/block_flags.json" to "[]".toByteArray(),
+                "worldgen/blocks/survival-rules.json" to "{}".toByteArray(),
+                "biome-parameters/overworld.json" to "{}".toByteArray()
+            )
+            val okZip = File(root, "engine-data-ok.zip")
+            buildZipFile(okZip, baseEntries)
+            val validated = EngineDataPrepareSupport.validateBundledEngineDataZipFile(okZip, "26.3")
+            assertEquals(10, validated.size)
+
+            for (forbidden in listOf(
+                "evil.jar",
+                "dev/horizonlab/parity/Foo.class",
+                "assets/minecraft/textures/stone.png",
+                "assets/minecraft/sounds/dig.ogg",
+                "extra-file.json",
+                "horizon-prepare.json",
+                "../escape.json"
+            )) {
+                val badZip = File(root, "bad-${forbidden.replace('/', '_')}.zip")
+                val badMap = LinkedHashMap(baseEntries)
+                badMap[forbidden] = "bad".toByteArray()
+                buildZipFile(badZip, badMap)
+                try {
+                    EngineDataPrepareSupport.validateBundledEngineDataZipFile(badZip, "26.3")
+                    fail("Expected rejection for forbidden entry $forbidden")
+                } catch (expected: IllegalArgumentException) {
+                    assertTrue(expected.message.orEmpty().contains("Forbidden entry"))
+                }
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun installModeChooserAndDispatchNeverInvokeJavacWhenBundledAssetPresent() = runBlocking {
+        assertEquals(
+            EngineDataInstallMode.BUNDLED_ASSET,
+            EngineDataPrepareSupport.chooseInstallMode(hasBundledEngineData = true)
+        )
+        assertEquals(
+            EngineDataInstallMode.ON_DEVICE_SLOW_FALLBACK,
+            EngineDataPrepareSupport.chooseInstallMode(hasBundledEngineData = false)
+        )
+
+        val bundledCalls = AtomicInteger(0)
+        val javacCalls = AtomicInteger(0)
+        val (modeBundled, outBundled) = EngineDataPrepareSupport.executePreparationDispatch(
+            hasBundledEngineData = true,
+            runBundledFastPath = {
+                bundledCalls.incrementAndGet()
+                Phase2OutputJson(engineDataEntries = 32L, itemsCount = 1400L)
+            },
+            runSlowOnDeviceFallback = {
+                javacCalls.incrementAndGet()
+                Phase2OutputJson(engineDataEntries = 999L)
+            }
+        )
+        assertEquals(EngineDataInstallMode.BUNDLED_ASSET, modeBundled)
+        assertEquals(1, bundledCalls.get())
+        assertEquals(0, javacCalls.get())
+        assertEquals(32L, outBundled.engineDataEntries)
+
+        val (modeFallback, outFallback) = EngineDataPrepareSupport.executePreparationDispatch(
+            hasBundledEngineData = false,
+            runBundledFastPath = {
+                bundledCalls.incrementAndGet()
+                Phase2OutputJson()
+            },
+            runSlowOnDeviceFallback = {
+                javacCalls.incrementAndGet()
+                Phase2OutputJson(engineDataEntries = 5000L)
+            }
+        )
+        assertEquals(EngineDataInstallMode.ON_DEVICE_SLOW_FALLBACK, modeFallback)
+        assertEquals(1, bundledCalls.get())
+        assertEquals(1, javacCalls.get())
+        assertEquals(5000L, outFallback.engineDataEntries)
+    }
 }

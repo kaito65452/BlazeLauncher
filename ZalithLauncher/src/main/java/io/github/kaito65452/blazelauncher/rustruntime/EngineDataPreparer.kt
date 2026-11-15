@@ -52,10 +52,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import com.google.gson.JsonParser
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.ZipInputStream
 
 data class PrepareUiState(
     val running: Boolean = false,
@@ -102,15 +104,161 @@ internal data class JvmStepRunResult(
     val logTail60: List<String>
 )
 
+enum class EngineDataInstallMode {
+    BUNDLED_ASSET,
+    ON_DEVICE_SLOW_FALLBACK
+}
+
 /**
  * Pure JVM helpers split out for deterministic unit testing without Android framework stubs.
  */
 internal object EngineDataPrepareSupport {
     const val LOCK_ASSET_NAME = "research-lock.json"
     const val CONTROLS_ASSET_NAME = "bedrock-controls.json"
+    const val ENGINE_DATA_ASSET_NAME = "engine-data.zip"
     const val SHIM_ASSET_PATH = "blaze-prepare/PrepareBatchShim.java"
     const val PARITY_ASSET_SUBDIR = "horizon-parity/dev/horizonlab/parity"
     const val TARGET_MINECRAFT_VERSION = "26.3"
+
+    private val ROOT_GENERATED_ENGINE_FILES = setOf(
+        "attributes.json",
+        "block-behaviours.json",
+        "cached-collision.nbt",
+        "command-registries.json",
+        "commands.json",
+        "creative-inventory.json",
+        "damage-catalog.json",
+        "entity-models.json",
+        "entity-types.json",
+        "facts.json",
+        "gameplay-facts.json",
+        "horizon-resources.json",
+        "items.json",
+        "landing-definitions.json",
+        "mob-data.json",
+        "model-states.json",
+        "movement-properties.nbt",
+        "occlusion.nbt",
+        "player-float-ids.json",
+        "registries.json",
+        "render-definitions.json"
+    )
+
+    private val SUBDIR_GENERATED_ENGINE_FILES = setOf(
+        "biome-parameters/nether.json",
+        "biome-parameters/overworld.json",
+        "worldgen/biome_parameters/nether.json",
+        "worldgen/biome_parameters/overworld.json",
+        "worldgen/block_flags.json"
+    )
+
+    private val WORLDGEN_BLOCK_GENERATED_FILES = setOf(
+        "worldgen/blocks/block-properties.nbt",
+        "worldgen/blocks/cached-collision.nbt",
+        "worldgen/blocks/cached-support.nbt",
+        "worldgen/blocks/survival-rules.json",
+        "worldgen/blocks/survival-extra-definitions.json",
+        "worldgen/blocks/placement-definitions.json",
+        "worldgen/blocks/structure-blocks.json"
+    )
+
+    private val REQUIRED_BUNDLED_ENGINE_FILES = listOf(
+        "horizon-resources.json",
+        "facts.json",
+        "items.json",
+        "registries.json",
+        "commands.json",
+        "model-states.json",
+        "cached-collision.nbt",
+        "worldgen/block_flags.json"
+    )
+
+    fun chooseInstallMode(hasBundledEngineData: Boolean): EngineDataInstallMode =
+        if (hasBundledEngineData) {
+            EngineDataInstallMode.BUNDLED_ASSET
+        } else {
+            EngineDataInstallMode.ON_DEVICE_SLOW_FALLBACK
+        }
+
+    fun isGeneratedEngineEntry(entryName: String): Boolean {
+        if (entryName.isBlank() || entryName.startsWith("/") || entryName.contains("\\")) {
+            return false
+        }
+        val parts = entryName.split("/")
+        if (parts.any { it.isEmpty() || it == "." || it == ".." }) {
+            return false
+        }
+        return entryName in ROOT_GENERATED_ENGINE_FILES ||
+            entryName in SUBDIR_GENERATED_ENGINE_FILES ||
+            entryName in WORLDGEN_BLOCK_GENERATED_FILES
+    }
+
+    fun validateBundledEngineDataZipFile(
+        zipFile: File,
+        expectedMinecraftVersion: String = TARGET_MINECRAFT_VERSION
+    ): List<String> {
+        if (!zipFile.isFile) {
+            throw IllegalStateException("Missing bundled engine-data.zip at ${zipFile.absolutePath}")
+        }
+        val seen = LinkedHashSet<String>()
+        var manifestRaw: String? = null
+        ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                val name = entry.name
+                if (entry.isDirectory) {
+                    zis.closeEntry()
+                    continue
+                }
+                if (!isGeneratedEngineEntry(name)) {
+                    throw IllegalArgumentException(
+                        "Forbidden entry in bundled engine-data.zip: $name"
+                    )
+                }
+                if (!seen.add(name)) {
+                    throw IllegalArgumentException(
+                        "Duplicate entry in bundled engine-data.zip: $name"
+                    )
+                }
+                if (name == "horizon-resources.json") {
+                    manifestRaw = zis.readBytes().toString(Charsets.UTF_8)
+                }
+                zis.closeEntry()
+            }
+        }
+        for (req in REQUIRED_BUNDLED_ENGINE_FILES) {
+            if (req !in seen) {
+                throw IllegalArgumentException("Bundled engine-data.zip missing required file: $req")
+            }
+        }
+        val manifestObj = JsonParser.parseString(
+            manifestRaw ?: throw IllegalArgumentException("Missing horizon-resources.json")
+        ).asJsonObject
+        val schema = manifestObj.get("schema")?.asInt ?: -1
+        if (schema != 7) {
+            throw IllegalArgumentException("Bundled horizon-resources.json schema mismatch: $schema")
+        }
+        val mcVer = manifestObj.get("minecraft")?.asString.orEmpty()
+        if (mcVer != expectedMinecraftVersion) {
+            throw IllegalArgumentException(
+                "Bundled horizon-resources.json minecraft mismatch: expected $expectedMinecraftVersion, got $mcVer"
+            )
+        }
+        return seen.sorted()
+    }
+
+    internal suspend fun executePreparationDispatch(
+        hasBundledEngineData: Boolean,
+        runBundledFastPath: suspend () -> Phase2OutputJson,
+        runSlowOnDeviceFallback: suspend () -> Phase2OutputJson
+    ): Pair<EngineDataInstallMode, Phase2OutputJson> {
+        return when (chooseInstallMode(hasBundledEngineData)) {
+            EngineDataInstallMode.BUNDLED_ASSET ->
+                EngineDataInstallMode.BUNDLED_ASSET to runBundledFastPath()
+            EngineDataInstallMode.ON_DEVICE_SLOW_FALLBACK ->
+                EngineDataInstallMode.ON_DEVICE_SLOW_FALLBACK to runSlowOnDeviceFallback()
+        }
+    }
 
     const val DEFAULT_HEARTBEAT_INTERVAL_MS: Long = 15_000L
     const val DEFAULT_JAVAC_STEP_TIMEOUT_MS: Long = 10L * 60L * 1000L
@@ -830,15 +978,216 @@ object EngineDataPreparer {
         runCatching { stopAllNonMainProcesses(context.applicationContext) }
     }
 
+    fun hasBundledEngineDataAsset(context: Context): Boolean = runCatching {
+        context.assets.open(EngineDataPrepareSupport.ENGINE_DATA_ASSET_NAME).use { true }
+    }.getOrDefault(false)
+
+    private fun copyAssetToFile(context: Context, assetPath: String, destFile: File) {
+        destFile.parentFile?.mkdirs()
+        val partial = File(destFile.parentFile, "${destFile.name}.partial")
+        context.assets.open(assetPath).use { input ->
+            partial.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!partial.renameTo(destFile)) {
+            partial.copyTo(destFile, overwrite = true)
+            partial.delete()
+        }
+    }
+
     suspend fun runPreparation(
         context: Context,
         onStatusUpdate: ((phase: String, fraction: Float?) -> Unit)? = null
     ): Phase2OutputJson = withContext(Dispatchers.IO) {
         val totalStartNs = System.nanoTime()
         val timings = linkedMapOf<String, Long>()
+
+        if (!BlazePrepareNative.ensureLoaded()) {
+            val err = BlazePrepareNative.lastLoadError() ?: "libblaze_prepare.so missing"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("load_native", err)
+            saveFailureTelemetry(context, "load_native", details, timings, 0L, emptyList(), "load_native", System.currentTimeMillis())
+            throw EngineDataPrepareException(err, details, failedPhase = "load_native")
+        }
+
+        val hasBundledAsset = hasBundledEngineDataAsset(context)
+        val (_, dispatchedOutput) = EngineDataPrepareSupport.executePreparationDispatch(
+            hasBundledEngineData = hasBundledAsset,
+            runBundledFastPath = {
+                runBundledAssetPreparation(
+                    context = context,
+                    totalStartNs = totalStartNs,
+                    timings = timings,
+                    onStatusUpdate = onStatusUpdate
+                )
+            },
+            runSlowOnDeviceFallback = {
+                runSlowOnDevicePreparation(
+                    context = context,
+                    totalStartNs = totalStartNs,
+                    timings = timings,
+                    onStatusUpdate = onStatusUpdate
+                )
+            }
+        )
+        dispatchedOutput
+    }
+
+    private suspend fun runBundledAssetPreparation(
+        context: Context,
+        totalStartNs: Long,
+        timings: MutableMap<String, Long>,
+        onStatusUpdate: ((phase: String, fraction: Float?) -> Unit)?
+    ): Phase2OutputJson = coroutineScope {
+        var peakRssKb = 0L
+        var currentPhaseName = "bundled_unpack_validate"
+        var currentPhaseStartMs = System.currentTimeMillis()
+
+        fun updateProgress(phase: String, detail: String = "", fraction: Float? = null, rssKb: Long = peakRssKb) {
+            peakRssKb = maxOf(peakRssKb, rssKb)
+            _uiState.value = PrepareUiState(
+                running = true,
+                phase = phase,
+                detail = detail,
+                progressFraction = fraction,
+                peakRssKb = peakRssKb,
+                prepared = isPreparedFallback(context.filesDir)
+            )
+            onStatusUpdate?.invoke(phase, fraction)
+        }
+
+        fun beginPhase(phaseName: String) {
+            currentPhaseName = phaseName
+            currentPhaseStartMs = System.currentTimeMillis()
+            EngineDataPrepareTelemetry.save(
+                context.filesDir,
+                EngineDataPrepareMetrics(
+                    status = "running",
+                    minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
+                    totalMs = (System.nanoTime() - totalStartNs) / 1_000_000L,
+                    phaseTimingsMs = timings.toMap(),
+                    peakRssKb = peakRssKb,
+                    updatedAtMs = System.currentTimeMillis(),
+                    currentPhase = currentPhaseName,
+                    phaseStartMs = currentPhaseStartMs
+                )
+            )
+        }
+
+        beginPhase("bundled_unpack_validate")
+        updateProgress(context.getString(R.string.rust_engine_data_preparing_bundled), "", 0.05f, 0L)
+        val unpackStartNs = System.nanoTime()
+        val baseDir = File(context.filesDir, ".local/blaze-prepare-assets").apply { mkdirs() }
+        val lockFile = File(baseDir, EngineDataPrepareSupport.LOCK_ASSET_NAME)
+        val controlsFile = File(baseDir, EngineDataPrepareSupport.CONTROLS_ASSET_NAME)
+        val bundledZipFile = File(baseDir, "bundled-engine-data.zip")
+        try {
+            copyAssetToFile(context, EngineDataPrepareSupport.LOCK_ASSET_NAME, lockFile)
+            copyAssetToFile(context, EngineDataPrepareSupport.CONTROLS_ASSET_NAME, controlsFile)
+            copyAssetToFile(context, EngineDataPrepareSupport.ENGINE_DATA_ASSET_NAME, bundledZipFile)
+            EngineDataPrepareSupport.validateBundledEngineDataZipFile(
+                bundledZipFile,
+                EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION
+            )
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            val reason = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("bundled_unpack_validate", reason)
+            saveFailureTelemetry(context, "bundled_unpack_validate", details, timings, peakRssKb, emptyList(), currentPhaseName, currentPhaseStartMs)
+            throw EngineDataPrepareException(
+                RustDiagnosticsCollector.redactDiagnosticText(reason),
+                details,
+                failedPhase = "bundled_unpack_validate"
+            )
+        }
+        timings["bundled_unpack_validate"] = (System.nanoTime() - unpackStartNs) / 1_000_000L
+
+        beginPhase("rust_bundled_prepare")
+        BlazePrepareNative.nativeResetCancel()
+        val configJson = BlazePrepareNative.encodeConfig(
+            PrepareConfigJson(
+                filesDir = context.filesDir.absolutePath,
+                gameHome = runCatching { getGameHome() }.getOrNull()?.takeIf { it.isNotBlank() },
+                lockPath = lockFile.absolutePath,
+                controlsManifestPath = controlsFile.absolutePath,
+                paritySourcesDir = null,
+                bundledEngineDataZip = bundledZipFile.absolutePath,
+                downloadWorkers = 6
+            )
+        )
+
+        val pollJob = launch {
+            while (isActive) {
+                val snap = BlazePrepareNative.parseProgress(BlazePrepareNative.nativeGetProgressJson())
+                val frac = if (snap.total > 0L) {
+                    0.10f + 0.85f * (snap.done.toFloat() / snap.total.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    null
+                }
+                if (snap.phase.isNotBlank()) {
+                    val detail = if (snap.total > 0L) "${snap.done}/${snap.total}" else ""
+                    updateProgress(snap.phase, detail, frac, snap.peakRssKb)
+                }
+                delay(200L)
+            }
+        }
+
+        val phase2 = try {
+            val raw = BlazePrepareNative.nativePrepareFromBundledZip(configJson)
+            when (val env = BlazePrepareNative.parseEnvelope(raw, Phase2OutputJson::class.java)) {
+                is PrepareEnvelope.Success -> env.data
+                is PrepareEnvelope.Failure -> {
+                    peakRssKb = maxOf(peakRssKb, env.peakRssKb)
+                    val details = EngineDataPrepareSupport.buildRedactedErrorDetails("rust_bundled_prepare", env.error)
+                    saveFailureTelemetry(context, "rust_bundled_prepare", details, timings, peakRssKb, emptyList(), currentPhaseName, currentPhaseStartMs)
+                    throw EngineDataPrepareException(
+                        RustDiagnosticsCollector.redactDiagnosticText(env.error),
+                        details,
+                        failedPhase = "rust_bundled_prepare"
+                    )
+                }
+            }
+        } finally {
+            pollJob.cancel()
+        }
+        timings["rust_bundled_prepare"] = phase2.elapsedMs
+        peakRssKb = maxOf(peakRssKb, phase2.peakRssKb, BlazePrepareNative.nativePeakRssKb())
+
+        val totalMs = (System.nanoTime() - totalStartNs) / 1_000_000L
+        val summary = "Prepared 26.3 via bundled engine-data.zip (${phase2.engineDataEntries} tables, no javac/datagen, ${totalMs / 1000.0}s)"
+        EngineDataPrepareTelemetry.save(
+            context.filesDir,
+            EngineDataPrepareMetrics(
+                status = "ready",
+                minecraftVersion = EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION,
+                totalMs = totalMs,
+                phaseTimingsMs = timings,
+                peakRssKb = peakRssKb,
+                engineDataEntries = phase2.engineDataEntries,
+                updatedAtMs = System.currentTimeMillis(),
+                currentPhase = "ready_bundled",
+                phaseStartMs = currentPhaseStartMs
+            )
+        )
+        _uiState.value = PrepareUiState(
+            running = false,
+            phase = context.getString(R.string.developer_prepare_ready),
+            detail = summary,
+            progressFraction = 1.0f,
+            peakRssKb = peakRssKb,
+            prepared = true,
+            completedSummary = summary
+        )
+        phase2
+    }
+
+    private suspend fun runSlowOnDevicePreparation(
+        context: Context,
+        totalStartNs: Long,
+        timings: MutableMap<String, Long>,
+        onStatusUpdate: ((phase: String, fraction: Float?) -> Unit)?
+    ): Phase2OutputJson = coroutineScope {
         var peakRssKb = 0L
         var prepareWarnings: List<String> = emptyList()
-        var currentPhaseName = "prepare"
+        var currentPhaseName = "prepare_slow_fallback"
         var currentPhaseStartMs = System.currentTimeMillis()
         var lastHeartbeatAtMs = 0L
         var latestHeartbeat: JvmWorkerHeartbeat? = null
@@ -886,13 +1235,7 @@ object EngineDataPreparer {
             onStatusUpdate?.invoke(phase, fraction)
         }
 
-        if (!BlazePrepareNative.ensureLoaded()) {
-            val err = BlazePrepareNative.lastLoadError() ?: "libblaze_prepare.so missing"
-            val details = EngineDataPrepareSupport.buildRedactedErrorDetails("load_native", err)
-            saveFailureTelemetry(context, "load_native", details, timings, peakRssKb, prepareWarnings, "load_native", currentPhaseStartMs)
-            throw EngineDataPrepareException(err, details, failedPhase = "load_native")
-        }
-
+        updateProgress(context.getString(R.string.rust_engine_data_preparing_slow), "", 0.01f)
         // Phase 0: unpack bundled lock, bedrock-controls, and MIT Java exporter sources
         beginTelemetryPhase("unpack_assets")
         updateProgress("Unpacking pinned exporter sources", "", 0.02f)
@@ -1214,22 +1557,10 @@ object EngineDataPreparer {
         val baseDir = File(context.filesDir, ".local/blaze-prepare-assets")
         baseDir.mkdirs()
 
-        fun copyAsset(assetPath: String, destFile: File) {
-            destFile.parentFile?.mkdirs()
-            val partial = File(destFile.parentFile, "${destFile.name}.partial")
-            context.assets.open(assetPath).use { input ->
-                partial.outputStream().use { output -> input.copyTo(output) }
-            }
-            if (!partial.renameTo(destFile)) {
-                partial.copyTo(destFile, overwrite = true)
-                partial.delete()
-            }
-        }
-
         val lockFile = File(baseDir, EngineDataPrepareSupport.LOCK_ASSET_NAME)
         val controlsFile = File(baseDir, EngineDataPrepareSupport.CONTROLS_ASSET_NAME)
-        copyAsset(EngineDataPrepareSupport.LOCK_ASSET_NAME, lockFile)
-        copyAsset(EngineDataPrepareSupport.CONTROLS_ASSET_NAME, controlsFile)
+        copyAssetToFile(context, EngineDataPrepareSupport.LOCK_ASSET_NAME, lockFile)
+        copyAssetToFile(context, EngineDataPrepareSupport.CONTROLS_ASSET_NAME, controlsFile)
 
         val parityRoot = File(baseDir, "horizon-parity")
         val parityPkgDir = File(parityRoot, "dev/horizonlab/parity")
@@ -1242,12 +1573,14 @@ object EngineDataPreparer {
             throw IOException("Missing bundled Java exporter sources in assets/${EngineDataPrepareSupport.PARITY_ASSET_SUBDIR}")
         }
         bundledJavaFiles.forEach { fileName ->
-            copyAsset(
+            copyAssetToFile(
+                context,
                 "${EngineDataPrepareSupport.PARITY_ASSET_SUBDIR}/$fileName",
                 File(parityPkgDir, fileName)
             )
         }
-        copyAsset(
+        copyAssetToFile(
+            context,
             EngineDataPrepareSupport.SHIM_ASSET_PATH,
             File(parityPkgDir, "PrepareBatchShim.java")
         )

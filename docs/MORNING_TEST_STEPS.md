@@ -1,8 +1,22 @@
 # Panduan Uji Pagi di Perangkat Fisik (`SM-N975F` — Samsung Galaxy Note 10+)
 
-> **Tujuan**: Memverifikasi semua butir `UNVERIFIED` dari Stage A sampai Stage D pada APK rilis terbaru hasil CI branch `feat/overnight-stages`.
+> **Tujuan**: Memverifikasi instalasi & peluncuran `26.3 Rust Edition` pada APK rilis terbaru hasil CI branch `feat/overnight-stages` (termasuk Task K: bundled `assets/engine-data.zip`).
 >
 > **Catatan keamanan**: Jangan bagikan token mentah atau file log lengkap sebelum memeriksa bahwa token hanya tampil sebagai `token_len=...` dan UUID terpotong 8 karakter (`xxxxxxxx...`).
+
+---
+
+## Ringkasan Cepat Task K (Jalur Cepat Tanpa `javac` di Perangkat)
+
+1. APK yang dibuat dengan `BUNDLE_ENGINE_DATA=true` menyertakan **`assets/engine-data.zip`** (berisi tabel hasil generate bawaan upstream Starling — **tidak ada** kompilasi `javac` 25 ataupun Minecraft `datagen` di HP!).
+2. **Cara menyalakan / mematikan fitur ini di CI** (untuk build berikutnya):
+   - Aktif: `gh variable set BUNDLE_ENGINE_DATA --body "true"`
+   - Mati (kembali ke jalur lambat/eksperimental `javac` on-device): `gh variable set BUNDLE_ENGINE_DATA --body "false"`
+3. **Alur instalasi di HP**:
+   - **Unduh (`Download`) -> Game -> pilih `26.3` -> pilih runtime `Rust Edition (Eksperimental)` -> tekan `Instal` (`Install`)**.
+   - **Perkiraan durasi (BELUM TERUJI di perangkat / `UNVERIFIED`)**: targetnya **puluhan detik hingga beberapa menit** (bergantung kecepatan Wi-Fi untuk objek aset yang belum ada di cache ZL2), tanpa fase `javac` `:jvm`. Jika file aset ZL2 `26.3` sudah ada di `game_home`, `server.jar` dan 114 library Java **tidak diunduh**.
+4. **Apa yang perlu Anda kirim balik jika ada masalah atau setelah berhasil**:
+   - Perkiraan waktu selesai instalasi, apakah muncul error/macet, apakah game `26.3` terbuka normal lewat tombol `Luncurkan`, dan hasil **Pengembang -> `Salin laporan`** (`Copy report`) setelah menguji.
 
 ---
 

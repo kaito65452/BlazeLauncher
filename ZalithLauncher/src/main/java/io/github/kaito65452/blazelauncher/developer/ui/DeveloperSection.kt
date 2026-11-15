@@ -94,7 +94,9 @@ private fun formatPrepareSummary(context: Context, state: PrepareUiState): Strin
         ).filter { it.isNotBlank() }.joinToString(": ")
         state.completedSummary != null -> state.completedSummary
         state.prepared -> context.getString(R.string.developer_prepare_ready)
-        else -> context.getString(R.string.developer_prepare_summary)
+        EngineDataPreparer.hasBundledEngineDataAsset(context) ->
+            context.getString(R.string.developer_prepare_summary_bundled)
+        else -> context.getString(R.string.developer_prepare_summary_slow)
     }
     return if (state.warnings.isNotEmpty() && !state.running) {
         "$base\nWarning: ${state.warnings.joinToString("; ")}"

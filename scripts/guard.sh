@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -684,10 +684,31 @@ check_stage_b_hygiene() {
     python3 - "$target_root" <<'PY'
 import os
 import re
+import subprocess
 import sys
 
 root = sys.argv[1]
 violations = []
+
+# K4 (6): Never allow engine-data.zip / engine-data-generated.zip tracked in git or committed anywhere in repo tree
+git_dir = os.path.join(root, ".git")
+if os.path.isdir(git_dir) or os.path.isfile(git_dir):
+    proc = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True)
+    if proc.returncode == 0:
+        for raw_rel in proc.stdout.split(b"\x00"):
+            if not raw_rel:
+                continue
+            rel = raw_rel.decode("utf-8", errors="replace").replace(os.sep, "/")
+            bname = os.path.basename(rel).lower()
+            if bname in ("engine-data.zip", "engine-data-generated.zip"):
+                violations.append(f"{rel}: forbidden git-tracked engine-data zip")
+else:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in (".git", "target", "build", ".gradle"))
+        for fname in sorted(filenames):
+            if fname.lower() in ("engine-data.zip", "engine-data-generated.zip"):
+                rel = os.path.relpath(os.path.join(dirpath, fname), root).replace(os.sep, "/")
+                violations.append(f"{rel}: forbidden generated engine-data zip in repo tree")
 
 for sub in ("blaze-prepare", os.path.join("ZalithLauncher", "src", "main", "assets")):
     scan_dir = os.path.join(root, sub)
@@ -701,7 +722,7 @@ for sub in ("blaze-prepare", os.path.join("ZalithLauncher", "src", "main", "asse
             lower = rel.lower()
             if lower.endswith((".py", ".pyc", ".nbt")):
                 violations.append(f"{rel}: forbidden Python or NBT file in Stage B tree")
-            if fname in ("engine-data.zip", "horizon-resources.json", "android-downloads-v2.json", "audio-complete.json"):
+            if fname in ("engine-data.zip", "engine-data-generated.zip", "horizon-resources.json", "android-downloads-v2.json", "audio-complete.json"):
                 violations.append(f"{rel}: forbidden generated engine-data file committed in repo")
             if sub == "blaze-prepare" and lower.endswith(".jar"):
                 violations.append(f"{rel}: forbidden JAR in blaze-prepare crate")
@@ -929,23 +950,130 @@ fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
 # --- Check 13: Real-data preflight workflow hygiene (P4) ---
-if [ -z "${1:-}" ] && [ -z "${GUARD_CHECK10_ONLY_DIR:-}" ] && [ -z "${GUARD_CHECK11_ONLY_APK:-}" ] && [ -z "${GUARD_CHECK12_ONLY_APK:-}" ]; then
+if [ -z "${1:-}" ] && [ -z "${GUARD_CHECK10_ONLY_DIR:-}" ] && [ -z "${GUARD_CHECK11_ONLY_APK:-}" ] && [ -z "${GUARD_CHECK12_ONLY_APK:-}" ] && [ -z "${GUARD_CHECK14_ONLY_DIR:-}" ]; then
     echo "=== Checking preflight-real.yml hygiene ==="
     bash scripts/check_preflight_workflow.sh
 fi
 
-if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ]; then
+# --- Check 14: K8 Nightly/Release/CI engine-data bundle isolation ---
+check_release_bundle_isolation() {
+    local wf_dir="$1"
+    python3 - "$wf_dir" <<'PY'
+import os
+import re
+import sys
+
+wf_dir = sys.argv[1]
+if not os.path.isdir(wf_dir):
+    print(f"ERROR: Workflows directory not found: {wf_dir}", file=sys.stderr)
+    sys.exit(1)
+
+errors = []
+forbidden_release_re = re.compile(
+    r"BUNDLE_ENGINE_DATA|bundle_engine_data|ci_bundle_engine_data|engine-data\.zip|"
+    r"piston-meta\.mojang\.com|launchermeta\.mojang\.com|"
+    r"resources\.download\.minecraft\.net|libraries\.minecraft\.net",
+    re.IGNORECASE,
+)
+
+for name in ("nightly.yml", "release.yml"):
+    path = os.path.join(wf_dir, name)
+    if not os.path.isfile(path):
+        errors.append(f"{path}: missing required workflow file")
+        continue
+    lines = open(path, "r", encoding="utf-8").read().splitlines()
+    for lineno, line in enumerate(lines, 1):
+        m = forbidden_release_re.search(line)
+        if m:
+            errors.append(
+                f"{path}:{lineno}: nightly/release workflow must never reference {m.group(0)!r} or Mojang downloads"
+            )
+
+ci_path = os.path.join(wf_dir, "ci.yml")
+if not os.path.isfile(ci_path):
+    errors.append(f"{ci_path}: missing required workflow file")
+else:
+    ci_lines = open(ci_path, "r", encoding="utf-8").read().splitlines()
+    signed_apk_upload_seen = False
+    for idx, line in enumerate(ci_lines):
+        if "actions/upload-artifact" in line:
+            window = "\n".join(ci_lines[idx : min(len(ci_lines), idx + 15)])
+            if "signed-apks" in window:
+                signed_apk_upload_seen = True
+                if not re.search(r"retention-days:\s*3\b", window):
+                    errors.append(
+                        f"{ci_path}:{idx + 1}: signed-apks upload step must specify retention-days: 3"
+                    )
+    if not signed_apk_upload_seen:
+        errors.append(f"{ci_path}: missing signed-apks actions/upload-artifact step")
+
+for fname in sorted(os.listdir(wf_dir)):
+    if not fname.endswith((".yml", ".yaml")):
+        continue
+    fpath = os.path.join(wf_dir, fname)
+    content = open(fpath, "r", encoding="utf-8").read()
+    lines = content.splitlines()
+    release_upload_lines = [
+        (i + 1, l)
+        for i, l in enumerate(lines)
+        if re.search(
+            r"\bgh\s+release\s+(upload|create)\b|softprops/action-gh-release|actions/upload-release-asset",
+            l,
+        )
+    ]
+    if release_upload_lines:
+        if "--check-release-upload" not in content:
+            lineno = release_upload_lines[0][0]
+            errors.append(
+                f"{fpath}:{lineno}: GitHub Release asset upload workflow must run scripts/guard.sh --check-release-upload before uploading"
+            )
+
+if errors:
+    print("ERROR: K8 release/nightly bundle isolation guard failed:", file=sys.stderr)
+    for err in errors:
+        print(f"  - {err}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+if [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ]; then
+    echo "Checking custom workflow directory for K8 release bundle isolation: $GUARD_CHECK14_ONLY_DIR"
+    check_release_bundle_isolation "$GUARD_CHECK14_ONLY_DIR"
+    echo "✓ Custom Check 14 directory passed."
+    exit 0
+fi
+
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
+    echo "Checking K8 nightly/release/CI engine-data bundle isolation..."
+    check_release_bundle_isolation ".github/workflows"
+    echo "✓ K8 nightly/release/CI engine-data bundle isolation passed."
+fi
+
+if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ]; then
     CHECK_RELEASE_APK=0
+    CHECK_RELEASE_UPLOAD=0
+    ALLOW_BUNDLED_ENGINE_DATA=0
     if [ "${1:-}" = "--check-release-apk" ]; then
         CHECK_RELEASE_APK=1
+    elif [ "${1:-}" = "--check-release-upload" ]; then
+        CHECK_RELEASE_APK=1
+        CHECK_RELEASE_UPLOAD=1
+    fi
+    if [ "$CHECK_RELEASE_UPLOAD" -eq 0 ] && [ "${BUNDLE_ENGINE_DATA:-}" = "true" ]; then
+        ALLOW_BUNDLED_ENGINE_DATA=1
     fi
     APK_PATH="${2:-}"
     if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
         echo "ERROR: ${1:-} requires a valid APK file path (got: '$APK_PATH')"
         exit 1
     fi
-    echo "Checking APK license hygiene: $APK_PATH (release_check=$CHECK_RELEASE_APK)"
-    python3 - "$APK_PATH" "$CHECK_RELEASE_APK" <<'PY'
+    echo "Checking APK license hygiene: $APK_PATH (release_check=$CHECK_RELEASE_APK release_upload=$CHECK_RELEASE_UPLOAD allow_bundle=$ALLOW_BUNDLED_ENGINE_DATA)"
+    python3 - "$APK_PATH" "$CHECK_RELEASE_APK" "$ALLOW_BUNDLED_ENGINE_DATA" "$CHECK_RELEASE_UPLOAD" <<'PY'
+import re
+import hashlib
+import io
+import json
+import os
 import re
 import struct
 import sys
@@ -953,12 +1081,113 @@ import zipfile
 
 apk_path = sys.argv[1]
 check_release = sys.argv[2] == "1"
+allow_bundle_flag = sys.argv[3] == "1"
+check_release_upload = sys.argv[4] == "1"
 disallowed_re = re.compile(
     r"(^|/)(wallpapers|wallpaper_templates)/|(^|/)assets/skin/|(^|/)assets/alex\.png$|voicechat"
-    r"|^assets/(?:minecraft|worldgen|\.local)/|^assets/(?:engine-data\.zip|horizon-resources\.json|android-downloads-v2\.json|audio-complete\.json)$"
+    r"|^assets/(?:minecraft|worldgen|\.local)/|^assets/(?:horizon-resources\.json|android-downloads-v2\.json|audio-complete\.json)$"
     r"|\.(?:py|pyc|nbt)$|^assets/(?:horizon-parity|blaze-prepare)/.*\.class$",
     re.IGNORECASE,
 )
+
+# K4 narrow allowlist matching engine/starling tools/android_build.py:generated_engine_file
+ALLOWED_GENERATED_ENGINE_FILES = {
+    "attributes.json",
+    "block-behaviours.json",
+    "cached-collision.nbt",
+    "command-registries.json",
+    "commands.json",
+    "creative-inventory.json",
+    "damage-catalog.json",
+    "entity-models.json",
+    "entity-types.json",
+    "facts.json",
+    "gameplay-facts.json",
+    "horizon-resources.json",
+    "items.json",
+    "landing-definitions.json",
+    "mob-data.json",
+    "model-states.json",
+    "movement-properties.nbt",
+    "occlusion.nbt",
+    "player-float-ids.json",
+    "registries.json",
+    "render-definitions.json",
+    "biome-parameters/nether.json",
+    "biome-parameters/overworld.json",
+    "worldgen/biome_parameters/nether.json",
+    "worldgen/biome_parameters/overworld.json",
+    "worldgen/block_flags.json",
+    "worldgen/blocks/block-properties.nbt",
+    "worldgen/blocks/cached-collision.nbt",
+    "worldgen/blocks/cached-support.nbt",
+    "worldgen/blocks/survival-rules.json",
+    "worldgen/blocks/survival-extra-definitions.json",
+    "worldgen/blocks/placement-definitions.json",
+    "worldgen/blocks/structure-blocks.json",
+}
+
+def verify_bundled_engine_data_zip(raw_bytes: bytes, doc_path: str):
+    if os.environ.get("BUNDLE_ENGINE_DATA") != "true":
+        print("ERROR: APK contains assets/engine-data.zip but BUNDLE_ENGINE_DATA != 'true'!", file=sys.stderr)
+        sys.exit(1)
+    if not os.path.isfile(doc_path):
+        print(f"ERROR: K4 requires {doc_path} to exist when assets/engine-data.zip is bundled!", file=sys.stderr)
+        sys.exit(1)
+
+    sha256_hex = hashlib.sha256(raw_bytes).hexdigest()
+    print(f"ENGINE_DATA_ZIP_SHA256={sha256_hex}")
+    print(f"ENGINE_DATA_ZIP_BYTES={len(raw_bytes)}")
+
+    expected_sha = os.environ.get("GUARD_EXPECT_ENGINE_DATA_SHA256", "").strip().lower()
+    if expected_sha and sha256_hex != expected_sha:
+        print(
+            f"ERROR: assets/engine-data.zip sha256 {sha256_hex} != GUARD_EXPECT_ENGINE_DATA_SHA256 {expected_sha}!",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    seen_files = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as nested:
+            for zi in nested.infolist():
+                if zi.is_dir():
+                    continue
+                if ((zi.external_attr >> 16) & 0o170000) == 0o120000:
+                    print(f"ERROR: Symlink forbidden in assets/engine-data.zip: {zi.filename}", file=sys.stderr)
+                    sys.exit(1)
+                name = zi.filename
+                if name.startswith("/") or "\\" in name or ".." in name.split("/"):
+                    print(f"ERROR: Unsafe path in assets/engine-data.zip: {name}", file=sys.stderr)
+                    sys.exit(1)
+                if name not in ALLOWED_GENERATED_ENGINE_FILES:
+                    print(
+                        f"ERROR: Disallowed entry inside assets/engine-data.zip: {name} (not in generated allowlist)",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if name in seen_files:
+                    print(f"ERROR: Duplicate entry inside assets/engine-data.zip: {name}", file=sys.stderr)
+                    sys.exit(1)
+                seen_files.add(name)
+
+            for req in ("horizon-resources.json", "facts.json", "items.json", "registries.json", "commands.json"):
+                if req not in seen_files:
+                    print(f"ERROR: assets/engine-data.zip missing required file {req}", file=sys.stderr)
+                    sys.exit(1)
+            manifest = json.loads(nested.read("horizon-resources.json").decode("utf-8"))
+            if manifest.get("schema") != 7 or manifest.get("minecraft") != "26.3":
+                print(
+                    f"ERROR: assets/engine-data.zip horizon-resources.json invalid metadata: schema={manifest.get('schema')} minecraft={manifest.get('minecraft')}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+    except zipfile.BadZipFile as exc:
+        print(f"ERROR: assets/engine-data.zip is not a valid zip: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"ENGINE_DATA_ZIP_ENTRIES={len(seen_files)}")
+    print(f"✓ K4 assets/engine-data.zip verified ({len(seen_files)} allowlisted entries, sha256={sha256_hex}).")
 marker_strings = [
     "SIL Open Font License",
     "The Geist Project Authors",
@@ -1067,10 +1296,40 @@ with zipfile.ZipFile(apk_path, "r") as zf:
         sys.exit(1)
 
     bad = [n for n in names if disallowed_re.search(n)]
+    relocated_engine_data = [
+        n for n in names
+        if n != "assets/engine-data.zip"
+        and n.lower().startswith("assets/")
+        and ("engine-data" in n.lower() or "engine_data" in n.lower())
+        and n.lower().endswith(".zip")
+    ]
+    bad.extend(relocated_engine_data)
     if bad:
         print("ERROR: APK contains disallowed asset entries:", file=sys.stderr)
         for item in bad:
             print(f"  - {item}", file=sys.stderr)
+        sys.exit(1)
+
+    if "assets/engine-data.zip" in names:
+        if check_release_upload:
+            print(
+                "ERROR: GitHub Release upload forbids APK built with assets/engine-data.zip (regardless of BUNDLE_ENGINE_DATA)!",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not allow_bundle_flag:
+            print(
+                "ERROR: assets/engine-data.zip present in APK when BUNDLE_ENGINE_DATA != 'true'!",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        doc_path = os.environ.get("GUARD_ENGINE_DATA_DOC_PATH", "docs/ENGINE_DATA_BUNDLE.md")
+        verify_bundled_engine_data_zip(zf.read("assets/engine-data.zip"), doc_path)
+    elif allow_bundle_flag and os.environ.get("BUNDLE_ENGINE_DATA") == "true" and check_release:
+        print(
+            "ERROR: BUNDLE_ENGINE_DATA=true on release APK check, but assets/engine-data.zip is missing!",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     font_files = [n for n in names if re.match(r"^assets/fonts/.*\.(ttf|otf)$", n, re.IGNORECASE)]

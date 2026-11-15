@@ -67,6 +67,8 @@ pub struct PrepareConfig {
     #[serde(default)]
     pub parity_sources_dir: Option<PathBuf>,
     #[serde(default)]
+    pub bundled_engine_data_zip: Option<PathBuf>,
+    #[serde(default)]
     pub catalog_url: Option<String>,
     #[serde(default)]
     pub objects_base_url: Option<String>,
@@ -312,22 +314,20 @@ pub fn extract_client_jar_resources(
     Ok((world_version, extracted_count))
 }
 
-/// Extracts `data/minecraft/structure/**/*.nbt` and builds the 19 `worldgen/*.json` bundles.
-pub fn write_worldgen_bundles(
-    server_jar: &Path,
-    client_jar: &Path,
+fn extract_structure_nbts(
+    source_jar: &Path,
     stage_dir: &Path,
     cancel: &CancelFlag,
-) -> Result<(u64, u64), String> {
+) -> Result<u64, String> {
     let out = stage_dir.join("worldgen");
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
 
     let structure_prefix = "data/minecraft/structure/";
-    let file = fs::File::open(server_jar).map_err(|e| format!("{}: {e}", server_jar.display()))?;
-    let mut server_arch = ZipArchive::new(file).map_err(|e| format!("{}: {e}", server_jar.display()))?;
+    let file = fs::File::open(source_jar).map_err(|e| format!("{}: {e}", source_jar.display()))?;
+    let mut arch = ZipArchive::new(file).map_err(|e| format!("{}: {e}", source_jar.display()))?;
     let mut nbt_names = Vec::new();
-    for i in 0..server_arch.len() {
-        let entry = server_arch.by_index(i).map_err(|e| e.to_string())?;
+    for i in 0..arch.len() {
+        let entry = arch.by_index(i).map_err(|e| e.to_string())?;
         let name = entry.name().map_err(|e| e.to_string())?;
         if name.starts_with(structure_prefix) && name.ends_with(".nbt") && !entry.is_dir() {
             nbt_names.push(name.into_owned());
@@ -340,7 +340,7 @@ pub fn write_worldgen_bundles(
         cancel.check()?;
         let rel = safe_relative(&name[structure_prefix.len()..])?;
         let dest = out.join("structure/minecraft").join(rel);
-        let bytes = read_zip_bytes(&mut server_arch, name)?;
+        let bytes = read_zip_bytes(&mut arch, name)?;
         if dest.is_file() && fs::read(&dest).ok().as_deref() == Some(bytes.as_slice()) {
             structures_count += 1;
             continue;
@@ -348,6 +348,30 @@ pub fn write_worldgen_bundles(
         atomic_write_bytes(&dest, &bytes)?;
         structures_count += 1;
     }
+    Ok(structures_count)
+}
+
+fn single_jar_resources_value(jar_path: &Path, prefix: &str, label: &str) -> Result<Value, String> {
+    let entries = json_resources_map(jar_path, prefix)?;
+    if entries.is_empty() {
+        return Err(format!("Reference {label} resources missing from client jar"));
+    }
+    let obj: Map<String, Value> = entries
+        .into_iter()
+        .map(|(k, v)| (k, Value::String(v)))
+        .collect();
+    Ok(Value::Object(obj))
+}
+
+/// Extracts `data/minecraft/structure/**/*.nbt` and builds the 19 `worldgen/*.json` bundles.
+pub fn write_worldgen_bundles(
+    server_jar: &Path,
+    client_jar: &Path,
+    stage_dir: &Path,
+    cancel: &CancelFlag,
+) -> Result<(u64, u64), String> {
+    let out = stage_dir.join("worldgen");
+    let structures_count = extract_structure_nbts(server_jar, stage_dir, cancel)?;
 
     let mut maps_written = 0u64;
     for (bundle_name, rel_prefix) in WORLDGEN_BUNDLES {
@@ -360,6 +384,167 @@ pub fn write_worldgen_bundles(
     }
 
     Ok((structures_count, maps_written))
+}
+
+/// Client-only variant mirroring Starling `android_resources::rebuild` for bundled `engine-data.zip`.
+pub fn write_worldgen_bundles_from_client_only(
+    client_jar: &Path,
+    stage_dir: &Path,
+    cancel: &CancelFlag,
+) -> Result<(u64, u64), String> {
+    let out = stage_dir.join("worldgen");
+    let structures_count = extract_structure_nbts(client_jar, stage_dir, cancel)?;
+
+    for (dst_name, prefix, label) in [
+        ("block-tags.json", "data/minecraft/tags/block/", "block tags"),
+        ("damage-types.json", "data/minecraft/damage_type/", "damage_type"),
+        ("damage-tags.json", "data/minecraft/tags/damage_type/", "tags/damage_type"),
+    ] {
+        cancel.check()?;
+        let val = single_jar_resources_value(client_jar, prefix, label)?;
+        let bytes = serde_json::to_vec_pretty(&val).map_err(|e| e.to_string())?;
+        atomic_write_bytes(&stage_dir.join(dst_name), &bytes)?;
+    }
+
+    let mut maps_written = 0u64;
+    for (bundle_name, rel_prefix) in WORLDGEN_BUNDLES {
+        cancel.check()?;
+        let prefix = format!("data/minecraft/{rel_prefix}/");
+        let val = single_jar_resources_value(client_jar, &prefix, rel_prefix)?;
+        let serialized = serde_json::to_vec(&val).map_err(|e| e.to_string())?;
+        atomic_write_bytes(&out.join(format!("{bundle_name}.json")), &serialized)?;
+        maps_written += 1;
+    }
+
+    Ok((structures_count, maps_written))
+}
+
+struct BaseClientAssetsResult {
+    controls_ready: u64,
+    indexed_assets_copied: u64,
+    client_resource_files: u64,
+    data_version: Option<u64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fetch_and_install_client_assets_and_controls(
+    cfg: &PrepareConfig,
+    fetcher: &HttpFetcher,
+    artifact_plan: &crate::download::ClientArtifactsPlan,
+    controls: &BedrockControlsManifest,
+    work_dir: &Path,
+    stage_dir: &Path,
+    stats: &mut DownloadStats,
+    cancel: &CancelFlag,
+    on_progress: &(dyn Fn(&str, u64, u64) + Sync),
+) -> Result<BaseClientAssetsResult, String> {
+    let game_home = cfg.game_home.as_deref();
+
+    on_progress("Downloading asset index", 0, 1);
+    let idx_outcome = crate::download::ensure_verified_file(fetcher, &artifact_plan.asset_index_spec)?;
+    match idx_outcome {
+        crate::download::FetchOutcome::AlreadyPresent(b)
+        | crate::download::FetchOutcome::ReusedFromStore(b) => {
+            stats.files_reused += 1;
+            stats.bytes_reused += b;
+        }
+        crate::download::FetchOutcome::Downloaded(b) => {
+            stats.files_downloaded += 1;
+            stats.bytes_downloaded += b;
+        }
+    }
+    let idx_bytes = fs::read(&artifact_plan.asset_index_spec.dest)
+        .map_err(|e| format!("Read asset index: {e}"))?;
+    atomic_write_bytes(&stage_dir.join("asset-index.json"), &idx_bytes)?;
+
+    let objects_base = cfg
+        .objects_base_url
+        .as_deref()
+        .unwrap_or("https://resources.download.minecraft.net");
+    let (obj_specs, name_to_obj) = plan_asset_objects(
+        &artifact_plan.asset_index_spec.dest,
+        objects_base,
+        work_dir,
+        game_home,
+    )?;
+    let empty_optional = HashSet::new();
+    let asset_stats = fetch_batch_parallel(
+        fetcher,
+        &obj_specs,
+        cfg.download_workers,
+        &empty_optional,
+        "Downloading/verifying asset objects",
+        on_progress,
+    )?;
+    stats.files_reused += asset_stats.files_reused;
+    stats.bytes_reused += asset_stats.bytes_reused;
+    stats.files_downloaded += asset_stats.files_downloaded;
+    stats.bytes_downloaded += asset_stats.bytes_downloaded;
+
+    let planned_controls =
+        plan_bedrock_controls(controls, cfg.controls_base_url.as_deref(), work_dir)?;
+    let control_specs: Vec<_> = planned_controls.iter().map(|(s, _)| s.clone()).collect();
+    let ctrl_stats = fetch_batch_parallel(
+        fetcher,
+        &control_specs,
+        cfg.download_workers.min(4),
+        &empty_optional,
+        "Downloading touch controls",
+        on_progress,
+    )?;
+    stats.files_reused += ctrl_stats.files_reused;
+    stats.bytes_reused += ctrl_stats.bytes_reused;
+    stats.files_downloaded += ctrl_stats.files_downloaded;
+    stats.bytes_downloaded += ctrl_stats.bytes_downloaded;
+
+    let controls_target = stage_dir.join("assets/minecraft/textures/gui/bedrock");
+    let mut controls_ready = 0u64;
+    for (spec, rel) in &planned_controls {
+        cancel.check()?;
+        let dst = controls_target.join(rel);
+        atomic_copy_file(&spec.dest, &dst, cancel)?;
+        controls_ready += 1;
+    }
+
+    let total_indexed = name_to_obj.len() as u64;
+    on_progress("Installing indexed Minecraft assets", 0, total_indexed);
+    let mut indexed_copied = 0u64;
+    for (name, src_obj) in &name_to_obj {
+        cancel.check()?;
+        let rel = safe_relative(name)?;
+        let dst = stage_dir.join("assets").join(rel);
+        let expected_hash = src_obj
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if !(dst.is_file() && sha1_file(&dst).is_ok_and(|h| h == expected_hash)) {
+            atomic_copy_file(src_obj, &dst, cancel)?;
+        }
+        indexed_copied += 1;
+        if indexed_copied % 256 == 0 || indexed_copied == total_indexed {
+            on_progress(
+                "Installing indexed Minecraft assets",
+                indexed_copied,
+                total_indexed,
+            );
+        }
+    }
+
+    on_progress("Extracting client.jar assets and data", 0, 1);
+    let (data_version, client_resource_files) = extract_client_jar_resources(
+        &artifact_plan.client_jar_path,
+        stage_dir,
+        Some(&name_to_obj),
+        cancel,
+    )?;
+    on_progress("Extracting client.jar assets and data", 1, 1);
+
+    Ok(BaseClientAssetsResult {
+        controls_ready,
+        indexed_assets_copied: indexed_copied,
+        client_resource_files,
+        data_version,
+    })
 }
 
 /// Phase 1 (Rust): Verify/download Mojang files, unpack bundler, extract assets/worldgen, build Java plan.
@@ -423,74 +608,6 @@ pub fn run_phase1(
     stats.files_downloaded += jar_stats.files_downloaded;
     stats.bytes_downloaded += jar_stats.bytes_downloaded;
 
-    // Asset index + indexed objects
-    on_progress("Downloading asset index", 0, 1);
-    let idx_outcome = crate::download::ensure_verified_file(&fetcher, &artifact_plan.asset_index_spec)?;
-    match idx_outcome {
-        crate::download::FetchOutcome::AlreadyPresent(b)
-        | crate::download::FetchOutcome::ReusedFromStore(b) => {
-            stats.files_reused += 1;
-            stats.bytes_reused += b;
-        }
-        crate::download::FetchOutcome::Downloaded(b) => {
-            stats.files_downloaded += 1;
-            stats.bytes_downloaded += b;
-        }
-    }
-    let idx_bytes = fs::read(&artifact_plan.asset_index_spec.dest)
-        .map_err(|e| format!("Read asset index: {e}"))?;
-    atomic_write_bytes(&stage_dir.join("asset-index.json"), &idx_bytes)?;
-
-    let objects_base = cfg
-        .objects_base_url
-        .as_deref()
-        .unwrap_or("https://resources.download.minecraft.net");
-    let (obj_specs, name_to_obj) = plan_asset_objects(
-        &artifact_plan.asset_index_spec.dest,
-        objects_base,
-        &work_dir,
-        game_home,
-    )?;
-    let empty_optional = HashSet::new();
-    let asset_stats = fetch_batch_parallel(
-        &fetcher,
-        &obj_specs,
-        cfg.download_workers,
-        &empty_optional,
-        "Downloading/verifying asset objects",
-        on_progress,
-    )?;
-    stats.files_reused += asset_stats.files_reused;
-    stats.bytes_reused += asset_stats.bytes_reused;
-    stats.files_downloaded += asset_stats.files_downloaded;
-    stats.bytes_downloaded += asset_stats.bytes_downloaded;
-
-    // Bedrock touch controls
-    let planned_controls =
-        plan_bedrock_controls(&controls, cfg.controls_base_url.as_deref(), &work_dir)?;
-    let control_specs: Vec<_> = planned_controls.iter().map(|(s, _)| s.clone()).collect();
-    let ctrl_stats = fetch_batch_parallel(
-        &fetcher,
-        &control_specs,
-        cfg.download_workers.min(4),
-        &empty_optional,
-        "Downloading touch controls",
-        on_progress,
-    )?;
-    stats.files_reused += ctrl_stats.files_reused;
-    stats.bytes_reused += ctrl_stats.bytes_reused;
-    stats.files_downloaded += ctrl_stats.files_downloaded;
-    stats.bytes_downloaded += ctrl_stats.bytes_downloaded;
-
-    let controls_target = stage_dir.join("assets/minecraft/textures/gui/bedrock");
-    let mut controls_ready = 0u64;
-    for (spec, rel) in &planned_controls {
-        cancel.check()?;
-        let dst = controls_target.join(rel);
-        atomic_copy_file(&spec.dest, &dst, cancel)?;
-        controls_ready += 1;
-    }
-
     // Unpack server bundler & write Java execution plan
     on_progress("Unpacking server bundler", 0, 1);
     let (server_game_jar, server_libs) = unpack_server_bundle(
@@ -545,51 +662,29 @@ pub fn run_phase1(
     )?;
     on_progress("Unpacking server bundler", 1, 1);
 
-    // Copy indexed assets (sounds, panorama, unifont, packs, languages, etc.) before/over placeholders
-    let total_indexed = name_to_obj.len() as u64;
-    on_progress("Installing indexed Minecraft assets", 0, total_indexed);
-    let mut indexed_copied = 0u64;
-    for (name, src_obj) in &name_to_obj {
-        cancel.check()?;
-        let rel = safe_relative(name)?;
-        let dst = stage_dir.join("assets").join(rel);
-        let expected_hash = src_obj
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        if !(dst.is_file() && sha1_file(&dst).is_ok_and(|h| h == expected_hash)) {
-            atomic_copy_file(src_obj, &dst, cancel)?;
-        }
-        indexed_copied += 1;
-        if indexed_copied % 256 == 0 || indexed_copied == total_indexed {
-            on_progress(
-                "Installing indexed Minecraft assets",
-                indexed_copied,
-                total_indexed,
-            );
-        }
-    }
-
-    // Extract client.jar resources (skipping already-installed indexed overrides!)
-    on_progress("Extracting client.jar assets and data", 0, 1);
-    let (data_version_opt, client_resource_files) = extract_client_jar_resources(
-        &artifact_plan.client_jar_path,
+    let base_assets = fetch_and_install_client_assets_and_controls(
+        cfg,
+        &fetcher,
+        &artifact_plan,
+        &controls,
+        &work_dir,
         &stage_dir,
-        Some(&name_to_obj),
+        &mut stats,
         cancel,
+        on_progress,
     )?;
+
     let origin_meta = serde_json::json!({
         "minecraft": lock.minecraft.version,
         "client_sha256": sha256_file(&artifact_plan.client_jar_path)?,
         "server_sha256": sha256_file(&server_game_jar)?,
-        "data_version": data_version_opt.unwrap_or(0),
-        "resource_files": client_resource_files,
+        "data_version": base_assets.data_version.unwrap_or(0),
+        "resource_files": base_assets.client_resource_files,
     });
     atomic_write_bytes(
         &work_dir.join("origin.json"),
         &serde_json::to_vec_pretty(&origin_meta).map_err(|e| e.to_string())?,
     )?;
-    on_progress("Extracting client.jar assets and data", 1, 1);
 
     // Write worldgen JSON bundles + structure templates
     on_progress("Writing worldgen bundles", 0, 1);
@@ -607,9 +702,9 @@ pub fn run_phase1(
         target_resources_dir: target_resources_dir.to_string_lossy().into_owned(),
         java_plan,
         download_stats: stats,
-        client_resource_files,
-        indexed_assets_copied: indexed_copied,
-        controls_ready,
+        client_resource_files: base_assets.client_resource_files,
+        indexed_assets_copied: base_assets.indexed_assets_copied,
+        controls_ready: base_assets.controls_ready,
         worldgen_structures_extracted,
         worldgen_maps_written,
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -977,12 +1072,266 @@ pub fn run_phase2_finalize(
         package_resources_zip(&stage_dir, &engine_data_zip, true, None, cancel)?;
 
     atomic_activate_dir(&stage_dir, &target_resources_dir)?;
+    verify_readiness_markers(&target_resources_dir, &lock.minecraft.version)?;
     on_progress("Writing manifests and engine-data.zip", 1, 1);
 
     Ok(Phase2Output {
         target_resources_dir: target_resources_dir.to_string_lossy().into_owned(),
         engine_data_zip: engine_data_zip.to_string_lossy().into_owned(),
         engine_data_entries,
+        survival_rules_count,
+        items_count,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        peak_rss_kb: peak_rss_kb(),
+    })
+}
+
+/// Validates a prebuilt `engine-data.zip` against Starling's exact allowlist (`is_generated_engine_file`).
+pub fn validate_bundled_engine_data_zip(
+    zip_path: &Path,
+    expected_version: &str,
+) -> Result<Vec<String>, String> {
+    if !zip_path.is_file() {
+        return Err(format!("Bundled engine-data.zip not found: {}", zip_path.display()));
+    }
+    let file = fs::File::open(zip_path).map_err(|e| format!("{}: {e}", zip_path.display()))?;
+    let mut arch = ZipArchive::new(file).map_err(|e| format!("{}: {e}", zip_path.display()))?;
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for i in 0..arch.len() {
+        let entry = arch.by_index(i).map_err(|e| e.to_string())?;
+        let name = entry.name().map_err(|e| e.to_string())?.to_string();
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.is_symlink() {
+            return Err(format!("Symlink forbidden in bundled engine-data.zip: {name}"));
+        }
+        let _rel = safe_relative(&name)?;
+        if entry.size() > 128 * 1024 * 1024 {
+            return Err(format!(
+                "Entry {name} in bundled engine-data.zip exceeds 128 MiB limit ({})",
+                entry.size()
+            ));
+        }
+        if !is_generated_engine_file(&name) {
+            return Err(format!(
+                "Forbidden entry in bundled engine-data.zip: {name} (not in generated allowlist)"
+            ));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("Duplicate entry in bundled engine-data.zip: {name}"));
+        }
+        entries.push(name);
+    }
+
+    for required in [
+        "horizon-resources.json",
+        "facts.json",
+        "items.json",
+        "registries.json",
+        "commands.json",
+        "model-states.json",
+        "cached-collision.nbt",
+        "worldgen/block_flags.json",
+    ] {
+        if !seen.contains(required) {
+            return Err(format!(
+                "Bundled engine-data.zip missing required table: {required}"
+            ));
+        }
+    }
+
+    let manifest_raw = read_zip_text(&mut arch, "horizon-resources.json")?;
+    let manifest: Value = serde_json::from_str(&manifest_raw)
+        .map_err(|e| format!("Invalid horizon-resources.json in bundle: {e}"))?;
+    if manifest.get("schema").and_then(Value::as_u64) != Some(u64::from(HORIZON_SCHEMA)) {
+        return Err(format!(
+            "Bundled horizon-resources.json schema mismatch (expected {HORIZON_SCHEMA})"
+        ));
+    }
+    if manifest.get("minecraft").and_then(Value::as_str) != Some(expected_version) {
+        return Err(format!(
+            "Bundled horizon-resources.json minecraft mismatch (expected {expected_version})"
+        ));
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
+/// Verifies all readiness markers checked by Starling `official_install::ready` and `horizon_prepare::check`.
+pub fn verify_readiness_markers(target_dir: &Path, expected_version: &str) -> Result<(), String> {
+    let manifest = read_json_value(&target_dir.join("horizon-resources.json"))?;
+    if manifest.get("schema").and_then(Value::as_u64) != Some(u64::from(HORIZON_SCHEMA)) {
+        return Err(format!(
+            "horizon-resources.json schema mismatch under {}",
+            target_dir.display()
+        ));
+    }
+    if manifest.get("minecraft").and_then(Value::as_str) != Some(expected_version) {
+        return Err(format!(
+            "horizon-resources.json minecraft mismatch under {}",
+            target_dir.display()
+        ));
+    }
+    let stamp = read_json_value(&target_dir.join("horizon-prepare.json"))?;
+    if stamp.get("output_version").and_then(Value::as_u64) != Some(u64::from(HORIZON_OUTPUT_VERSION))
+    {
+        return Err(format!(
+            "horizon-prepare.json output_version mismatch under {}",
+            target_dir.display()
+        ));
+    }
+    let downloads = read_json_value(&target_dir.join("android-downloads-v2.json"))?;
+    if downloads.get("schema").and_then(Value::as_u64) != Some(2) {
+        return Err(format!(
+            "android-downloads-v2.json schema mismatch under {}",
+            target_dir.display()
+        ));
+    }
+    let audio = read_json_value(&target_dir.join("audio-complete.json"))?;
+    if !audio.is_object() {
+        return Err(format!(
+            "audio-complete.json is not a JSON object under {}",
+            target_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Fast-path preparation using APK-bundled `engine-data.zip`: skips `javac`, `datagen`, `server.jar`, and libraries.
+pub fn run_bundled_prepare(
+    cfg: &PrepareConfig,
+    cancel: &CancelFlag,
+    on_progress: &(dyn Fn(&str, u64, u64) + Sync),
+) -> Result<Phase2Output, String> {
+    let started = Instant::now();
+    cancel.reset();
+
+    let lock = LockFile::read(&cfg.lock_path)?;
+    let controls = BedrockControlsManifest::read(&cfg.controls_manifest_path)?;
+    let bundled_zip = cfg
+        .bundled_engine_data_zip
+        .as_deref()
+        .ok_or("PrepareConfig.bundled_engine_data_zip must be set for bundled prepare")?;
+
+    on_progress("Validating bundled engine-data.zip", 0, 1);
+    let validated_entries = validate_bundled_engine_data_zip(bundled_zip, &lock.minecraft.version)?;
+    on_progress("Validating bundled engine-data.zip", 1, 1);
+
+    let horizon_local = cfg.files_dir.join(".local/horizon-client");
+    let work_dir = cfg.files_dir.join(".local/prepare-work").join(&lock.minecraft.version);
+    let stage_dir = horizon_local.join(format!("{}.partial", lock.minecraft.version));
+    let target_resources_dir = horizon_local.join(&lock.minecraft.version);
+
+    fs::create_dir_all(&work_dir).map_err(|e| format!("{}: {e}", work_dir.display()))?;
+    fs::create_dir_all(&stage_dir).map_err(|e| format!("{}: {e}", stage_dir.display()))?;
+    cleanup_partials(&work_dir);
+    cleanup_partials(&stage_dir);
+
+    let fetcher = HttpFetcher::new(cfg.allow_loopback, cancel.clone());
+    let mut stats = DownloadStats::default();
+    let catalog_url = cfg.catalog_url.as_deref().unwrap_or(DEFAULT_CATALOG_URL);
+
+    on_progress("Checking Mojang 26.3 manifest", 0, 1);
+    let game_home = cfg.game_home.as_deref();
+    let resolved_manifest =
+        resolve_version_manifest(&fetcher, &lock, &work_dir, game_home, catalog_url, &mut stats)?;
+    on_progress("Checking Mojang 26.3 manifest", 1, 1);
+
+    let artifact_plan =
+        build_artifact_plan(&resolved_manifest.manifest, &lock.minecraft, &work_dir, game_home)?;
+    // Bundled mode only needs client.jar + assetIndex/assets + touch controls (no server.jar, no Java libs).
+    let client_only_specs: Vec<_> = artifact_plan
+        .specs
+        .iter()
+        .filter(|s| s.dest == artifact_plan.client_jar_path)
+        .cloned()
+        .collect();
+    if client_only_specs.len() != 1 {
+        return Err("Internal error: client.jar fetch spec missing from plan".to_string());
+    }
+    let empty_optional = HashSet::new();
+    let _jar_stats = fetch_batch_parallel(
+        &fetcher,
+        &client_only_specs,
+        1,
+        &empty_optional,
+        "Verifying/reusing client.jar",
+        on_progress,
+    )?;
+
+    let _base_assets = fetch_and_install_client_assets_and_controls(
+        cfg,
+        &fetcher,
+        &artifact_plan,
+        &controls,
+        &work_dir,
+        &stage_dir,
+        &mut stats,
+        cancel,
+        on_progress,
+    )?;
+
+    on_progress("Rebuilding client worldgen and tag tables", 0, 1);
+    write_worldgen_bundles_from_client_only(&artifact_plan.client_jar_path, &stage_dir, cancel)?;
+    on_progress("Rebuilding client worldgen and tag tables", 1, 1);
+
+    let total_entries = validated_entries.len() as u64;
+    on_progress("Unpacking bundled engine tables", 0, total_entries);
+    {
+        let file = fs::File::open(bundled_zip)
+            .map_err(|e| format!("{}: {e}", bundled_zip.display()))?;
+        let mut arch =
+            ZipArchive::new(file).map_err(|e| format!("{}: {e}", bundled_zip.display()))?;
+        for (idx, rel_str) in validated_entries.iter().enumerate() {
+            cancel.check()?;
+            let rel = safe_relative(rel_str)?;
+            let bytes = read_zip_bytes(&mut arch, rel_str)?;
+            atomic_write_bytes(&stage_dir.join(rel), &bytes)?;
+            on_progress("Unpacking bundled engine tables", (idx + 1) as u64, total_entries);
+        }
+    }
+
+    let items_count = read_json_value(&stage_dir.join("items.json"))
+        .ok()
+        .and_then(|v| v.as_object().map(|m| m.len() as u64))
+        .unwrap_or(0);
+    let survival_rules_path = stage_dir.join("worldgen/blocks/survival-rules.json");
+    let survival_rules_count = if survival_rules_path.is_file() {
+        read_json_value(&survival_rules_path)
+            .ok()
+            .and_then(|v| v.as_object().map(|m| m.len() as u64))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    on_progress("Writing readiness markers", 0, 1);
+    atomic_write_bytes(
+        &stage_dir.join("horizon-prepare.json"),
+        format!("{{\"output_version\":{HORIZON_OUTPUT_VERSION}}}\n").as_bytes(),
+    )?;
+    atomic_write_bytes(
+        &stage_dir.join("android-downloads-v2.json"),
+        b"{\"schema\":2}\n",
+    )?;
+    atomic_write_bytes(&stage_dir.join("audio-complete.json"), b"{}\n")?;
+
+    let engine_data_zip = cfg.files_dir.join("engine-data.zip");
+    if engine_data_zip != bundled_zip {
+        atomic_copy_file(bundled_zip, &engine_data_zip, cancel)?;
+    }
+
+    atomic_activate_dir(&stage_dir, &target_resources_dir)?;
+    verify_readiness_markers(&target_resources_dir, &lock.minecraft.version)?;
+    on_progress("Writing readiness markers", 1, 1);
+
+    Ok(Phase2Output {
+        target_resources_dir: target_resources_dir.to_string_lossy().into_owned(),
+        engine_data_zip: engine_data_zip.to_string_lossy().into_owned(),
+        engine_data_entries: total_entries,
         survival_rules_count,
         items_count,
         elapsed_ms: started.elapsed().as_millis() as u64,
