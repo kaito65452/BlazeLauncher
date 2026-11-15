@@ -139,46 +139,62 @@ class RustSessionHandoffTest {
             val statusDir = rootDir.resolve("no_backup").apply { mkdirs() }
             val fakeJwtToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJmYWtlLXV1aWQifQ.sig_secret_987"
             val fakeOpaqueToken = "M.C501_BLZ.FakeAccessTokenValue_777"
+            val fakeDashedUuid = "12345678-90ab-cdef-1234-567890abcdef"
+            val fakeUndashedUuid = "1234567890abcdef1234567890abcdef"
+            val sampleSha1 = "e877b6a07acd633fb3bb475002175cec036e7b87"
 
             val acceptedHandoff = RustSessionHandoff.handoffSession(
                 user = "Alex",
-                uuid = "12345678-90AB-CDEF-1234-567890ABCDEF",
+                uuid = fakeDashedUuid.uppercase(),
                 accessToken = fakeJwtToken
             ) { _, _, _ -> true }
             val failedHandoff = RustSessionHandoff.handoffSession(
                 user = "Alex",
-                uuid = "12345678-90AB-CDEF-1234-567890ABCDEF",
+                uuid = fakeDashedUuid.uppercase(),
                 accessToken = fakeOpaqueToken
             ) { _, _, _ ->
-                throw IllegalStateException("Bearer $fakeOpaqueToken {\"access_token\":\"$fakeOpaqueToken\"}")
+                throw IllegalStateException("Bearer $fakeOpaqueToken {\"access_token\":\"$fakeOpaqueToken\"} uuid=$fakeDashedUuid")
             }
+
+            assertFalse("Handoff summary must never contain full dashed UUID", acceptedHandoff.summary.contains(fakeDashedUuid, ignoreCase = true))
+            assertFalse("Handoff summary must never contain full undashed UUID", acceptedHandoff.summary.contains(fakeUndashedUuid, ignoreCase = true))
+            assertTrue("Handoff summary must keep first 8 chars of UUID", acceptedHandoff.summary.contains("uuidPrefix=12345678..."))
+            assertTrue("Handoff summary must include token length", acceptedHandoff.summary.contains("tokenLen=${fakeJwtToken.length}"))
 
             statusDir.resolve("rust_spike_last_status.txt").writeText(
                 RustDiagnosticsCollector.redactDiagnosticText(
                     """
                     [2026-11-14 12:00:00.000] session_handoff: ${acceptedHandoff.summary}
                     [2026-11-14 12:00:01.000] session_handoff_err: ${failedHandoff.summary}
-                    [2026-11-14 12:00:02.000] raw_leak_guard: Authorization: Bearer $fakeOpaqueToken XBL3.0 x=uhs999;$fakeJwtToken
+                    [2026-11-14 12:00:02.000] raw_leak_guard: Authorization: Bearer $fakeOpaqueToken XBL3.0 x=uhs999;$fakeJwtToken uuid=$fakeDashedUuid blaze:$fakeUndashedUuid token=$fakeOpaqueToken
                     """.trimIndent()
                 )
             )
             val perfDir = filesDir.resolve("performance").apply { mkdirs() }
             perfDir.resolve("diagnostic.log").writeText(
-                "Horizon: {\"access_token\":\"$fakeOpaqueToken\",\"refresh_token\":\"$fakeJwtToken\"}\n"
+                "Horizon: {\"access_token\":\"$fakeOpaqueToken\",\"refresh_token\":\"$fakeJwtToken\",\"uuid\":\"$fakeUndashedUuid\"}\nsha1=$sampleSha1\n"
             )
 
             val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
                 filesDir = filesDir,
                 statusDir = statusDir,
-                historicalExits = "2026-11-14 12:00:05.000 pid=42 reason=10 status=0 desc=Bearer $fakeOpaqueToken",
+                historicalExits = "2026-11-14 12:00:05.000 pid=42 reason=10 status=0 desc=Bearer $fakeOpaqueToken uuid=$fakeDashedUuid",
                 logcatProvider = {
-                    "01-01 12:00:00.100 I Horizon: Authorization: Bearer $fakeOpaqueToken\n" +
-                        "01-01 12:00:00.200 I Horizon: {\"access_token\":\"$fakeJwtToken\"}"
+                    "01-01 12:00:00.100 I Horizon: BlazeSessionHandoff: staged AuthSession on :rust (uuid_prefix=12345678..., token_len=${fakeOpaqueToken.length})\n" +
+                        "01-01 12:00:00.150 I Horizon: Authorization: Bearer $fakeOpaqueToken uuid=$fakeDashedUuid\n" +
+                        "01-01 12:00:00.200 I Horizon: {\"access_token\":\"$fakeJwtToken\",\"active_uuid\":\"$fakeUndashedUuid\"}"
                 }
             )
 
             assertFalse("Raw JWT fake token must be absent from Copy report output", report.contains(fakeJwtToken))
             assertFalse("Raw opaque fake token must be absent from Copy report output", report.contains(fakeOpaqueToken))
+            assertFalse("Full dashed UUID must be absent from Copy report output", report.contains(fakeDashedUuid, ignoreCase = true))
+            assertFalse("Full undashed UUID must be absent from Copy report output", report.contains(fakeUndashedUuid, ignoreCase = true))
+            assertTrue("UUID 8-char prefix must appear in Copy report output", report.contains("12345678..."))
+            assertTrue("Token length must appear in Copy report output", report.contains("token_len=${fakeOpaqueToken.length}"))
+            assertTrue("40-hex SHA-1 hashes must not be truncated by UUID redaction", report.contains(sampleSha1))
+            assertTrue(report.contains("=== Engine Login Policy ==="))
+            assertTrue(report.contains("engine login: disabled"))
             assertTrue(report.contains("=== Engine Data Check ==="))
             assertTrue(report.contains("Engine data: expected path="))
             assertTrue(report.contains("engine-data.zip=missing"))

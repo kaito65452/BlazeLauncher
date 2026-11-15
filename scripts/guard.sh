@@ -549,6 +549,10 @@ for fpath, raw, _no_comments, android_src in parsed:
                 line_no = code_only[:m.start()].count("\n") + 1
                 violations.append(f"{rel}:{line_no}: setSession/diagnostics must not write session data to disk ({m.group(0)!r})")
 
+    for m in re.finditer(r"BlazeSessionHandoff[^;\n]*\{:032x\}|\buuid=\{:032x\}", check_text):
+        line_no = check_text[:m.start()].count("\n") + 1
+        violations.append(f"{rel}:{line_no}: BlazeSessionHandoff log must only log first 8 UUID chars (uuid_prefix), not full {{:032x}}")
+
     if rel.endswith("android/catalog.rs"):
         if not re.search(r'pub\s+const\s+MICROSOFT_CLIENT_ID\s*:\s*&str\s*=\s*""\s*;', android_src):
             violations.append(f"{rel}: MICROSOFT_CLIENT_ID is not cleared to empty string")

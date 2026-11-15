@@ -39,12 +39,25 @@ object RustDiagnosticsCollector {
 
     private val JWT_REGEX = Regex("""eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*)?""")
     private val XBL_REGEX = Regex("""(?i)XBL3\.0\s+x=[^\s;"]+""")
+    private val KV_TOKEN_REGEX = Regex("""(?i)\b(access_token|refresh_token|id_token|xsts_token|mc_token|xbox_token|token)=([^\s&;,)"']+)""")
+    private val DASHED_UUID_REGEX = Regex("""\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b""")
+    private val HEX_32_UUID_REGEX = Regex("""(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])""")
+
+    const val ENGINE_LOGIN_ENABLED: Boolean = false
+
+    fun engineLoginStatusLine(): String {
+        val state = if (ENGINE_LOGIN_ENABLED) "enabled" else "disabled"
+        return "engine login: $state (launcher-owned Microsoft OAuth + in-memory setSession handoff only)"
+    }
 
     fun redactDiagnosticText(input: String?): String {
         if (input.isNullOrBlank()) return ""
         var cleaned = redactSensitiveData(input)
         cleaned = JWT_REGEX.replace(cleaned, "[REDACTED_JWT]")
         cleaned = XBL_REGEX.replace(cleaned, "XBL3.0 x=[REDACTED]")
+        cleaned = KV_TOKEN_REGEX.replace(cleaned) { m -> "${m.groupValues[1]}=[REDACTED]" }
+        cleaned = DASHED_UUID_REGEX.replace(cleaned) { m -> "${m.value.take(8).lowercase()}..." }
+        cleaned = HEX_32_UUID_REGEX.replace(cleaned) { m -> "${m.value.take(8).lowercase()}..." }
         return cleaned
     }
 
@@ -98,6 +111,10 @@ object RustDiagnosticsCollector {
             if (file.isFile) redactDiagnosticText(file.readText().trim()) else ""
         }.getOrDefault("")
         appendLine(statusText.ifBlank { "No :rust lifecycle trace recorded yet." })
+
+        appendLine()
+        appendLine("=== Engine Login Policy ===")
+        appendLine(engineLoginStatusLine())
 
         appendLine()
         appendLine("=== Engine Data Check ===")

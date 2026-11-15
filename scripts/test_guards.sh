@@ -441,6 +441,15 @@ RS
 expect_fail "Check 10 rejects disk save in blaze_diagnostics.rs" "must not write session data to disk" \
     env GUARD_CHECK10_ONLY_DIR="$CASE10_DISK" bash scripts/guard.sh
 
+# Negative 6b: full 32-hex UUID logged in BlazeSessionHandoff
+CASE10_FULL_UUID="$TMP_ROOT/check10_full_uuid"
+mkdir -p "$CASE10_FULL_UUID/crates/horizon-client/src/android"
+cat > "$CASE10_FULL_UUID/crates/horizon-client/src/android/blaze_diagnostics.rs" <<'RS'
+pub fn log_bad(uuid: u128, len: usize) { log::info!("BlazeSessionHandoff: staged (uuid={:032x}, token_len={})", uuid, len); }
+RS
+expect_fail "Check 10 rejects full 32-hex UUID in BlazeSessionHandoff log" "must only log first 8 UUID chars" \
+    env GUARD_CHECK10_ONLY_DIR="$CASE10_FULL_UUID" bash scripts/guard.sh
+
 # Desktop-only launcher/src/{backend,cli,main,mcp}.rs vs Android-shared launcher/src/account.rs (including starling/ prefix fallback)
 CASE10_DESKTOP_ONLY="$TMP_ROOT/check10_desktop_only"
 mkdir -p "$CASE10_DESKTOP_ONLY/launcher/src"

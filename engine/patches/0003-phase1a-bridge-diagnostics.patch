@@ -1,8 +1,20 @@
 diff --git a/crates/horizon-client-render/src/auth.rs b/crates/horizon-client-render/src/auth.rs
-index ef322c85b3..283a92575a 100644
+index ef322c85b3..816a29de9c 100644
 --- a/crates/horizon-client-render/src/auth.rs
 +++ b/crates/horizon-client-render/src/auth.rs
-@@ -140,6 +140,32 @@ pub fn clear_current() {
+@@ -107,6 +107,11 @@ impl AuthSession {
+         let _ = std::fs::remove_file(path);
+         Self::parse(&text.map_err(|e| format!("{}: {e}", path.display()))?)
+     }
++    /// Length of the in-memory access token (diagnostics only; never exposes the token itself).
++    #[cfg(target_os = "android")]
++    pub fn token_len(&self) -> usize {
++        self.access_token.len()
++    }
+ }
+ 
+ #[cfg(not(target_os = "android"))]
+@@ -140,6 +145,32 @@ pub fn clear_current() {
      *CURRENT.write().unwrap() = None;
  }
  
@@ -103,10 +115,10 @@ index 47adec266f..1a752e61ea 100644
              device.set_device_lost_callback(move |reason, message| {
 diff --git a/crates/horizon-client/src/android/blaze_diagnostics.rs b/crates/horizon-client/src/android/blaze_diagnostics.rs
 new file mode 100644
-index 0000000000..56a1729704
+index 0000000000..c5c2272a9e
 --- /dev/null
 +++ b/crates/horizon-client/src/android/blaze_diagnostics.rs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,94 @@
 +//! Phase 1a JNI extensions for Blaze Launcher session handoff and synthetic input diagnostics.
 +use jni::{
 +    JNIEnv,
@@ -166,9 +178,10 @@ index 0000000000..56a1729704
 +        parsed_uuid,
 +        &token,
 +    ));
++    let uuid_hex = format!("{:032x}", parsed_uuid);
 +    log::info!(
-+        "BlazeSessionHandoff: staged AuthSession on :rust (uuid={:032x}, token_len={})",
-+        parsed_uuid,
++        "BlazeSessionHandoff: staged AuthSession on :rust (uuid_prefix={}..., token_len={})",
++        &uuid_hex[..8],
 +        token.len()
 +    );
 +    1
@@ -229,7 +242,7 @@ index 2f0ddbf180..be7eca4909 100644
                  crate::diagnostics::heartbeat("launcher_background", || serde_json::json!({}));
                  horizon_client::android_runtime::clear_gamepads();
 diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
-index 46e1aac767..0c20f60b11 100644
+index 46e1aac767..481c023839 100644
 --- a/crates/horizon-client/src/android_main.rs
 +++ b/crates/horizon-client/src/android_main.rs
 @@ -27,6 +27,8 @@ mod catalog;
@@ -242,19 +255,21 @@ index 46e1aac767..0c20f60b11 100644
  mod diagnostics;
  #[path = "android/display.rs"]
 diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
-index 99745d0b9e..b4641a2309 100644
+index 99745d0b9e..bbde11fb9f 100644
 --- a/crates/horizon-client/src/game.rs
 +++ b/crates/horizon-client/src/game.rs
-@@ -21183,6 +21183,16 @@ pub(crate) fn android_game(arguments: Vec<String>) -> Result<Box<dyn Application
+@@ -21183,6 +21183,18 @@ pub(crate) fn android_game(arguments: Vec<String>) -> Result<Box<dyn Application
      horizon_client::auth::clear_current();
      ensure_factory_touch_layout();
      let mut options = Options::read_arguments(arguments)?.ok_or("missing Android options")?;
 +    if horizon_client::auth::current().is_none()
 +        && let Some(session) = horizon_client::auth::take_pending_android()
 +    {
++        let uuid_hex = format!("{:032x}", session.uuid);
 +        log::info!(
-+            "BlazeSessionHandoff: restored staged AuthSession for android_game (uuid={:032x})",
-+            session.uuid
++            "BlazeSessionHandoff: restored staged AuthSession for android_game (uuid_prefix={}..., token_len={})",
++            &uuid_hex[..8],
++            session.token_len()
 +        );
 +        horizon_client::auth::set_current(session);
 +        horizon_client::auth::prepare_chat_keys(true);
