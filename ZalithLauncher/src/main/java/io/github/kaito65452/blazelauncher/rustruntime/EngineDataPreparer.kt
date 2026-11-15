@@ -678,7 +678,7 @@ object EngineDataPreparer {
         }
     }
 
-    private fun isPreparedFallback(filesDir: File): Boolean {
+    fun isPreparedFallback(filesDir: File): Boolean {
         val verDir = File(filesDir, ".local/horizon-client/${EngineDataPrepareSupport.TARGET_MINECRAFT_VERSION}")
         return File(filesDir, "engine-data.zip").isFile &&
             File(verDir, "horizon-resources.json").isFile &&

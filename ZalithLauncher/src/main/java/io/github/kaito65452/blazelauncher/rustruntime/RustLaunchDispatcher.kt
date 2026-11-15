@@ -98,7 +98,7 @@ object RustLaunchDispatcher {
         check(!version.offlineAccountLogin && account.isMicrosoftAccount()) {
             "Rust Edition cannot launch without a verified Microsoft account."
         }
-        check(EngineDataPrepareSupport.isPreparedFallback(context.filesDir)) {
+        check(EngineDataPreparer.isPreparedFallback(context.filesDir)) {
             "Rust Edition engine data is missing on disk."
         }
 

@@ -43,7 +43,6 @@ import com.movtery.zalithlauncher.ui.activities.runGame
 import com.movtery.zalithlauncher.ui.androidText
 import com.movtery.zalithlauncher.utils.network.isNetworkAvailable
 import com.movtery.zalithlauncher.viewmodel.ErrorViewModel
-import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPrepareSupport
 import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPreparer
 import io.github.kaito65452.blazelauncher.rustruntime.RustLaunchDispatcher
 import kotlinx.coroutines.CancellationException
@@ -99,8 +98,8 @@ class GameLaunchFlow(scope: CoroutineScope) {
         if (version.getRuntime() == GameRuntime.RUST && !account.isMicrosoftAccount()) {
             submitError(
                 ErrorViewModel.ThrowableMessage(
-                    title = context.getString(R.string.generic_error),
-                    message = context.getString(R.string.rust_microsoft_account_required)
+                    title = androidText(R.string.generic_error),
+                    message = androidText(R.string.rust_microsoft_account_required)
                 )
             )
             return
@@ -198,7 +197,7 @@ class GameLaunchFlow(scope: CoroutineScope) {
             }
 
             if (isRustRuntime) {
-                if (!EngineDataPrepareSupport.isPreparedFallback(context.filesDir)) {
+                if (!EngineDataPreparer.isPreparedFallback(context.filesDir)) {
                     addTask(
                         icon = R.drawable.ic_build_outlined,
                         title = androidText(R.string.rust_engine_data_preparing)

@@ -308,8 +308,8 @@ fun LaunchGameOperation(
                     if (!activeAccount.isMicrosoftAccount()) {
                         submitError(
                             ErrorViewModel.ThrowableMessage(
-                                title = activity.getString(R.string.generic_error),
-                                message = activity.getString(R.string.rust_microsoft_account_required)
+                                title = androidText(R.string.generic_error),
+                                message = androidText(R.string.rust_microsoft_account_required)
                             )
                         )
                         launchGameViewModel.updateOperation(LaunchGameOperation.None)
