@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -625,8 +625,8 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "engine" ]; then
             git -C engine/starling worktree add --no-checkout --detach "$TEMP_PATCHED_WORKTREE" HEAD >/dev/null 2>&1
             # Query tracked paths from main submodule index (--no-checkout worktree has an empty index)
             {
-                git -C engine/starling ls-files 'Cargo.toml' '*.rs'
-                grep -h '^--- a/' engine/patches/*.patch | sed 's|^--- a/||'
+                git -C engine/starling ls-files 'Cargo.toml' '**/Cargo.toml' '*.rs'
+                grep -h '^--- a/' engine/patches/*.patch | sed 's|^--- a/||' | xargs -r git -C engine/starling ls-files --
             } | sort -u | xargs -r git -C "$TEMP_PATCHED_WORKTREE" checkout HEAD --
             for p in engine/patches/*.patch; do
                 p_abs="$(pwd)/$p"
@@ -1049,6 +1049,67 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
     echo "✓ K8 nightly/release/CI engine-data bundle isolation passed."
 fi
 
+if [ "${1:-}" = "--check-embedded-so" ]; then
+    SO_PATH="${2:-}"
+    if [ -z "$SO_PATH" ] || [ ! -f "$SO_PATH" ]; then
+        echo "ERROR: --check-embedded-so requires a valid .so file path (got: '$SO_PATH')"
+        exit 1
+    fi
+    echo "Checking embedded engine .so (A0 KEEP-list + A3 stripped UI): $SO_PATH"
+    python3 - "$SO_PATH" <<'PY'
+import sys
+
+so_path = sys.argv[1]
+data = open(so_path, "rb").read()
+
+required_keep_markers = [
+    b"Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInit",
+    b"Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetSession",
+    b"Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetDirectLaunch",
+    b"Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSignalEngineExit",
+    b"Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeConfigureEmbedded",
+    b"BlazeWgpu:",
+    b"BlazePerf pipelines_created_ms=",
+    b"BlazePerf surface_to_first_frame_ms=",
+    b"Not affiliated with Mojang or Microsoft",
+    b"APerformanceHint_createSession",
+    b"ANativeWindow_setFrameRate",
+    b"android_main",
+    b"BlazeDirectLaunch: entered 26.3 game directly (blaze-embedded)",
+]
+
+forbidden_embedded_markers = [
+    b"Horizon Control Hub",
+    b"Configure touch controls, virtual mouse & feedback",
+    b"Horizon Android",
+    b"Start Horizon from the launcher",
+    b"https://telemetry.playhorizon.dev",
+    b"https://horizon-rust.github.io/horizon-mods",
+    b"https://github.com/JuanLuci/starling/releases/latest",
+    b"https://github.com/Vasysik/horizon-android",
+    b"https://api.curseforge.com/v1",
+    b"Complementary Reimagined",
+]
+
+missing = [m.decode("ascii") for m in required_keep_markers if m not in data]
+if missing:
+    print("ERROR: blaze-embedded .so is missing mandatory A0 KEEP-list symbols/markers:", file=sys.stderr)
+    for item in missing:
+        print(f"  - {item}", file=sys.stderr)
+    sys.exit(1)
+
+found_bad = [m.decode("ascii") for m in forbidden_embedded_markers if m in data]
+if found_bad:
+    print("ERROR: blaze-embedded .so still contains forbidden Horizon UI/network markers:", file=sys.stderr)
+    for item in found_bad:
+        print(f"  - {item}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"✓ Embedded .so verified: {len(required_keep_markers)} KEEP markers present, 0 forbidden UI/network markers.")
+PY
+    exit 0
+fi
+
 if [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ]; then
     CHECK_RELEASE_APK=0
     CHECK_RELEASE_UPLOAD=0
@@ -1355,6 +1416,17 @@ with zipfile.ZipFile(apk_path, "r") as zf:
         b"/entitlements/mcstore",
         b"authserver.ely.by",
     ]
+    forbidden_embedded_ui_markers = [
+        b"Horizon Control Hub",
+        b"Horizon Android",
+        b"Start Horizon from the launcher",
+        b"https://telemetry.playhorizon.dev",
+        b"https://horizon-rust.github.io/horizon-mods",
+        b"https://github.com/JuanLuci/starling/releases/latest",
+        b"https://github.com/Vasysik/horizon-android",
+        b"https://api.curseforge.com/v1",
+        b"Complementary Reimagined",
+    ]
     for n in so_entries:
         data = zf.read(n)
         for enc, text_marker, raw_marker in ofl_markers:
@@ -1376,6 +1448,13 @@ with zipfile.ZipFile(apk_path, "r") as zf:
             if marker in masked_so:
                 print(
                     f"ERROR: {n} contains forbidden Starling OAuth/login marker {marker.decode('ascii')!r}!",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        for marker in forbidden_embedded_ui_markers:
+            if marker in data:
+                print(
+                    f"ERROR: {n} contains forbidden Horizon UI/network marker {marker.decode('ascii')!r}!",
                     file=sys.stderr,
                 )
                 sys.exit(1)

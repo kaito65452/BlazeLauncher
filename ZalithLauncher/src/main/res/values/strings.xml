@@ -1483,6 +1483,12 @@
     <string name="developer_capability_report_summary">Inspect Vulkan, supported ABIs, and audio hardware capabilities</string>
     <string name="developer_rust_spike_title">Launch Rust Edition Spike</string>
     <string name="developer_rust_spike_summary">Launch the isolated :rust NativeActivity spike</string>
+    <string name="developer_rust_render_scale_title">Rust Edition render scale</string>
+    <string name="developer_rust_render_scale_summary">Launcher-owned 3D resolution scale (25%–100%)</string>
+    <string name="developer_rust_touch_sensitivity_title">Rust Edition touch look sensitivity</string>
+    <string name="developer_rust_touch_sensitivity_summary">Launcher-owned touch camera sensitivity percentage</string>
+    <string name="developer_rust_show_controls_title">Show Rust engine controls</string>
+    <string name="developer_rust_show_controls_summary">Display on-screen touch controls inside Rust Edition</string>
     <string name="developer_copy_report">Copy report</string>
     <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
     <string name="developer_prepare_title">Prepare engine data (spike)</string>

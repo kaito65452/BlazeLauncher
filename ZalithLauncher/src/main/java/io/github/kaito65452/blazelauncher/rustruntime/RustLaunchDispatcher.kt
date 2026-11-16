@@ -104,6 +104,7 @@ object RustLaunchDispatcher {
 
         val staged = RustSessionHandoff.prepareAccountLaunch(context, account)
         check(staged.accepted) { staged.summary }
+        BlazeEngineSettings.writeToFilesDir(context)
 
         RustDiagnosticsCollector.recordRustEvent(
             context,

@@ -33,6 +33,7 @@ import java.util.Locale
  */
 object RustDiagnosticsCollector {
     private const val STATUS_FILE = "rust_spike_last_status.txt"
+    private const val LAST_EXIT_FILE = "rust_last_exit_reason.txt"
     private const val MAX_STATUS_LINES = 24
     private const val MAX_LOGCAT_LINES = 80
     private const val MAX_FILE_LOG_LINES = 40
@@ -44,11 +45,48 @@ object RustDiagnosticsCollector {
     private val HEX_32_UUID_REGEX = Regex("""(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])""")
 
     const val ENGINE_LOGIN_ENABLED: Boolean = false
+    const val ENGINE_UI_EMBEDDED: Boolean = true
 
     fun engineLoginStatusLine(): String {
         val state = if (ENGINE_LOGIN_ENABLED) "enabled" else "disabled"
         return "engine login: $state (launcher-owned Microsoft OAuth + in-memory setSession handoff only)"
     }
+
+    fun engineUiStatusLine(): String = if (ENGINE_UI_EMBEDDED) {
+        "engine ui: launcher window disabled | embedded feature on"
+    } else {
+        "engine ui: standalone | embedded feature off"
+    }
+
+    fun formatEmbeddedExitReasonLabel(reasonCode: Int): String = when (reasonCode) {
+        0 -> "NONE"
+        1 -> "USER_QUIT"
+        2 -> "TITLE_BACK"
+        3 -> "NO_PENDING_SESSION"
+        4 -> "MISSING_RESOURCES"
+        5 -> "FATAL_ERROR"
+        6 -> "SIGNAL_OR_CLOSE"
+        else -> "UNKNOWN($reasonCode)"
+    }
+
+    fun recordExitReason(context: Context, reasonCode: Int, message: String) {
+        recordExitReasonToDir(statusDir(context), reasonCode, message)
+    }
+
+    internal fun recordExitReasonToDir(statusDir: File, reasonCode: Int, message: String) {
+        val label = formatEmbeddedExitReasonLabel(reasonCode)
+        val cleanMessage = redactDiagnosticText(message.trim().take(240))
+        val line = "[${formatTimestamp(System.currentTimeMillis())}] $label($reasonCode): $cleanMessage"
+        runCatching {
+            statusDir.mkdirs()
+            File(statusDir, LAST_EXIT_FILE).writeText(line + "\n")
+        }
+    }
+
+    internal fun readLastExitReason(statusDir: File): String = runCatching {
+        val file = File(statusDir, LAST_EXIT_FILE)
+        if (file.isFile) redactDiagnosticText(file.readText().trim()) else ""
+    }.getOrDefault("").ifBlank { "none recorded" }
 
     fun redactDiagnosticText(input: String?): String {
         if (input.isNullOrBlank()) return ""
@@ -121,6 +159,12 @@ object RustDiagnosticsCollector {
         appendLine()
         appendLine("=== Engine Login Policy ===")
         appendLine(engineLoginStatusLine())
+
+        appendLine()
+        appendLine("=== Engine UI & Embedded Policy ===")
+        appendLine(engineUiStatusLine())
+        appendLine("last_exit_reason: ${readLastExitReason(statusDir)}")
+        appendLine("settings_source: ${redactDiagnosticText(BlazeEngineSettings.describeSettingsSource(filesDir))}")
 
         appendLine()
         appendLine("=== Engine Data Check ===")

@@ -1,8 +1,38 @@
 # Panduan Uji Pagi di Perangkat Fisik (`SM-N975F` — Samsung Galaxy Note 10+)
 
-> **Tujuan**: Memverifikasi instalasi & peluncuran `26.3 Rust Edition` pada APK rilis terbaru hasil CI branch `feat/overnight-stages` (termasuk Task K: bundled `assets/engine-data.zip`).
+> **Tujuan**: Memverifikasi instalasi & peluncuran `26.3 Rust Edition` pada APK rilis terbaru hasil CI branch `feat/stage-l` (Stage L-A: engine tertanam tanpa menu Horizon + pengaturan milik launcher, serta bundled `assets/engine-data.zip`).
 >
 > **Catatan keamanan**: Jangan bagikan token mentah atau file log lengkap sebelum memeriksa bahwa token hanya tampil sebagai `token_len=...` dan UUID terpotong 8 karakter (`xxxxxxxx...`).
+
+---
+
+## Checklist Utama Stage L-A (Tanpa Menu Horizon / Kembali Bersih ke Blaze Launcher)
+
+Pastikan game masih bisa dimainkan memakai kontrol sentuh bawaan engine (kontrol sentuh tetap aktif pada tahap Stage L-A ini), **tetapi tidak ada lagi** tombol `"H"`, `"..."`, `"Horizon Control Hub"`, watermark `"Horizon 26.3 (Rust)"`, ataupun menu peluncur `"Horizon Android"`:
+
+1. **Layar Judul (`Title Screen`) -> Tombol Kembali (`Back` Android) & Tombol `Quit Game`**:
+   - Luncurkan `26.3-Rust` dari Blaze Launcher -> masuk ke layar judul Minecraft (pastikan teks *"Not affiliated with Mojang or Microsoft"* tetap ada di pojok kanan bawah, dan **tidak ada** teks *"Horizon 26.3 (Rust)"*, tombol `"H"`, atau `"..."`).
+   - Tekan **Back** sistem Android di layar judul utama -> **Hasil yang diharapkan**: `RustActivity` menutup bersih, proses `:rust` berakhir, dan **Blaze Launcher langsung kembali ke depan** tanpa pernah menampilkan menu `"Horizon Android"`.
+   - Luncurkan ulang `26.3-Rust`, lalu ketuk tombol **Quit Game** -> **Hasil yang diharapkan**: kembali ke **Blaze Launcher** tanpa menu `"Horizon Android"`.
+2. **Dalam Game (`Pause Menu`) -> Tombol `Back` Android & `Save and Quit to Title`**:
+   - Masuk ke sebuah world -> tekan **Back** sistem Android di dalam game -> **Hasil yang diharapkan**: membuka/menutup **Pause Menu Minecraft** (bukan langsung keluar ke launcher).
+   - Dari Pause Menu, pilih **Save and Quit to Title** -> kembali ke layar judul Minecraft, lalu tekan **Back** atau **Quit Game** -> **Hasil yang diharapkan**: world tersimpan aman dan kembali bersih ke **Blaze Launcher**.
+3. **Pindah Aplikasi dan Kembali (`App Switch & Return`)**:
+   - Saat berada di layar judul atau di dalam world, tekan tombol **Home / Recents**, buka aplikasi lain sebentar, lalu kembali ke Blaze Launcher / game -> **Hasil yang diharapkan**: kembali ke sesi game yang sedang berjalan tanpa muncul menu `"Horizon Android"`. Jika Android sempat mematikan proses `:rust` di latar belakang lalu Anda membuka ulang tanpa sesi tertunda, aplikasi **kembali ke Blaze Launcher** dengan bersih.
+4. **Putus Koneksi Paksa (`Forced Disconnect` / Error)**:
+   - Matikan Wi-Fi/data saat bergabung ke server multiplayer (atau paksa putus koneksi) -> **Hasil yang diharapkan**: layar Disconnect Minecraft tampil atau jika terjadi error fatal, kembali bersih ke **Blaze Launcher** (tidak pernah jatuh ke menu `"Horizon Android"`).
+5. **Peluncuran Segar (`Fresh Launch`) & Pengaturan Milik Launcher**:
+   - Buka **Pengaturan -> Launcher -> Pengembang** (ketuk versi 5x di tab *Tentang* jika belum aktif), lalu ubah:
+     - **Skala render Rust Edition** (mis. `75%`)
+     - **Sensitivitas lihat sentuh Rust Edition** (mis. `150%`)
+     - **Tampilkan kontrol engine Rust** (`OFF` lalu uji lagi `ON`)
+   - Luncurkan `26.3-Rust` segar -> **Hasil yang diharapkan**: skala render, sensitivitas kamera sentuh, dan visibilitas kontrol mengikuti pengaturan dari Blaze Launcher (`blaze_engine_settings.json`).
+6. **Yang Perlu Dikirim Balik**:
+   - Hasil lulus/gagal ke-5 skenario di atas (apakah pernah melihat menu `"Horizon Android"` / `"H"` / `"..."` / `"Control Hub"`?).
+   - Buka **Pengembang -> `Salin laporan`** (`Copy report`) dan tempel bagian:
+     - `=== Engine Login Policy ===`
+     - `=== Engine UI & Embedded Policy ===` (wajib ada `engine ui: launcher window disabled | embedded feature on`, `last_exit_reason:`, `settings_source:`)
+     - `=== Render Startup & Exit Summary ===`
 
 ---
 

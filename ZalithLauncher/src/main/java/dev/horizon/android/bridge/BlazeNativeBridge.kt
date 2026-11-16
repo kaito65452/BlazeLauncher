@@ -246,6 +246,12 @@ object BlazeNativeBridge {
 
     fun injectSyntheticTouch(x: Float, y: Float, phase: Int): Boolean =
         nativeInjectSyntheticTouch(x, y, phase)
+
+    external fun nativeConfigureEmbedded(json: String): Boolean
+
+    fun configureEmbedded(json: String): Boolean = runCatching {
+        nativeConfigureEmbedded(json)
+    }.getOrDefault(false)
 }
 
 data class BlazeAccount(

@@ -1413,6 +1413,12 @@
     <string name="developer_capability_report_summary">Periksa dukungan Vulkan, ABI, dan audio perangkat</string>
     <string name="developer_rust_spike_title">Jalankan Spike Rust Edition</string>
     <string name="developer_rust_spike_summary">Jalankan NativeActivity terisolasi di proses :rust</string>
+    <string name="developer_rust_render_scale_title">Skala render Rust Edition</string>
+    <string name="developer_rust_render_scale_summary">Skala resolusi 3D milik launcher (25%–100%)</string>
+    <string name="developer_rust_touch_sensitivity_title">Sensitivitas lihat sentuh Rust Edition</string>
+    <string name="developer_rust_touch_sensitivity_summary">Persentase sensitivitas kamera sentuh milik launcher</string>
+    <string name="developer_rust_show_controls_title">Tampilkan kontrol engine Rust</string>
+    <string name="developer_rust_show_controls_summary">Tampilkan kontrol sentuh di dalam Rust Edition</string>
     <string name="developer_copy_report">Salin laporan</string>
     <string name="developer_copy_report_summary">Salin laporan kapabilitas perangkat dan diagnostik :rust</string>
     <string name="developer_prepare_title">Siapkan data engine (spike)</string>

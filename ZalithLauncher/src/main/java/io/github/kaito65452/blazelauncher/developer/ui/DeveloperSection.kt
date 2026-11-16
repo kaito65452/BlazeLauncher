@@ -56,11 +56,13 @@ import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.setting.AllSettings
 import com.movtery.zalithlauncher.ui.components.CardTitleLayout
 import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.CardPosition
+import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.IntSliderSettingsCard
 import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SettingsCard
 import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SettingsCardColumn
 import com.movtery.zalithlauncher.ui.screens.content.settings.layouts.SwitchSettingsCard
 import io.github.kaito65452.blazelauncher.developer.DeveloperDiagnosticsStore
 import io.github.kaito65452.blazelauncher.developer.DeveloperModeManager
+import io.github.kaito65452.blazelauncher.rustruntime.BlazeEngineSettings
 import io.github.kaito65452.blazelauncher.rustruntime.EngineDataPreparer
 import io.github.kaito65452.blazelauncher.rustruntime.PrepareUiState
 import io.github.kaito65452.blazelauncher.rustruntime.RustActivity
@@ -68,6 +70,7 @@ import io.github.kaito65452.blazelauncher.rustruntime.RustSessionHandoff
 
 private fun launchRustSpikeActivity(context: Context) {
     RustSessionHandoff.prepareSpikeLaunch(context)
+    BlazeEngineSettings.writeToFilesDir(context)
     DeveloperDiagnosticsStore.recordRustActivityEvent("Launched RustActivity from Developer menu")
     context.startActivity(Intent(context, RustActivity::class.java))
 }
@@ -175,6 +178,34 @@ fun DeveloperSettingsSection(
             title = stringResource(R.string.developer_rust_spike_title),
             summary = stringResource(R.string.developer_rust_spike_summary),
             onClick = { launchRustSpikeActivity(context) }
+        )
+
+        IntSliderSettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
+            unit = AllSettings.rustRenderScalePercent,
+            title = stringResource(R.string.developer_rust_render_scale_title),
+            summary = stringResource(R.string.developer_rust_render_scale_summary),
+            valueRange = 25f..100f,
+            suffix = "%"
+        )
+
+        IntSliderSettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
+            unit = AllSettings.rustTouchLookSensitivityPercent,
+            title = stringResource(R.string.developer_rust_touch_sensitivity_title),
+            summary = stringResource(R.string.developer_rust_touch_sensitivity_summary),
+            valueRange = 25f..300f,
+            suffix = "%"
+        )
+
+        SwitchSettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
+            unit = AllSettings.rustShowControls,
+            title = stringResource(R.string.developer_rust_show_controls_title),
+            summary = stringResource(R.string.developer_rust_show_controls_summary)
         )
 
         val latestSummary = DeveloperDiagnosticsStore.lastReportOutput?.lineSequence()?.firstOrNull()

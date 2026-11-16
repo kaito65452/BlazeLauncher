@@ -1,0 +1,1578 @@
+diff --git a/crates/horizon-android/Cargo.toml b/crates/horizon-android/Cargo.toml
+index 8c6f0558ff..af37963a0d 100644
+--- a/crates/horizon-android/Cargo.toml
++++ b/crates/horizon-android/Cargo.toml
+@@ -73,10 +73,15 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
+ rustix = { version = "1", default-features = false, features = ["std", "time", "fs"] }
+ 
+ [features]
+-default = ["mods", "audio"]
++default = ["mods", "audio", "blaze-embedded"]
+ audio = ["horizon-client/audio"]
+ controllers = []
+ mods = ["horizon-client/mods", "horizon-mods/runtime"]
++blaze-embedded = [
++    "horizon-client/blaze-embedded",
++    "horizon-client-render/blaze-embedded",
++    "horizon-telemetry/blaze-embedded",
++]
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/horizon-client-render/Cargo.toml b/crates/horizon-client-render/Cargo.toml
+index 777813a4a0..3a1b14191f 100644
+--- a/crates/horizon-client-render/Cargo.toml
++++ b/crates/horizon-client-render/Cargo.toml
+@@ -64,6 +64,8 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+ audio = ["dep:cpal"]
+ # Helpers horizon-client's tests build their fixtures with.
+ test-support = []
++# Embedded library mode for Blaze Launcher: disables telemetry upload/outbox and standalone launcher UI.
++blaze-embedded = ["horizon-telemetry/blaze-embedded"]
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index 16f7dfd7d9..e60a7c99e5 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -269,3 +269,217 @@ pub fn set_experimental_leaf_culling(enabled: bool) {
+ pub fn experimental_leaf_culling() -> bool {
+     EXPERIMENTAL_LEAF_CULLING.load(Ordering::Relaxed)
+ }
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++#[repr(i32)]
++pub enum EmbeddedExitReason {
++    #[default]
++    None = 0,
++    UserQuit = 1,
++    TitleBack = 2,
++    NoPendingSession = 3,
++    MissingResources = 4,
++    FatalError = 5,
++    SignalOrClose = 6,
++}
++
++impl EmbeddedExitReason {
++    pub fn code(self) -> i32 {
++        self as i32
++    }
++
++    pub fn label(self) -> &'static str {
++        match self {
++            Self::None => "none",
++            Self::UserQuit => "user_quit",
++            Self::TitleBack => "title_back",
++            Self::NoPendingSession => "no_pending_session",
++            Self::MissingResources => "missing_resources",
++            Self::FatalError => "fatal_error",
++            Self::SignalOrClose => "signal_or_close",
++        }
++    }
++}
++
++static EXIT_REASON: std::sync::Mutex<(EmbeddedExitReason, String)> =
++    std::sync::Mutex::new((EmbeddedExitReason::None, String::new()));
++
++pub fn set_exit_reason(reason: EmbeddedExitReason, message: impl Into<String>) {
++    let mut slot = EXIT_REASON.lock().unwrap_or_else(|e| e.into_inner());
++    if slot.0 == EmbeddedExitReason::None || reason == EmbeddedExitReason::FatalError {
++        *slot = (reason, message.into());
++    }
++}
++
++pub fn set_exit_reason_if_unset(reason: EmbeddedExitReason, message: impl Into<String>) {
++    let mut slot = EXIT_REASON.lock().unwrap_or_else(|e| e.into_inner());
++    if slot.0 == EmbeddedExitReason::None {
++        *slot = (reason, message.into());
++    }
++}
++
++pub fn take_exit_reason() -> (EmbeddedExitReason, String) {
++    let mut slot = EXIT_REASON.lock().unwrap_or_else(|e| e.into_inner());
++    std::mem::take(&mut *slot)
++}
++
++pub fn clear_exit_reason() {
++    let mut slot = EXIT_REASON.lock().unwrap_or_else(|e| e.into_inner());
++    *slot = (EmbeddedExitReason::None, String::new());
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum EmbeddedLaunchDecision {
++    LaunchGame,
++    ExitToLauncher(EmbeddedExitReason, &'static str),
++}
++
++pub fn decide_embedded_launch(
++    direct_launch: bool,
++    resources_ready: bool,
++    has_pending_session: bool,
++) -> EmbeddedLaunchDecision {
++    if !direct_launch || !has_pending_session {
++        return EmbeddedLaunchDecision::ExitToLauncher(
++            EmbeddedExitReason::NoPendingSession,
++            "No pending Blaze session; returning to Blaze Launcher.",
++        );
++    }
++    if !resources_ready {
++        return EmbeddedLaunchDecision::ExitToLauncher(
++            EmbeddedExitReason::MissingResources,
++            "Engine resources for Minecraft 26.3 are not prepared.",
++        );
++    }
++    EmbeddedLaunchDecision::LaunchGame
++}
++
++#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
++#[serde(default)]
++pub struct BlazeEngineSettings {
++    pub schema: u32,
++    pub render_scale_percent: u32,
++    pub touch_look_sensitivity: f32,
++    pub show_controls: bool,
++    pub source: String,
++}
++
++impl Default for BlazeEngineSettings {
++    fn default() -> Self {
++        Self {
++            schema: 1,
++            render_scale_percent: 100,
++            touch_look_sensitivity: 1.0,
++            show_controls: true,
++            source: "default".into(),
++        }
++    }
++}
++
++impl BlazeEngineSettings {
++    pub const FILE_NAME: &'static str = "blaze_engine_settings.json";
++
++    pub fn sanitized(mut self) -> Self {
++        self.render_scale_percent = self.render_scale_percent.clamp(25, 100);
++        self.touch_look_sensitivity = if self.touch_look_sensitivity.is_finite() {
++            self.touch_look_sensitivity.clamp(0.25, 3.0)
++        } else {
++            1.0
++        };
++        if self.source.trim().is_empty() {
++            self.source = "blaze_launcher".into();
++        }
++        self
++    }
++
++    pub fn from_json_str(raw: &str) -> Result<Self, String> {
++        let parsed: Self = serde_json::from_str(raw).map_err(|e| e.to_string())?;
++        Ok(parsed.sanitized())
++    }
++
++    pub fn load_from_home(home: &std::path::Path) -> (Self, bool) {
++        let path = home.join(Self::FILE_NAME);
++        match std::fs::read_to_string(&path) {
++            Ok(raw) => match Self::from_json_str(&raw) {
++                Ok(cfg) => (cfg, true),
++                Err(err) => {
++                    log::warn!("BlazeSettings: invalid {}: {err}", path.display());
++                    (Self::default(), false)
++                }
++            },
++            Err(_) => (Self::default(), false),
++        }
++    }
++}
++
++#[cfg(test)]
++mod embedded_state_tests {
++    use super::*;
++
++    #[test]
++    fn embedded_launch_requires_direct_launch_pending_session_and_resources() {
++        assert_eq!(
++            decide_embedded_launch(false, true, true),
++            EmbeddedLaunchDecision::ExitToLauncher(
++                EmbeddedExitReason::NoPendingSession,
++                "No pending Blaze session; returning to Blaze Launcher.",
++            )
++        );
++        assert_eq!(
++            decide_embedded_launch(true, true, false),
++            EmbeddedLaunchDecision::ExitToLauncher(
++                EmbeddedExitReason::NoPendingSession,
++                "No pending Blaze session; returning to Blaze Launcher.",
++            )
++        );
++        assert_eq!(
++            decide_embedded_launch(true, false, true),
++            EmbeddedLaunchDecision::ExitToLauncher(
++                EmbeddedExitReason::MissingResources,
++                "Engine resources for Minecraft 26.3 are not prepared.",
++            )
++        );
++        assert_eq!(
++            decide_embedded_launch(true, true, true),
++            EmbeddedLaunchDecision::LaunchGame
++        );
++    }
++
++    #[test]
++    fn exit_reason_preserves_first_non_fatal_and_allows_fatal_override() {
++        clear_exit_reason();
++        set_exit_reason(EmbeddedExitReason::TitleBack, "Back on title");
++        set_exit_reason_if_unset(EmbeddedExitReason::SignalOrClose, "Ignored second");
++        assert_eq!(
++            take_exit_reason(),
++            (EmbeddedExitReason::TitleBack, "Back on title".to_string())
++        );
++        assert_eq!(take_exit_reason(), (EmbeddedExitReason::None, String::new()));
++
++        set_exit_reason(EmbeddedExitReason::UserQuit, "Quit");
++        set_exit_reason(EmbeddedExitReason::FatalError, "Vulkan lost");
++        assert_eq!(
++            take_exit_reason(),
++            (EmbeddedExitReason::FatalError, "Vulkan lost".to_string())
++        );
++    }
++
++    #[test]
++    fn blaze_engine_settings_clamps_bounds_and_handles_missing_fields() {
++        let cfg = BlazeEngineSettings::from_json_str(
++            r#"{"schema":1,"render_scale_percent":10,"touch_look_sensitivity":9.0,"show_controls":false,"source":"blaze_launcher"}"#,
++        )
++        .unwrap();
++        assert_eq!(cfg.render_scale_percent, 25);
++        assert_eq!(cfg.touch_look_sensitivity, 3.0);
++        assert!(!cfg.show_controls);
++        assert_eq!(cfg.source, "blaze_launcher");
++
++        let nan_cfg = BlazeEngineSettings {
++            touch_look_sensitivity: f32::NAN,
++            ..Default::default()
++        }
++        .sanitized();
++        assert_eq!(nan_cfg.touch_look_sensitivity, 1.0);
++    }
++}
+diff --git a/crates/horizon-client-render/src/telemetry.rs b/crates/horizon-client-render/src/telemetry.rs
+index afd2dbc942..4504d7cb17 100644
+--- a/crates/horizon-client-render/src/telemetry.rs
++++ b/crates/horizon-client-render/src/telemetry.rs
+@@ -296,6 +296,7 @@ impl Session {
+     /// Keeps the session's summary for the launcher to send, if the player allows performance
+     /// statistics, and starts the next session (the time to the title goes with the first).
+     pub fn finish(&mut self, home: &Path, settings: Settings) {
++        #[cfg(not(feature = "blaze-embedded"))]
+         if horizon_telemetry::Consent::load(home).allows(horizon_telemetry::Kind::Perf)
+             && let Some(perf) = self.summary(settings)
+         {
+@@ -304,6 +305,8 @@ impl Session {
+                 log::warn!("Horizon: could not keep the session's performance summary: {e}");
+             }
+         }
++        #[cfg(feature = "blaze-embedded")]
++        let _ = (home, settings);
+         *self = Self {
+             title_measured: self.title_measured,
+             ..Self::default()
+diff --git a/crates/horizon-client/Cargo.toml b/crates/horizon-client/Cargo.toml
+index 0df8ae203d..2cd54315fb 100644
+--- a/crates/horizon-client/Cargo.toml
++++ b/crates/horizon-client/Cargo.toml
+@@ -123,6 +123,8 @@ rng-trace = ["horizon-core/rng-trace"]
+ windows-mimalloc = []
+ # Opt-in Windows heap experiment; see docs/windows-allocators.md.
+ windows-segment-heap = []
++# Embedded library mode for Blaze Launcher: strips Horizon launcher UI, Control Hub/H overlay, watermark, and non-gameplay networking.
++blaze-embedded = ["horizon-client-render/blaze-embedded", "horizon-telemetry/blaze-embedded"]
+ 
+ # Its own name, not `probe`: Cargo copies every crate's examples into one target/<profile>/examples.
+ [[example]]
+diff --git a/crates/horizon-client/src/android/catalog.rs b/crates/horizon-client/src/android/catalog.rs
+index 8be89d379d..77e10f7f71 100644
+--- a/crates/horizon-client/src/android/catalog.rs
++++ b/crates/horizon-client/src/android/catalog.rs
+@@ -1,9 +1,10 @@
+ //! Mobile launcher state. Browser operations reuse the desktop backend unchanged.
++#[cfg(not(feature = "blaze-embedded"))]
+ use crate::browser::{self, Kind, Project, Query, Source, installed::Installed};
+ use serde::{Deserialize, Serialize};
++#[cfg(not(feature = "blaze-embedded"))]
+ use std::{
+     collections::HashMap,
+-    path::{Path, PathBuf},
+     sync::{
+         Arc, Mutex,
+         atomic::{AtomicBool, Ordering},
+@@ -11,13 +12,16 @@ use std::{
+     },
+     time::Duration,
+ };
++use std::path::{Path, PathBuf};
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn source_only_mod(project: &Project) -> bool {
+     project.source == browser::SourceId::Horizon
+         && project.loaders.iter().any(|loader| loader == "hnmod")
+ }
+ 
+ /// Disabled in Blaze Launcher builds: Starling's embedded Microsoft client ID is removed.
++#[cfg(not(feature = "blaze-embedded"))]
+ pub const MICROSOFT_CLIENT_ID: &str = "";
+ 
+ /// Minecraft player names are at most 16 UTF-16 units; a longer name fails the
+@@ -76,7 +80,9 @@ pub struct Config {
+     pub cache_budget_mib: u32,
+     #[serde(flatten)]
+     pub device: crate::device_preferences::Settings,
++    #[cfg(not(feature = "blaze-embedded"))]
+     pub shader_source: crate::shader_catalog::Origin,
++    #[cfg(not(feature = "blaze-embedded"))]
+     pub mod_source: crate::shader_catalog::Origin,
+     #[serde(default)]
+     pub ui_scale_percent: u32,
+@@ -302,6 +308,9 @@ impl Config {
+         let _ = touch_cfg.save_to(&touch_path);
+     }
+ }
++#[cfg(not(feature = "blaze-embedded"))]
++mod catalog_ui {
++    use super::*;
+ #[derive(Clone, Copy, PartialEq)]
+ pub enum Page {
+     Play,
+@@ -2215,3 +2224,6 @@ fn clean_markdown_body(raw: &str) -> String {
+     }
+     out.join("\n")
+ }
++}
++#[cfg(not(feature = "blaze-embedded"))]
++pub use catalog_ui::*;
+diff --git a/crates/horizon-client/src/android/documents.rs b/crates/horizon-client/src/android/documents.rs
+index 35a0cee15b..66972256e5 100644
+--- a/crates/horizon-client/src/android/documents.rs
++++ b/crates/horizon-client/src/android/documents.rs
+@@ -20,6 +20,7 @@ use std::{
+ 
+ struct Request {
+     kind: Kind,
++    #[cfg(not(feature = "blaze-embedded"))]
+     appearance: Option<crate::skins::library::Kind>,
+     target_dir: Option<PathBuf>,
+     home: PathBuf,
+@@ -118,6 +119,7 @@ pub fn begin(kind: Kind, home: PathBuf) -> std::result::Result<(), String> {
+         .join("content-imports");
+     STATE.lock().unwrap_or_else(|e| e.into_inner()).request = Some(Request {
+         kind,
++        #[cfg(not(feature = "blaze-embedded"))]
+         appearance: None,
+         target_dir: None,
+         home,
+@@ -134,6 +136,7 @@ pub fn picker_failed(error: &str) {
+     STATE.lock().unwrap_or_else(|e| e.into_inner()).request = None;
+     notice(error, false);
+ }
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn begin_appearance(
+     home: PathBuf,
+     kind: crate::skins::library::Kind,
+@@ -173,6 +176,7 @@ pub fn begin_into_dir(target_dir: PathBuf) -> std::result::Result<(), String> {
+         .join("file-manager-imports");
+     STATE.lock().unwrap_or_else(|e| e.into_inner()).request = Some(Request {
+         kind: Kind::Packs,
++        #[cfg(not(feature = "blaze-embedded"))]
+         appearance: None,
+         target_dir: Some(target_dir),
+         home: PathBuf::new(),
+@@ -358,6 +362,7 @@ fn stage(request: Request, mut input: std::fs::File, name: String) -> Result<()>
+         }
+         return res;
+     }
++    #[cfg(not(feature = "blaze-embedded"))]
+     if let Some(kind) = request.appearance {
+         use std::io::Read;
+         if !name.to_ascii_lowercase().ends_with(".png") {
+diff --git a/crates/horizon-client/src/android/embedded_launcher.rs b/crates/horizon-client/src/android/embedded_launcher.rs
+new file mode 100644
+index 0000000000..7f4cd45346
+--- /dev/null
++++ b/crates/horizon-client/src/android/embedded_launcher.rs
+@@ -0,0 +1,314 @@
++//! Minimal embedded lifecycle driver for Blaze Launcher (`blaze-embedded` feature).
++//! Never constructs or opens Horizon's standalone launcher window; exits cleanly back to
++//! Blaze Launcher on Quit, title-screen Back, missing session/resources, or fatal error.
++use horizon_client::{
++    Result,
++    android_runtime::{
++        BlazeEngineSettings, EmbeddedExitReason, EmbeddedLaunchDecision, clear_exit_reason,
++        decide_embedded_launch, take_exit_reason, take_launcher_return,
++    },
++};
++use std::path::PathBuf;
++use winit::{
++    application::ApplicationHandler,
++    event::{DeviceEvent, DeviceId, WindowEvent},
++    event_loop::{ActiveEventLoop, ControlFlow},
++    window::WindowId,
++};
++
++pub(super) struct Launcher {
++    home: PathBuf,
++    game: Option<Box<dyn ApplicationHandler>>,
++    config: crate::catalog::Config,
++    embedded_settings: BlazeEngineSettings,
++    exit_notified: bool,
++}
++
++impl Launcher {
++    pub(super) fn new(home: PathBuf) -> Self {
++        clear_exit_reason();
++        let cleanup_home = home.clone();
++        std::thread::spawn(move || {
++            if let Err(error) =
++                horizon_client::official_install::cleanup_completed_downloads(&cleanup_home)
++            {
++                log::warn!("Could not clean completed Minecraft downloads: {error}");
++            }
++            if horizon_client::official_install::ready(&cleanup_home) {
++                let _ = horizon_client::android_resources::repair_structure_transforms(
++                    &cleanup_home.join("engine-data.zip"),
++                    &cleanup_home
++                        .join(".local/horizon-client")
++                        .join(horizon_core::VANILLA_VERSION),
++                );
++            }
++        });
++        horizon_client::android_runtime::graphics_startup::configure(home.clone());
++        let mut config = crate::catalog::Config::load(&home);
++        if horizon_client::android_runtime::graphics_startup::recover(&home) {
++            config.renderer = crate::catalog::RendererMode::VulkanCompatibility;
++            if let Err(error) = config.save(&home) {
++                log::warn!("Could not save graphics recovery choice: {error}");
++            }
++        }
++        let (embedded_settings, _) = BlazeEngineSettings::load_from_home(&home);
++        config.render_scale =
++            crate::display::RenderScale::new(embedded_settings.render_scale_percent);
++        config.input_host = if embedded_settings.show_controls {
++            crate::catalog::InputHost::Touch
++        } else {
++            crate::catalog::InputHost::KeyboardMouse
++        };
++        crate::configure_input_mode(config.input_host);
++        crate::device_runtime::configure(config.device);
++        horizon_client::ui_theme::set_ui_scale_percent(config.ui_scale_percent);
++        horizon_client::ui_theme::motion::set_launcher_animations_disabled(
++            config.disable_launcher_animations,
++        );
++        horizon_client::ui_theme::motion::set_game_animations_disabled(
++            config.disable_game_animations,
++        );
++        Self {
++            home,
++            game: None,
++            config,
++            embedded_settings,
++            exit_notified: false,
++        }
++    }
++
++    pub(super) fn configure_screen(&self) {
++        crate::native_ime::configure_screen(
++            self.config.screen.immersive,
++            self.config.screen.avoid_cutout,
++        );
++        winit::platform::android::set_native_content_aspect(self.config.screen.aspect.ratio());
++    }
++
++    fn launch_prepared_game(&mut self, events: &ActiveEventLoop) -> Result<()> {
++        let (embedded_settings, from_file) = BlazeEngineSettings::load_from_home(&self.home);
++        self.embedded_settings = embedded_settings;
++        self.config.render_scale =
++            crate::display::RenderScale::new(self.embedded_settings.render_scale_percent);
++        self.config.input_host = if self.embedded_settings.show_controls {
++            crate::catalog::InputHost::Touch
++        } else {
++            crate::catalog::InputHost::KeyboardMouse
++        };
++        log::info!(
++            "BlazeSettings: launch source={} from_file={} render_scale={} touch_look_sensitivity={:.2} show_controls={}",
++            self.embedded_settings.source,
++            from_file,
++            self.config.render_scale.percent(),
++            self.embedded_settings.touch_look_sensitivity,
++            self.embedded_settings.show_controls
++        );
++
++        crate::platform::set_orientation(self.config.orientation);
++        self.configure_screen();
++        horizon_client::ui_theme::set_android_dpi(crate::platform::display_density());
++        horizon_client::ui_theme::set_ui_scale_percent(self.config.ui_scale_percent);
++        crate::display::set_scale(self.config.render_scale);
++        horizon_client::android_runtime::configure_worker_limit(self.config.worker_limit);
++        horizon_client::android_runtime::configure_cache_budget(self.config.cache_budget_mib);
++        crate::configure_input_mode(self.config.input_host);
++        crate::device_runtime::configure(self.config.device);
++
++        horizon_client::android_resources::repair_structure_transforms(
++            &self.home.join("engine-data.zip"),
++            &self
++                .home
++                .join(".local/horizon-client")
++                .join(horizon_core::VANILLA_VERSION),
++        )?;
++        crate::platform::hide();
++        self.config.apply_experimental_to_game(&self.home);
++
++        let game_home = self.config.game_home(&self.home);
++        std::fs::create_dir_all(&game_home)?;
++        let extra_arguments = if crate::PUBLIC_BUILD {
++            Vec::new()
++        } else {
++            match std::fs::read(self.home.join("android-launch.json")) {
++                Ok(bytes) => serde_json::from_slice::<Vec<String>>(&bytes)?,
++                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
++                Err(e) => return Err(e.into()),
++            }
++        };
++
++        let _ = std::fs::remove_file(self.home.join("android-error.txt"));
++        if self.config.record_performance || self.config.device.gpu_profile {
++            crate::performance::start(
++                &self.home,
++                serde_json::json!({
++                    "renderer": self.config.renderer.label(),
++                    "resolution_percent": self.config.render_scale.percent(),
++                    "source_commit": option_env!("HORIZON_ANDROID_BUILD_COMMIT"),
++                    "source_dirty": option_env!("HORIZON_ANDROID_BUILD_DIRTY"),
++                    "performance_recording": self.config.record_performance,
++                    "gpu_profiling": self.config.device.gpu_profile,
++                }),
++            )?;
++        }
++
++        horizon_client::android_runtime::clear_gamepads();
++        let request = crate::game_launch::LaunchRequest {
++            resources: self
++                .home
++                .join(".local/horizon-client")
++                .join(horizon_core::VANILLA_VERSION),
++            game_home,
++            session_file: None,
++            offline_name: crate::catalog::truncate_player_name(&self.config.name),
++            server: self.config.server.clone(),
++            control_socket: (!crate::PUBLIC_BUILD).then(|| self.home.join("control.json")),
++            extra_arguments,
++            open_gl: self.config.renderer == crate::catalog::RendererMode::OpenGl,
++            gpu_batching: self.config.renderer == crate::catalog::RendererMode::Vulkan,
++        };
++        crate::document_store::set_game_active(true);
++        let game = match crate::game_launch::start(request) {
++            Ok(game) => game,
++            Err(error) => {
++                crate::document_store::set_game_active(false);
++                crate::performance::stop();
++                return Err(error);
++            }
++        };
++        horizon_client::ui_theme::reset_atlas();
++        self.game = Some(game);
++        self.game.as_mut().unwrap().resumed(events);
++        Ok(())
++    }
++
++    fn notify_and_exit(
++        &mut self,
++        events: &ActiveEventLoop,
++        reason: EmbeddedExitReason,
++        message: &str,
++    ) {
++        if !self.exit_notified {
++            self.exit_notified = true;
++            crate::game::android_reset_bundled_mods();
++            crate::document_store::set_game_active(false);
++            crate::performance::stop();
++            let _ = crate::platform::capture_mouse(false);
++            crate::platform::hide();
++            horizon_client::auth::clear_current();
++            horizon_client::auth::clear_pending_android();
++            horizon_client::android_runtime::clear_gamepads();
++            horizon_client::discord_presence::stop();
++            horizon_client::ui_theme::reset_atlas();
++            crate::diagnostics::heartbeat("embedded_exit_to_blaze", || {
++                serde_json::json!({"reason": reason.label()})
++            });
++            crate::diagnostics::finish();
++            crate::platform::notify_engine_exit(reason.code(), message);
++        }
++        events.exit();
++    }
++
++    fn handle_engine_return(&mut self, events: &ActiveEventLoop) {
++        if !take_launcher_return() {
++            return;
++        }
++        if let Some(mut game) = self.game.take() {
++            game.exiting(events);
++            drop(game);
++        }
++        let (reason, msg) = take_exit_reason();
++        let effective_reason = if reason == EmbeddedExitReason::None {
++            EmbeddedExitReason::UserQuit
++        } else {
++            reason
++        };
++        let effective_msg = if msg.is_empty() {
++            effective_reason.label().to_string()
++        } else {
++            msg
++        };
++        log::info!(
++            "BlazeEmbeddedExit: reason={} ({}) msg={}",
++            effective_reason.label(),
++            effective_reason.code(),
++            effective_msg
++        );
++        self.notify_and_exit(events, effective_reason, &effective_msg);
++    }
++}
++
++impl ApplicationHandler for Launcher {
++    fn resumed(&mut self, events: &ActiveEventLoop) {
++        self.configure_screen();
++        if let Some(game) = &mut self.game {
++            return game.resumed(events);
++        }
++        let direct = crate::take_direct_launch();
++        let ready = horizon_client::official_install::ready(&self.home);
++        let has_session = horizon_client::auth::has_pending_android();
++        match decide_embedded_launch(direct, ready, has_session) {
++            EmbeddedLaunchDecision::LaunchGame => {
++                if let Err(error) = self.launch_prepared_game(events) {
++                    let msg = error.to_string();
++                    log::error!("BlazeDirectLaunch failed: {msg}");
++                    crate::diagnostics::record_error(&msg);
++                    let _ = std::fs::write(self.home.join("android-error.txt"), &msg);
++                    self.notify_and_exit(events, EmbeddedExitReason::FatalError, &msg);
++                } else {
++                    log::info!("BlazeDirectLaunch: entered 26.3 game directly (blaze-embedded)");
++                }
++            }
++            EmbeddedLaunchDecision::ExitToLauncher(reason, message) => {
++                log::warn!("BlazeEmbeddedExit: {reason:?} - {message}");
++                self.notify_and_exit(events, reason, message);
++            }
++        }
++    }
++
++    fn suspended(&mut self, events: &ActiveEventLoop) {
++        crate::diagnostics::heartbeat("suspended", || serde_json::json!({}));
++        if let Some(game) = &mut self.game {
++            game.suspended(events);
++        }
++    }
++
++    fn window_event(&mut self, events: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        if crate::documents::handle_event(&event) {
++            return;
++        }
++        if matches!(event, WindowEvent::Resized(_)) {
++            let _ = crate::native_ime::viewport_bottom();
++        }
++        if matches!(event, WindowEvent::Focused(true)) {
++            self.configure_screen();
++        }
++        if let Some(game) = &mut self.game {
++            game.window_event(events, id, event);
++            self.handle_engine_return(events);
++        }
++    }
++
++    fn device_event(&mut self, events: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
++        if let Some(game) = &mut self.game {
++            game.device_event(events, id, event);
++        }
++    }
++
++    fn about_to_wait(&mut self, events: &ActiveEventLoop) {
++        if let Some(game) = &mut self.game {
++            game.about_to_wait(events);
++            self.handle_engine_return(events);
++        } else if self.exit_notified {
++            events.exit();
++        } else {
++            events.set_control_flow(ControlFlow::Wait);
++        }
++    }
++
++    fn exiting(&mut self, events: &ActiveEventLoop) {
++        if let Some(mut game) = self.game.take() {
++            game.exiting(events);
++            drop(game);
++        }
++    }
++}
+diff --git a/crates/horizon-client/src/android/jni_bridge.rs b/crates/horizon-client/src/android/jni_bridge.rs
+index af18d81a99..cc4d1bd965 100644
+--- a/crates/horizon-client/src/android/jni_bridge.rs
++++ b/crates/horizon-client/src/android/jni_bridge.rs
+@@ -71,6 +71,7 @@ pub struct ControlButtonDef {
+     pub camera_passthrough: bool,
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ #[derive(Serialize, Deserialize)]
+ pub struct CatalogItemDef {
+     pub id: String,
+@@ -372,7 +373,7 @@ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeS
+     1
+ }
+ 
+-/// Fetch catalog mods / resource packs / shaders.
++/// Fetch catalog mods / resource packs / shaders (disabled in blaze-embedded builds).
+ #[unsafe(no_mangle)]
+ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeFetchCatalogMods(
+     mut env: JNIEnv<'_>,
+@@ -381,6 +382,13 @@ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeF
+     category: JString<'_>,
+     query: JString<'_>,
+ ) -> jstring {
++    #[cfg(feature = "blaze-embedded")]
++    {
++        let _ = (source, category, query);
++        return str_to_jstring(&mut env, "[]");
++    }
++    #[cfg(not(feature = "blaze-embedded"))]
++    {
+     let _src = jstring_to_string(&mut env, &source).unwrap_or_default();
+     let cat = jstring_to_string(&mut env, &category).unwrap_or_else(|| "mods".to_string());
+     let q = jstring_to_string(&mut env, &query)
+@@ -482,6 +490,31 @@ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeF
+ 
+     let json_str = serde_json::to_string(&catalog).unwrap_or_else(|_| "[]".to_string());
+     str_to_jstring(&mut env, &json_str)
++    }
++}
++
++/// Persist launcher-owned embedded settings JSON into `filesDir/blaze_engine_settings.json`.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeConfigureEmbedded(
++    mut env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    json: JString<'_>,
++) -> jboolean {
++    let Some(raw) = jstring_to_string(&mut env, &json) else {
++        return 0;
++    };
++    let Ok(cfg) = horizon_client::android_runtime::BlazeEngineSettings::from_json_str(&raw) else {
++        return 0;
++    };
++    let home = resolve_home();
++    let target = home.join(horizon_client::android_runtime::BlazeEngineSettings::FILE_NAME);
++    let partial = home.join("blaze_engine_settings.partial");
++    if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
++        if std::fs::write(&partial, bytes).is_ok() && std::fs::rename(&partial, &target).is_ok() {
++            return 1;
++        }
++    }
++    0
+ }
+ 
+ /// Read Goy Control HUD button layouts from `horizon-controls.json`.
+diff --git a/crates/horizon-client/src/android/platform.rs b/crates/horizon-client/src/android/platform.rs
+index e88933fda9..57b312b13d 100644
+--- a/crates/horizon-client/src/android/platform.rs
++++ b/crates/horizon-client/src/android/platform.rs
+@@ -292,6 +292,7 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
+     })
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn open_repository() -> bool {
+     open_url("https://github.com/Vasysik/horizon-android")
+ }
+@@ -474,6 +475,23 @@ pub fn finish() {
+     });
+ }
+ 
++/// Notify the Kotlin Activity (`RustActivity.onEngineExit(int, String)`) before shutting down `:rust`.
++pub fn notify_engine_exit(reason_code: i32, message: &str) {
++    with_context(|env, activity| {
++        let msg = JObject::from(env.new_string(message)?);
++        let _ = env.call_method(
++            activity,
++            "onEngineExit",
++            "(ILjava/lang/String;)V",
++            &[JValue::Int(reason_code), JValue::Object(&msg)],
++        );
++        if env.exception_check().unwrap_or(false) {
++            let _ = env.exception_clear();
++        }
++        Ok(())
++    });
++}
++
+ pub fn capture_mouse(capture: bool) -> bool {
+     crate::native_ime::capture_mouse(capture)
+ }
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 42e1e73c1d..5a80924987 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -6,15 +6,21 @@
+ mod game;
+ #[path = "android/game_launch.rs"]
+ mod game_launch;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[path = "android/launcher.rs"]
+ mod launcher;
++#[cfg(feature = "blaze-embedded")]
++#[path = "android/embedded_launcher.rs"]
++mod launcher;
+ // Share the desktop launcher's actual search, compatibility checks, downloads,
+ // dependency resolution and Java content porting; GPUI itself is desktop-only.
+ // These files are formatted in the launcher's separate Rust 2021 workspace.
++#[cfg(not(feature = "blaze-embedded"))]
+ #[rustfmt::skip]
+ #[allow(dead_code)]
+ #[path = "../../../launcher/src/account.rs"]
+ pub(crate) mod account;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[rustfmt::skip]
+ #[allow(dead_code)]
+ #[path = "../../../launcher/src/browser.rs"]
+@@ -53,16 +59,21 @@ mod native_ime;
+ mod performance;
+ #[path = "android/platform.rs"]
+ mod platform;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[rustfmt::skip]
+ #[allow(dead_code)]
+ #[path = "../../../launcher/src/proxy.rs"]
+ mod proxy;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[path = "android/search_queue.rs"]
+ mod search_queue;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[path = "android/secure_store.rs"]
+ mod secure_store;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[path = "android/shader_catalog.rs"]
+ mod shader_catalog;
++#[cfg(not(feature = "blaze-embedded"))]
+ #[rustfmt::skip]
+ #[allow(dead_code)]
+ #[path = "../../../launcher/src/skins.rs"]
+@@ -220,6 +231,7 @@ fn android_main(app: AndroidApp) {
+     if let Err(error) = diagnostics::initialize(&home, serde_json::json!({})) {
+         log::error!("Cannot initialize local diagnostics: {error}");
+     }
++    #[cfg(not(feature = "blaze-embedded"))]
+     if let Ok(vm) = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) } {
+         secure_store::initialize(vm);
+     }
+@@ -249,7 +261,7 @@ fn android_main(app: AndroidApp) {
+         log::error!("Cannot open {}: {error}", home.display());
+         return;
+     }
+-    #[cfg(debug_assertions)]
++    #[cfg(all(debug_assertions, not(feature = "blaze-embedded")))]
+     if secure_store::development_probe() {
+         std::process::exit(0);
+     }
+@@ -299,6 +311,10 @@ fn android_main(app: AndroidApp) {
+         diagnostics::record_error(&error.to_string());
+         horizon_client::crash::report_error(&home, "client", &*error);
+         let _ = std::fs::write(home.join("android-error.txt"), error.to_string());
++        platform::notify_engine_exit(
++            horizon_client::android_runtime::EmbeddedExitReason::FatalError.code(),
++            &error.to_string(),
++        );
+     }
+     // Winit permits one EventLoop per process. NativeActivity otherwise keeps
+     // this process cached after Quit, making the next launch fail. run_app's
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index fc510a764c..aff99abfc7 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -222,6 +222,7 @@ mod natural_spawning;
+ mod nautili;
+ mod net_harness;
+ mod nether_portal;
++#[cfg(not(feature = "blaze-embedded"))]
+ mod no_resources;
+ mod ominous_item_spawner;
+ mod options;
+@@ -11509,7 +11510,13 @@ impl Game<'_> {
+         match action {
+             // A splitscreen player's title never ends the process (P1's does).
+             Action::Quit if self.options.split_guest => {}
+-            Action::Quit => crate::game::exit_app(event_loop),
++            Action::Quit => {
++                horizon_client::android_runtime::set_exit_reason(
++                    horizon_client::android_runtime::EmbeddedExitReason::UserQuit,
++                    "Quit from title screen",
++                );
++                crate::game::exit_app(event_loop);
++            }
+             Action::Options => self.open_options(true),
+             Action::Accessibility => {
+                 self.open_options_at(true, horizon_client::options_ui::Page::Accessibility)
+@@ -16497,6 +16504,19 @@ impl Game<'_> {
+             }
+             self.pad.touch.clear();
+             crate::platform::hide();
++            #[cfg(feature = "blaze-embedded")]
++            if self.screen != Screen::Options
++                && self.sign_edit.is_none()
++                && self.book.is_none()
++                && self.title.as_ref().is_some_and(|t| t.is_at_main_root())
++            {
++                horizon_client::android_runtime::set_exit_reason(
++                    horizon_client::android_runtime::EmbeddedExitReason::TitleBack,
++                    "Back pressed on title screen",
++                );
++                crate::game::exit_app(event_loop);
++                return;
++            }
+             if let Err(e) = self.pad_back() {
+                 log::warn!("Android Back: {e}");
+             }
+@@ -18352,7 +18372,11 @@ impl Game<'_> {
+             && let Err(error) = self.open_world(&folder, None, None, false, None)
+         {
+             self.error = Some(error);
+-            event_loop.exit();
++            horizon_client::android_runtime::set_exit_reason(
++                horizon_client::android_runtime::EmbeddedExitReason::FatalError,
++                "Failed to open world",
++            );
++            crate::game::exit_app(event_loop);
+             return;
+         }
+         self.tick_server_packs();
+@@ -20337,7 +20361,13 @@ fn write_report(game: &Game<'_>) -> Result<()> {
+ 
+ fn exit_app(events: &dyn event_loop::EventLoopCtl) {
+     #[cfg(target_os = "android")]
+-    horizon_client::android_runtime::return_to_launcher();
++    {
++        horizon_client::android_runtime::set_exit_reason_if_unset(
++            horizon_client::android_runtime::EmbeddedExitReason::UserQuit,
++            "Engine session ended",
++        );
++        horizon_client::android_runtime::return_to_launcher();
++    }
+     #[cfg(not(target_os = "android"))]
+     events.exit();
+     #[cfg(target_os = "android")]
+@@ -21100,6 +21130,14 @@ fn missing_resources(root: &std::path::Path) -> Option<String> {
+         return None;
+     }
+     let shown = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
++    #[cfg(feature = "blaze-embedded")]
++    {
++        return Some(format!(
++            "Prepared game files are missing: no horizon-resources.json in {}",
++            shown.display()
++        ));
++    }
++    #[cfg(not(feature = "blaze-embedded"))]
+     Some(format!(
+         "Horizon's prepared game files are missing: no horizon-resources.json in {}\n\
+          Horizon is started from its launcher: download it at {} (Download). It needs your \
+@@ -21200,7 +21238,25 @@ pub(crate) fn android_game(arguments: Vec<String>) -> Result<Box<dyn Application
+         options.spikes = Some(50.0);
+     }
+     horizon_client::spans::enable(options.spikes.is_some());
+-    let settings = Settings::load(&std::env::current_dir()?.join("options.txt"));
++    #[allow(unused_mut)]
++    let mut settings = Settings::load(&std::env::current_dir()?.join("options.txt"));
++    #[cfg(feature = "blaze-embedded")]
++    {
++        let (embedded_cfg, from_file) =
++            horizon_client::android_runtime::BlazeEngineSettings::load_from_home(
++                &crate::backend::data_dir(),
++            );
++        settings.touch.sensitivity = embedded_cfg.touch_look_sensitivity;
++        settings.touch.show_control_hub = false;
++        log::info!(
++            "BlazeSettings: loaded source={} from_file={} render_scale={} touch_look_sensitivity={:.2} show_controls={}",
++            embedded_cfg.source,
++            from_file,
++            embedded_cfg.render_scale_percent,
++            embedded_cfg.touch_look_sensitivity,
++            embedded_cfg.show_controls
++        );
++    }
+     let root = options.resources.clone();
+     horizon_threads::put_helpers_behind();
+     Behaviours::set_cache_dir(std::env::current_dir()?.join(".horizon-cache"));
+@@ -21288,6 +21344,7 @@ pub fn run() -> Result<()> {
+         // The game build started by hand (the release's zip), not by the
+         // launcher: a window says where to get it. Scripts and servers get
+         // the error.
++        #[cfg(not(feature = "blaze-embedded"))]
+         if !options.offscreen && !synchronous_startup(&options) {
+             log::error!("Horizon: {error}");
+             let settings = Settings::load(&std::env::current_dir()?.join("options.txt"));
+@@ -21299,6 +21356,7 @@ pub fn run() -> Result<()> {
+     // official server in their list (servers.dat in the game folder, the working directory). Not
+     // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
+     // horizon-ctl drives: those start in a source checkout and wrote the list there.
++    #[cfg(not(feature = "blaze-embedded"))]
+     if !options.offscreen && !synchronous_startup(&options) {
+         horizon_client::heartbeat::start();
+         if let Err(e) = horizon_client::multiplayer::add_official_server(&std::env::current_dir()?)
+@@ -21313,6 +21371,7 @@ pub fn run() -> Result<()> {
+         narrator::start(&early_settings);
+     }
+     // "Playing Horizon" on Discord: never for a server; an automated run only talks to a test's fake Discord.
++    #[cfg(not(feature = "blaze-embedded"))]
+     if options.dedicated.is_none() {
+         let automated = options.benchmark.is_some()
+             || options.offscreen
+diff --git a/crates/horizon-client/src/game/split.rs b/crates/horizon-client/src/game/split.rs
+index 0149e9ce44..2a89f869e6 100644
+--- a/crates/horizon-client/src/game/split.rs
++++ b/crates/horizon-client/src/game/split.rs
+@@ -72,6 +72,15 @@ impl Game<'_> {
+     /// that player drops out (`Split::drop_out`), the others play on.
+     pub(in crate::game) fn exit_on_error(&self, event_loop: &dyn super::event_loop::EventLoopCtl) {
+         if !self.options.split_guest {
++            let msg = self
++                .error
++                .as_ref()
++                .map(|e| e.to_string())
++                .unwrap_or_else(|| "Engine fatal error".to_string());
++            horizon_client::android_runtime::set_exit_reason(
++                horizon_client::android_runtime::EmbeddedExitReason::FatalError,
++                msg,
++            );
+             super::exit_app(event_loop);
+         }
+     }
+diff --git a/crates/horizon-client/src/game/startup_menu.rs b/crates/horizon-client/src/game/startup_menu.rs
+index 73cc4acda3..a7f43b59f9 100644
+--- a/crates/horizon-client/src/game/startup_menu.rs
++++ b/crates/horizon-client/src/game/startup_menu.rs
+@@ -778,7 +778,13 @@ impl Loading {
+             self.menu.click_sound(self.settings.volumes);
+         }
+         match action {
+-            Action::Quit => crate::game::exit_app(event_loop),
++            Action::Quit => {
++                horizon_client::android_runtime::set_exit_reason(
++                    horizon_client::android_runtime::EmbeddedExitReason::UserQuit,
++                    "Quit from startup menu",
++                );
++                crate::game::exit_app(event_loop);
++            }
+             Action::Options => self.open_menu_options(Page::Main),
+             Action::Accessibility => self.open_menu_options(Page::Accessibility),
+             Action::Language => self.open_menu_options(Page::Language),
+@@ -1543,6 +1549,14 @@ impl Loading {
+                     );
+                     self.menu_option_events(e);
+                 }
++            } else if cfg!(feature = "blaze-embedded")
++                && self.menu.title.as_ref().is_none_or(|t| t.is_at_main_root())
++            {
++                horizon_client::android_runtime::set_exit_reason(
++                    horizon_client::android_runtime::EmbeddedExitReason::TitleBack,
++                    "Back pressed on startup screen",
++                );
++                crate::game::exit_app(event_loop);
+             } else if let Some(t) = &mut self.menu.title {
+                 t.escape();
+             }
+@@ -2173,6 +2187,10 @@ impl Loading {
+                     return Ok(());
+                 }
+                 self.save_menu_settings();
++                horizon_client::android_runtime::set_exit_reason_if_unset(
++                    horizon_client::android_runtime::EmbeddedExitReason::SignalOrClose,
++                    "Window closed during startup",
++                );
+                 crate::game::exit_app(event_loop);
+             }
+             WindowEvent::Resized(size) => {
+diff --git a/crates/horizon-client/src/heartbeat.rs b/crates/horizon-client/src/heartbeat.rs
+index 9f3f3a5a69..a01a618c49 100644
+--- a/crates/horizon-client/src/heartbeat.rs
++++ b/crates/horizon-client/src/heartbeat.rs
+@@ -21,20 +21,27 @@ const MAX_WAIT: Duration = Duration::from_secs(600);
+ /// Starts the pings, once. Call when the game itself starts (not a dedicated server, not a
+ /// benchmark or an automated run).
+ pub fn start() {
+-    if PINGER.get().is_some() || std::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
++    #[cfg(feature = "blaze-embedded")]
++    {
+         return;
+     }
+-    let Some(endpoint) = horizon_telemetry::endpoint() else {
+-        return;
+-    };
+-    let spawned = std::thread::Builder::new()
+-        .name("Heartbeat".into())
+-        .spawn(move || run(&endpoint));
+-    match spawned {
+-        Ok(handle) => {
+-            let _ = PINGER.set(handle.thread().clone());
++    #[cfg(not(feature = "blaze-embedded"))]
++    {
++        if PINGER.get().is_some() || std::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
++            return;
++        }
++        let Some(endpoint) = horizon_telemetry::endpoint() else {
++            return;
++        };
++        let spawned = std::thread::Builder::new()
++            .name("Heartbeat".into())
++            .spawn(move || run(&endpoint));
++        match spawned {
++            Ok(handle) => {
++                let _ = PINGER.set(handle.thread().clone());
++            }
++            Err(e) => log::warn!("Horizon: no live count ping: {e}"),
+         }
+-        Err(e) => log::warn!("Horizon: no live count ping: {e}"),
+     }
+ }
+ 
+diff --git a/crates/horizon-client/src/no_resources.rs b/crates/horizon-client/src/no_resources.rs
+index 7b639201d6..61f15ceba4 100644
+--- a/crates/horizon-client/src/no_resources.rs
++++ b/crates/horizon-client/src/no_resources.rs
+@@ -1,7 +1,10 @@
++#![cfg_attr(feature = "blaze-embedded", allow(dead_code, unused_imports))]
+ //! The screen of a game started without its prepared files: the game build
+ //! run by hand (the release's game zip) instead of through the launcher. It
+ //! says where to get the launcher, and quits. Drawn in Horizon's design
+ //! language with the bundled fonts: none of Minecraft's files are there.
++#[cfg(not(feature = "blaze-embedded"))]
++mod inner {
+ use crate::ui_theme::{self, Face, Ui, color};
+ 
+ /// The launcher's download page.
+@@ -276,3 +279,6 @@ mod tests {
+         });
+     }
+ }
++}
++#[cfg(not(feature = "blaze-embedded"))]
++pub use inner::*;
+diff --git a/crates/horizon-client/src/title.rs b/crates/horizon-client/src/title.rs
+index 3394992bf3..58d1e14f3b 100644
+--- a/crates/horizon-client/src/title.rs
++++ b/crates/horizon-client/src/title.rs
+@@ -2328,12 +2328,15 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
+                         ];
+                     }
+                 }
+-                let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
+-                batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
+-                // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
+-                // scale, so screenshots and reports say which build they come from.
+-                if let Some(nightly) = horizon_core::release::nightly_label() {
+-                    batch.text(atlas, &nightly, 2.0, 2.0, u32::MAX, true);
++                #[cfg(not(feature = "blaze-embedded"))]
++                {
++                    let version = format!("Horizon {} (Rust)", horizon_core::VANILLA_VERSION);
++                    batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true);
++                    // A nightly names its build in the top-left corner, the one spot no button reaches at any GUI
++                    // scale, so screenshots and reports say which build they come from.
++                    if let Some(nightly) = horizon_core::release::nightly_label() {
++                        batch.text(atlas, &nightly, 2.0, 2.0, u32::MAX, true);
++                    }
+                 }
+                 let notice = "Not affiliated with Mojang or Microsoft";
+                 // TitleScreen.init's `PlainTextButton`: the text's width wide, 10
+@@ -4195,6 +4198,14 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
+             self.next_ban_notice();
+         }
+     }
++    pub fn is_at_main_root(&self) -> bool {
++        !self.preparing
++            && self.confirm_experiments.borrow().is_none()
++            && self.experiments.borrow().is_none()
++            && self.rules.borrow().is_none()
++            && matches!(self.mode, Mode::Main)
++    }
++
+     pub fn escape(&mut self) {
+         // GenericMessageScreen.shouldCloseOnEsc is false: the preparing
+         // read takes no input, the player's options survive it.
+diff --git a/crates/horizon-client/src/touch_ui.rs b/crates/horizon-client/src/touch_ui.rs
+index d9cba4c48a..b6f4310f9a 100644
+--- a/crates/horizon-client/src/touch_ui.rs
++++ b/crates/horizon-client/src/touch_ui.rs
+@@ -323,6 +323,7 @@ pub enum Action {
+     More,
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ const KEYS: [(&str, KeyCode); 28] = [
+     ("F1", KeyCode::F1),
+     ("F2", KeyCode::F2),
+@@ -818,6 +819,7 @@ impl TouchUi {
+                 return Some(Action::Key(KeyCode::Escape));
+             }
+         }
++        #[cfg(not(feature = "blaze-embedded"))]
+         if (self.expanded || !self.goy_mode) && (3.0..23.0).contains(&p[1]) {
+             if (39.0..72.0).contains(&p[0]) {
+                 return Some(Action::More);
+@@ -835,6 +837,7 @@ impl TouchUi {
+                 return Some(Action::Keyboard);
+             }
+         }
++        #[cfg(not(feature = "blaze-embedded"))]
+         if self.expanded && (3.0..203.0).contains(&p[0]) && (27.0..219.0).contains(&p[1]) {
+             let i = ((p[1] - 27.0) / 24.0) as usize * 4 + ((p[0] - 3.0) / 50.0) as usize;
+             if i == 28 {
+@@ -857,49 +860,56 @@ impl TouchUi {
+                 button(b, a, "RMB", rmb.0[0], rmb.0[1], rmb.0[2]);
+             }
+         }
+-        if !self.expanded {
+-            if !self.goy_mode && crate::touch::current_hud_opacity_scale() > 0.01 {
+-                button(b, a, "...", 39.0, 3.0, 33.0);
+-            }
++        #[cfg(feature = "blaze-embedded")]
++        {
+             return;
+         }
+-        for (label, x, width) in [
+-            ("...", 39.0, 33.0),
+-            ("F3", 75.0, 33.0),
+-            ("F5", 111.0, 33.0),
+-            ("Chat", 147.0, 33.0),
+-            ("Keys", 183.0, 39.0),
+-        ] {
++        #[cfg(not(feature = "blaze-embedded"))]
++        {
++            if !self.expanded {
++                if !self.goy_mode && crate::touch::current_hud_opacity_scale() > 0.01 {
++                    button(b, a, "...", 39.0, 3.0, 33.0);
++                }
++                return;
++            }
++            for (label, x, width) in [
++                ("...", 39.0, 33.0),
++                ("F3", 75.0, 33.0),
++                ("F5", 111.0, 33.0),
++                ("Chat", 147.0, 33.0),
++                ("Keys", 183.0, 39.0),
++            ] {
++                button(
++                    b,
++                    a,
++                    if label == "F3" && self.key_held(KeyCode::F3) {
++                        "F3*"
++                    } else {
++                        label
++                    },
++                    x,
++                    3.0,
++                    width,
++                );
++            }
+             button(
+                 b,
+                 a,
+-                if label == "F3" && self.key_held(KeyCode::F3) {
+-                    "F3*"
+-                } else {
+-                    label
+-                },
+-                x,
++                if self.f3_latched { "F3 ON" } else { "HoldF3" },
+                 3.0,
+-                width,
+-            );
+-        }
+-        button(
+-            b,
+-            a,
+-            if self.f3_latched { "F3 ON" } else { "HoldF3" },
+-            3.0,
+-            195.0,
+-            48.0,
+-        );
+-        for (i, (label, _)) in KEYS.iter().enumerate() {
+-            button(
+-                b,
+-                a,
+-                label,
+-                3.0 + (i % 4) as f32 * 50.0,
+-                27.0 + (i / 4) as f32 * 24.0,
++                195.0,
+                 48.0,
+             );
++            for (i, (label, _)) in KEYS.iter().enumerate() {
++                button(
++                    b,
++                    a,
++                    label,
++                    3.0 + (i % 4) as f32 * 50.0,
++                    27.0 + (i / 4) as f32 * 24.0,
++                    48.0,
++                );
++            }
+         }
+     }
+     pub fn keyboard_touch(
+@@ -953,6 +963,7 @@ pub fn aux_mouse_phase(pressed: bool, owned: bool, touched: bool) -> Option<Touc
+     })
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ const COLOR_SWATCHES: [(u32, &str); 8] = [
+     (0xFF1E1B2E, "Obsidian"),
+     (0xFF9A7BFF, "Violet"),
+@@ -964,6 +975,7 @@ const COLOR_SWATCHES: [(u32, &str); 8] = [
+     (0xFFF4EFFA, "Snow"),
+ ];
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ const KB_ROWS: &[&[(&str, &str, f32)]] = &[
+     &[
+         ("ESC", "key.keyboard.escape", 1.1),
+@@ -1083,6 +1095,7 @@ const KB_ROWS: &[&[(&str, &str, f32)]] = &[
+     ],
+ ];
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ const MOUSE_AND_ACTION_ITEMS: &[(&str, &str)] = &[
+     ("Left Click (LMB)", "key.mouse.left"),
+     ("Right Click (RMB)", "key.mouse.right"),
+@@ -1112,6 +1125,7 @@ const MOUSE_AND_ACTION_ITEMS: &[(&str, &str)] = &[
+     ("Action: Advancements (L)", "action:key.advancements"),
+ ];
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn draw_input_picker_modal(
+     ui: &mut crate::ui_theme::Ui<'_>,
+     w: f32,
+@@ -1568,6 +1582,7 @@ fn draw_mcpe_custom_plate(ui: &mut crate::ui_theme::Ui, rect: [f32; 4], alpha: f
+     );
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn hub_metrics(w: f32, h: f32) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32) {
+     let dw = (w - 16.0).clamp(352.0, 610.0);
+     let dh = (h - 12.0).clamp(264.0, 420.0);
+@@ -1582,6 +1597,7 @@ fn hub_metrics(w: f32, h: f32) -> (f32, f32, f32, f32, f32, f32, f32, f32, f32)
+ }
+ 
+ impl TouchUi {
++    #[cfg(not(feature = "blaze-embedded"))]
+     fn step_animations(&self) -> (f32, f32) {
+         let open_target = if self.floating_menu { 1.0 } else { 0.0 };
+         if crate::ui_theme::motion::game_animations_disabled()
+@@ -1618,6 +1634,23 @@ impl TouchUi {
+     }
+ 
+     /// Handles touch events for the draggable Floating Menu Button and the redesigned Horizon Control Hub.
++    #[cfg(feature = "blaze-embedded")]
++    pub fn floating_menu_touch(
++        &mut self,
++        _b: &mut HudBatch,
++        _a: &HudAtlas,
++        _id: u64,
++        _phase: TouchPhase,
++        _p_gui: [f32; 2],
++        _settings: &mut crate::touch::Settings,
++    ) -> Option<InGameMenuAction> {
++        self.floating_menu = false;
++        self.floating_drag = None;
++        None
++    }
++
++    /// Handles touch events for the draggable Floating Menu Button and the redesigned Horizon Control Hub.
++    #[cfg(not(feature = "blaze-embedded"))]
+     pub fn floating_menu_touch(
+         &mut self,
+         b: &mut HudBatch,
+@@ -2507,6 +2540,19 @@ impl TouchUi {
+     /// Draws the Floating Menu Button (MCPE stone-slate `H` button vs GoyControl `=` bubble) and
+     /// the redesigned Horizon Control Hub with smooth motion, generous spacing, scrollable content pane,
+     /// and authoritative Virtual Mouse & gameplay settings.
++    #[cfg(feature = "blaze-embedded")]
++    pub fn draw_floating_menu(
++        &self,
++        _b: &mut HudBatch,
++        _a: &HudAtlas,
++        _settings: &crate::touch::Settings,
++    ) {
++    }
++
++    /// Draws the Floating Menu Button (MCPE stone-slate `H` button vs GoyControl `=` bubble) and
++    /// the redesigned Horizon Control Hub with smooth motion, generous spacing, scrollable content pane,
++    /// and authoritative Virtual Mouse & gameplay settings.
++    #[cfg(not(feature = "blaze-embedded"))]
+     pub fn draw_floating_menu(
+         &self,
+         b: &mut HudBatch,
+@@ -3924,6 +3970,7 @@ impl TouchUi {
+     }
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn push_undo_snapshot(ed: &mut crate::touch::Editor, current: &crate::touch::Settings) {
+     if ed.undo_stack.len() >= 40 {
+         ed.undo_stack.remove(0);
+@@ -3932,6 +3979,7 @@ fn push_undo_snapshot(ed: &mut crate::touch::Editor, current: &crate::touch::Set
+     ed.redo_stack.clear();
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn clamp_editor_custom_selection(ed: &mut crate::touch::Editor, settings: &crate::touch::Settings) {
+     if let Some(idx) = ed.selected_custom
+         && idx >= settings.custom_buttons.len()
+@@ -3943,6 +3991,7 @@ fn clamp_editor_custom_selection(ed: &mut crate::touch::Editor, settings: &crate
+     }
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn shape_name(shape: u8) -> &'static str {
+     match shape {
+         1 => "Square",
+@@ -4038,6 +4087,7 @@ fn draw_button_icon_and_label(
+     }
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn draw_preview_brackets(ui: &mut crate::ui_theme::Ui, rect: [f32; 4], col: u32) {
+     let [x, y, w, h] = rect;
+     let arm = 8.0;
+@@ -4059,6 +4109,7 @@ fn draw_preview_brackets(ui: &mut crate::ui_theme::Ui, rect: [f32; 4], col: u32)
+ /// Studio Slider Card matching `90511.png`:
+ /// Renders a rounded dark slate card with top-left icon + title, right value pill badge,
+ /// and a bottom horizontal cyan slider track (`#1DB4F6`) with a white circular thumb knob.
++#[cfg(not(feature = "blaze-embedded"))]
+ #[allow(clippy::too_many_arguments)]
+ fn draw_m3_stepper_cell(
+     ui: &mut crate::ui_theme::Ui,
+@@ -4149,6 +4200,7 @@ fn draw_m3_stepper_cell(
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
++#[cfg(not(feature = "blaze-embedded"))]
+ fn draw_m3_selector_cell(
+     ui: &mut crate::ui_theme::Ui,
+     rect: [f32; 4],
+@@ -4194,6 +4246,7 @@ fn draw_m3_selector_cell(
+ 
+ /// Circular Swatch Chip matching `90511.png` with a crisp white outer selection ring.
+ #[allow(clippy::too_many_arguments)]
++#[cfg(not(feature = "blaze-embedded"))]
+ fn draw_m3_swatch_chip(
+     ui: &mut crate::ui_theme::Ui,
+     sx: f32,
+@@ -4234,6 +4287,17 @@ fn draw_m3_swatch_chip(
+     }
+ }
+ 
++#[cfg(feature = "blaze-embedded")]
++pub fn draw_hud_editor(
++    _tc: &crate::touch::TouchControls,
++    _b: &mut HudBatch,
++    _a: &HudAtlas,
++    _profile_name: &str,
++    _notice: Option<&str>,
++) {
++}
++
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn draw_hud_editor(
+     tc: &crate::touch::TouchControls,
+     b: &mut HudBatch,
+@@ -6401,6 +6465,7 @@ pub fn draw_hud_editor(
+ 
+ /// Handles touch input for the MCPE + GoyControl Editor (`draw_hud_editor`).
+ /// Returns `true` when the user completes saving or discarding to exit the editor.
++#[cfg(not(feature = "blaze-embedded"))]
+ fn apply_props_slider(
+     tc: &mut crate::touch::TouchControls,
+     ed: &crate::touch::Editor,
+@@ -6458,6 +6523,20 @@ fn apply_props_slider(
+     }
+ }
+ 
++#[cfg(feature = "blaze-embedded")]
++pub fn touch_hud_editor(
++    _tc: &mut crate::touch::TouchControls,
++    _b: &mut HudBatch,
++    _a: &HudAtlas,
++    _id: u64,
++    _point: [f32; 2],
++    _started: bool,
++    _ended: bool,
++) -> bool {
++    false
++}
++
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn touch_hud_editor(
+     tc: &mut crate::touch::TouchControls,
+     b: &mut HudBatch,
+@@ -7874,7 +7953,7 @@ pub fn touch_hud_editor(
+     closed
+ }
+ 
+-#[cfg(test)]
++#[cfg(all(test, not(feature = "blaze-embedded")))]
+ mod tests {
+     use super::*;
+     #[test]
+diff --git a/crates/horizon-telemetry/Cargo.toml b/crates/horizon-telemetry/Cargo.toml
+index 913eac4532..a23ffa0e97 100644
+--- a/crates/horizon-telemetry/Cargo.toml
++++ b/crates/horizon-telemetry/Cargo.toml
+@@ -21,6 +21,7 @@ default = ["upload", "live"]
+ upload = ["dep:ureq"]
+ # The "I'm playing" ping and reading the live count (`live`), for the game and the launcher.
+ live = ["dep:ureq"]
++blaze-embedded = []
+ 
+ [[test]]
+ name = "consent_gating"
+diff --git a/crates/horizon-telemetry/src/lib.rs b/crates/horizon-telemetry/src/lib.rs
+index cdccc1da69..bf39415ccb 100644
+--- a/crates/horizon-telemetry/src/lib.rs
++++ b/crates/horizon-telemetry/src/lib.rs
+@@ -39,13 +39,22 @@ pub const CONSENT_VERSION: u32 = 2;
+ /// The ingest server (`crates/horizon-telemetry-server`, on Railway). `HORIZON_TELEMETRY_URL`
+ /// overrides it (a local server); `HORIZON_TELEMETRY_URL=off` sends nothing at all, no ping
+ /// either (tests and automated runs). What is sent still depends on the player's switches.
++#[cfg(not(feature = "blaze-embedded"))]
+ pub const DEFAULT_ENDPOINT: &str = "https://telemetry.playhorizon.dev";
+ 
+ /// Where items are sent, if anywhere.
+ pub fn endpoint() -> Option<String> {
+-    resolve(std::env::var("HORIZON_TELEMETRY_URL").ok().as_deref())
++    #[cfg(feature = "blaze-embedded")]
++    {
++        None
++    }
++    #[cfg(not(feature = "blaze-embedded"))]
++    {
++        resolve(std::env::var("HORIZON_TELEMETRY_URL").ok().as_deref())
++    }
+ }
+ 
++#[cfg(not(feature = "blaze-embedded"))]
+ fn resolve(var: Option<&str>) -> Option<String> {
+     match var.map(str::trim) {
+         Some("off" | "none" | "0") => None,
+@@ -109,7 +118,7 @@ pub(crate) mod test_home {
+     }
+ }
+ 
+-#[cfg(test)]
++#[cfg(all(test, not(feature = "blaze-embedded")))]
+ mod tests {
+     use super::*;
+ 

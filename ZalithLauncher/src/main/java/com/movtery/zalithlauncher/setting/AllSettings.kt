@@ -619,4 +619,19 @@ object AllSettings : SettingsRegistry() {
      * 运行时开发者模式（在“关于”页连续点击启动器版本 5 次后开启）
      */
     val developerMode = boolSetting("developerMode", false)
+
+    /**
+     * Rust Edition launcher-owned render scale (25%..100%)
+     */
+    val rustRenderScalePercent = intSetting("rustRenderScalePercent", 100)
+
+    /**
+     * Rust Edition launcher-owned touch-look sensitivity percentage (25%..300% -> 0.25x..3.00x)
+     */
+    val rustTouchLookSensitivityPercent = intSetting("rustTouchLookSensitivityPercent", 100)
+
+    /**
+     * Rust Edition launcher-owned on-screen controls visibility
+     */
+    val rustShowControls = boolSetting("rustShowControls", true)
 }

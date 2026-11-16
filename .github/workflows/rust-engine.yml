@@ -157,6 +157,13 @@ jobs:
           mkdir -p ZalithLauncher/src/main/jniLibs/arm64-v8a
           cp "$REL_SO" ZalithLauncher/src/main/jniLibs/arm64-v8a/libhorizon_android.so
 
+          echo "=== Verifying A0 KEEP-list & A3 stripped UI in libhorizon_android.so ==="
+          chmod +x scripts/guard.sh
+          ./scripts/guard.sh --check-embedded-so "$REL_SO"
+
+          echo "=== Testing horizon-client-render embedded state machine & settings (blaze-embedded) ==="
+          cargo test --locked --manifest-path engine/starling/Cargo.toml -p horizon-client-render --features blaze-embedded --lib android_runtime -- --nocapture
+
           echo "=== Testing horizon-prepare (pinned + patched submodule unit tests) ==="
           cargo test --locked --manifest-path engine/starling/Cargo.toml -p horizon-prepare -- --nocapture
 

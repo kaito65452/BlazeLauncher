@@ -59,20 +59,61 @@ class RustActivity : NativeActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         directLaunchMode = intent?.getBooleanExtra(EXTRA_DIRECT_LAUNCH, false) == true
         val pid = Process.myPid()
-        Log.i(TAG, "Starting RustActivity pid=$pid directLaunch=$directLaunchMode")
+        Log.i(TAG, "Starting RustActivity pid=$pid directLaunch=$directLaunchMode savedState=${savedInstanceState != null}")
         RustDiagnosticsCollector.recordRustEvent(
             this,
-            "onCreate pid=$pid directLaunch=$directLaunchMode"
+            "onCreate pid=$pid directLaunch=$directLaunchMode savedState=${savedInstanceState != null}"
         )
         configureDisplayCutoutMode()
         // Consume session and set direct-launch mode BEFORE super.onCreate starts android_main.
         val sessionResult = RustSessionHandoff.consumePendingSessionInRustProcess(this)
         RustDiagnosticsCollector.recordRustEvent(this, "session_handoff: ${sessionResult.summary}")
-        BlazeNativeBridge.setDirectLaunch(directLaunchMode)
-        super.onCreate(savedInstanceState)
-        if (!directLaunchMode) {
-            attachSpikeOverlay()
-            triggerSyntheticTouchProbe(source = "onCreate_post")
+        val startupDecision = decideStartup(
+            hasSavedInstanceState = savedInstanceState != null,
+            directLaunch = directLaunchMode,
+            sessionAccepted = sessionResult.accepted,
+            embeddedUiStripped = true
+        )
+        when (startupDecision) {
+            is StartupDecision.Proceed -> {
+                BlazeNativeBridge.setDirectLaunch(directLaunchMode)
+                super.onCreate(savedInstanceState)
+                if (!directLaunchMode) {
+                    attachSpikeOverlay()
+                    triggerSyntheticTouchProbe(source = "onCreate_post")
+                }
+            }
+            is StartupDecision.ExitToLauncher -> {
+                BlazeNativeBridge.setDirectLaunch(false)
+                RustSessionHandoff.clearPendingSessionFiles(this)
+                RustDiagnosticsCollector.recordExitReason(
+                    this,
+                    startupDecision.reasonCode,
+                    startupDecision.reasonMessage
+                )
+                RustDiagnosticsCollector.recordRustEvent(
+                    this,
+                    "startup_exit_to_launcher code=${startupDecision.reasonCode} msg=${startupDecision.reasonMessage}"
+                )
+                super.onCreate(savedInstanceState)
+                finish()
+            }
+        }
+    }
+
+    @Suppress("unused")
+    fun onEngineExit(reasonCode: Int, message: String?) {
+        val cleanMsg = message.orEmpty().ifBlank {
+            RustDiagnosticsCollector.formatEmbeddedExitReasonLabel(reasonCode)
+        }
+        Log.i(TAG, "Engine exit callback code=$reasonCode msg=$cleanMsg")
+        RustSessionHandoff.clearPendingSessionFiles(this)
+        RustDiagnosticsCollector.recordExitReason(this, reasonCode, cleanMsg)
+        RustDiagnosticsCollector.recordRustEvent(this, "onEngineExit code=$reasonCode msg=$cleanMsg")
+        runOnUiThread {
+            if (!isFinishing) {
+                finish()
+            }
         }
     }
 
@@ -265,10 +306,11 @@ class RustActivity : NativeActivity() {
     private fun exitRustProcess() {
         val pid = Process.myPid()
         Log.i(TAG, "Signaling engine exit and terminating :rust pid=$pid")
+        RustDiagnosticsCollector.recordExitReason(this, REASON_USER_QUIT, "Exit button in spike overlay")
         RustDiagnosticsCollector.recordRustEvent(this, "exit_requested pid=$pid")
         runCatching { BlazeNativeBridge.signalEngineExit() }
         RustSessionHandoff.clearPendingSessionFiles(this)
-        finishAndRemoveTask()
+        finish()
         Process.killProcess(pid)
     }
 
@@ -282,6 +324,11 @@ class RustActivity : NativeActivity() {
             RustSessionHandoff.clearPendingSessionFiles(this)
             Process.killProcess(pid)
         }
+    }
+
+    internal sealed interface StartupDecision {
+        data object Proceed : StartupDecision
+        data class ExitToLauncher(val reasonCode: Int, val reasonMessage: String) : StartupDecision
     }
 
     internal data class GestureStripBounds(
@@ -300,6 +347,29 @@ class RustActivity : NativeActivity() {
         internal const val MAX_DOCUMENT_URI_LENGTH = 8192
         internal const val MAX_SYSTEM_GESTURE_STRIP_DP = 200
         private const val EDGE_STRIP_WIDTH_DP = 24f
+        internal const val REASON_USER_QUIT = 1
+        internal const val REASON_NO_PENDING_SESSION = 3
+
+        internal fun decideStartup(
+            hasSavedInstanceState: Boolean,
+            directLaunch: Boolean,
+            sessionAccepted: Boolean,
+            embeddedUiStripped: Boolean = true
+        ): StartupDecision {
+            if (hasSavedInstanceState) {
+                return StartupDecision.ExitToLauncher(
+                    REASON_NO_PENDING_SESSION,
+                    "Resumed without pending session"
+                )
+            }
+            if ((directLaunch || embeddedUiStripped) && !sessionAccepted) {
+                return StartupDecision.ExitToLauncher(
+                    REASON_NO_PENDING_SESSION,
+                    "No pending Microsoft session"
+                )
+            }
+            return StartupDecision.Proceed
+        }
 
         internal fun sanitizeDocumentPickerUri(resultCode: Int, uriString: String?): String? {
             if (resultCode != Activity.RESULT_OK) return null

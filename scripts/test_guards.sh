@@ -773,6 +773,68 @@ expect_pass "Check 14 --check-release-upload accepts clean release APK without b
     env BUNDLE_ENGINE_DATA=true bash scripts/guard.sh --check-release-upload "$REL_FALSE_APK"
 
 echo ""
+echo "=== 12. Check 15 Embedded Engine .so Self-Tests (A0 KEEP-list + A3 stripped UI) ==="
+
+make_embedded_so() {
+    local out="$1"
+    local extra="$2"
+    local omit="${3:-}"
+    python3 - "$out" "$extra" "$omit" <<'PY'
+import sys
+out, extra, omit = sys.argv[1], sys.argv[2], sys.argv[3]
+keep = [
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInit",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetSession",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetDirectLaunch",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSignalEngineExit",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeConfigureEmbedded",
+    "BlazeWgpu:",
+    "BlazePerf pipelines_created_ms=",
+    "BlazePerf surface_to_first_frame_ms=",
+    "Not affiliated with Mojang or Microsoft",
+    "APerformanceHint_createSession",
+    "ANativeWindow_setFrameRate",
+    "android_main",
+    "BlazeDirectLaunch: entered 26.3 game directly (blaze-embedded)",
+]
+lines = [k for k in keep if k != omit]
+if extra:
+    lines.append(extra)
+open(out, "wb").write(b"\x7fELF" + ("\x00".join(lines)).encode("ascii") + b"\x00")
+PY
+}
+
+GOOD_EMBEDDED_SO="$TMP_ROOT/good_embedded.so"
+make_embedded_so "$GOOD_EMBEDDED_SO" ""
+expect_pass "Check 15 accepts clean embedded .so with all KEEP markers" \
+    bash scripts/guard.sh --check-embedded-so "$GOOD_EMBEDDED_SO"
+
+BAD_SO_HUB="$TMP_ROOT/bad_hub.so"
+make_embedded_so "$BAD_SO_HUB" "Horizon Control Hub"
+expect_fail "Check 15 rejects Control Hub string in embedded .so" "forbidden Horizon UI/network marker" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_HUB"
+
+BAD_SO_LAUNCHER="$TMP_ROOT/bad_launcher.so"
+make_embedded_so "$BAD_SO_LAUNCHER" "Horizon Android"
+expect_fail "Check 15 rejects Horizon Android launcher title in embedded .so" "forbidden Horizon UI/network marker" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_LAUNCHER"
+
+BAD_SO_TELEMETRY="$TMP_ROOT/bad_telemetry.so"
+make_embedded_so "$BAD_SO_TELEMETRY" "https://telemetry.playhorizon.dev"
+expect_fail "Check 15 rejects telemetry endpoint in embedded .so" "forbidden Horizon UI/network marker" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_TELEMETRY"
+
+BAD_SO_MISSING_KEEP="$TMP_ROOT/bad_missing_keep.so"
+make_embedded_so "$BAD_SO_MISSING_KEEP" "" "BlazePerf pipelines_created_ms="
+expect_fail "Check 15 rejects embedded .so missing KEEP-list perf marker" "missing mandatory A0 KEEP-list" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_MISSING_KEEP"
+
+BAD_SO_MISSING_NOTICE="$TMP_ROOT/bad_missing_notice.so"
+make_embedded_so "$BAD_SO_MISSING_NOTICE" "" "Not affiliated with Mojang or Microsoft"
+expect_fail "Check 15 rejects embedded .so missing Mojang non-affiliation disclaimer" "missing mandatory A0 KEEP-list" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_MISSING_NOTICE"
+
+echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then
     exit 1
