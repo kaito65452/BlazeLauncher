@@ -19,9 +19,12 @@
 package io.github.kaito65452.blazelauncher.rustruntime
 
 import android.content.Context
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import com.movtery.zalithlauncher.setting.AllSettings
-import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 
 data class BlazeEngineSettingsPayload(
     val schema: Int = 1,
@@ -67,25 +70,35 @@ object BlazeEngineSettings {
         showControls = AllSettings.rustShowControls.getValue()
     )
 
-    fun toJson(payload: BlazeEngineSettingsPayload): String = JSONObject().apply {
-        put("schema", payload.schema)
-        put("render_scale_percent", sanitizeRenderScale(payload.renderScalePercent))
-        put("touch_look_sensitivity", payload.touchLookSensitivity.coerceIn(0.25f, 3.0f).toDouble())
-        put("show_controls", payload.showControls)
-        put("source", payload.source.ifBlank { DEFAULT_SOURCE })
-    }.toString(2)
+    private val gson = GsonBuilder().setPrettyPrinting().create()
+
+    fun toJson(payload: BlazeEngineSettingsPayload): String {
+        val obj = JsonObject().apply {
+            addProperty("schema", payload.schema)
+            addProperty("render_scale_percent", sanitizeRenderScale(payload.renderScalePercent))
+            addProperty("touch_look_sensitivity", payload.touchLookSensitivity.coerceIn(0.25f, 3.0f).toDouble())
+            addProperty("show_controls", payload.showControls)
+            addProperty("source", payload.source.ifBlank { DEFAULT_SOURCE })
+        }
+        return gson.toJson(obj)
+    }
 
     fun fromJsonOrNull(raw: String?): BlazeEngineSettingsPayload? {
         if (raw.isNullOrBlank()) return null
         return runCatching {
-            val obj = JSONObject(raw)
-            val scale = sanitizeRenderScale(obj.optInt("render_scale_percent", 100))
-            val sensRaw = obj.optDouble("touch_look_sensitivity", 1.0).toFloat()
+            val elem = JsonParser.parseString(raw)
+            if (!elem.isJsonObject) return@runCatching null
+            val obj = elem.asJsonObject
+            val schema = obj.get("schema")?.takeIf { it.isJsonPrimitive }?.asInt ?: SCHEMA_VERSION
+            val scaleRaw = obj.get("render_scale_percent")?.takeIf { it.isJsonPrimitive }?.asInt ?: 100
+            val scale = sanitizeRenderScale(scaleRaw)
+            val sensRaw = obj.get("touch_look_sensitivity")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 1.0f
             val sens = if (sensRaw.isFinite()) sensRaw.coerceIn(0.25f, 3.0f) else 1.0f
-            val showControls = obj.optBoolean("show_controls", true)
-            val source = obj.optString("source", DEFAULT_SOURCE).ifBlank { DEFAULT_SOURCE }
+            val showControls = obj.get("show_controls")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true
+            val source = obj.get("source")?.takeIf { it.isJsonPrimitive }?.asString?.ifBlank { DEFAULT_SOURCE }
+                ?: DEFAULT_SOURCE
             BlazeEngineSettingsPayload(
-                schema = obj.optInt("schema", SCHEMA_VERSION),
+                schema = schema,
                 renderScalePercent = scale,
                 touchLookSensitivity = sens,
                 showControls = showControls,
@@ -116,6 +129,6 @@ object BlazeEngineSettings {
         if (!file.isFile) return "default (no $SETTINGS_FILE_NAME)"
         val parsed = fromJsonOrNull(runCatching { file.readText() }.getOrNull())
             ?: return "invalid ($SETTINGS_FILE_NAME)"
-        return "${parsed.source} ($SETTINGS_FILE_NAME: scale=${parsed.renderScalePercent}%, sens=${"%.2f".format(parsed.touchLookSensitivity)}x, controls=${parsed.showControls})"
+        return "${parsed.source} ($SETTINGS_FILE_NAME: scale=${parsed.renderScalePercent}%, sens=${"%.2f".format(Locale.US, parsed.touchLookSensitivity)}x, controls=${parsed.showControls})"
     }
 }

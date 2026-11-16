@@ -254,6 +254,20 @@ index 16f7dfd7d9..e60a7c99e5 100644
 +        assert_eq!(nan_cfg.touch_look_sensitivity, 1.0);
 +    }
 +}
+diff --git a/crates/horizon-client-render/src/options_ui.rs b/crates/horizon-client-render/src/options_ui.rs
+index 2b33dadb52..55cebee213 100644
+--- a/crates/horizon-client-render/src/options_ui.rs
++++ b/crates/horizon-client-render/src/options_ui.rs
+@@ -1445,6 +1445,9 @@ fn set_filtering(s: &mut Settings, anisotropy_bit: i32, filtering: i32) {
+ /// the startup one, the description, and Vulkan's warning.
+ fn graphics_api_tooltip(s: &Settings) -> Text {
+     if cfg!(target_os = "android") {
++        #[cfg(feature = "blaze-embedded")]
++        return Text::literal("Selected in Blaze Launcher settings.");
++        #[cfg(not(feature = "blaze-embedded"))]
+         return Text::literal("Selected in Horizon Android launcher > Setup.");
+     }
+     let line = |key: &str| lang::get_or(key, key);
 diff --git a/crates/horizon-client-render/src/telemetry.rs b/crates/horizon-client-render/src/telemetry.rs
 index afd2dbc942..4504d7cb17 100644
 --- a/crates/horizon-client-render/src/telemetry.rs
@@ -348,8 +362,39 @@ index 8be89d379d..77e10f7f71 100644
 +}
 +#[cfg(not(feature = "blaze-embedded"))]
 +pub use catalog_ui::*;
+diff --git a/crates/horizon-client/src/android/document_store.rs b/crates/horizon-client/src/android/document_store.rs
+index d020578b79..da7150ac2a 100644
+--- a/crates/horizon-client/src/android/document_store.rs
++++ b/crates/horizon-client/src/android/document_store.rs
+@@ -140,10 +140,16 @@ fn resolve(home: &Path, id: &str) -> io::Result<Document> {
+         configuration,
+     })
+ }
++const DISPLAY_APP_NAME: &str = if cfg!(feature = "blaze-embedded") {
++    "Blaze Launcher"
++} else {
++    "Horizon Android"
++};
++
+ fn row(home: &Path, id: &str) -> io::Result<Value> {
+     if id == ROOT {
+         return Ok(
+-            json!({"document_id": ROOT, "_display_name": "Horizon Android",
++            json!({"document_id": ROOT, "_display_name": DISPLAY_APP_NAME,
+             "mime_type": DIRECTORY, "flags": 0}),
+         );
+     }
+@@ -282,7 +288,7 @@ pub fn call(home: &Path, op: &str, id: &str, arg: &str) -> io::Result<Value> {
+     }
+     match op {
+         "roots" => Ok(json!([{"root_id": ROOT, "document_id": ROOT,
+-            "title": "Horizon Android", "flags": 18, "mime_types": "*/*"}])),
++            "title": DISPLAY_APP_NAME, "flags": 18, "mime_types": "*/*"}])),
+         "document" => Ok(json!([row(home, id)?])),
+         "children" => Ok(json!(children(home, id)?)),
+         "child" => Ok(json!(is_child(home, id, arg))),
 diff --git a/crates/horizon-client/src/android/documents.rs b/crates/horizon-client/src/android/documents.rs
-index 35a0cee15b..66972256e5 100644
+index 35a0cee15b..350f2d4ea4 100644
 --- a/crates/horizon-client/src/android/documents.rs
 +++ b/crates/horizon-client/src/android/documents.rs
 @@ -20,6 +20,7 @@ use std::{
@@ -384,7 +429,19 @@ index 35a0cee15b..66972256e5 100644
          appearance: None,
          target_dir: Some(target_dir),
          home: PathBuf::new(),
-@@ -358,6 +362,7 @@ fn stage(request: Request, mut input: std::fs::File, name: String) -> Result<()>
+@@ -229,6 +233,11 @@ pub fn export_file(
+             "Opened '{file_name}' in Android Files for sharing/export."
+         ))
+     } else {
++        #[cfg(feature = "blaze-embedded")]
++        return Ok(format!(
++            "Ready to export '{file_name}' via system Files > Blaze Launcher."
++        ));
++        #[cfg(not(feature = "blaze-embedded"))]
+         Ok(format!(
+             "Ready to export '{file_name}' via system Files > Horizon Android."
+         ))
+@@ -358,6 +367,7 @@ fn stage(request: Request, mut input: std::fs::File, name: String) -> Result<()>
          }
          return res;
      }
@@ -779,6 +836,20 @@ index af18d81a99..cc4d1bd965 100644
  }
  
  /// Read Goy Control HUD button layouts from `horizon-controls.json`.
+diff --git a/crates/horizon-client/src/android/performance.rs b/crates/horizon-client/src/android/performance.rs
+index 19f2500878..0e06f66978 100644
+--- a/crates/horizon-client/src/android/performance.rs
++++ b/crates/horizon-client/src/android/performance.rs
+@@ -184,6 +184,9 @@ pub fn export(home: &Path) -> std::result::Result<(), String> {
+     if crate::platform::open_documents("reports") {
+         Ok(())
+     } else {
++        #[cfg(feature = "blaze-embedded")]
++        return Err("Open the system Files app, then Blaze Launcher / Reports.".into());
++        #[cfg(not(feature = "blaze-embedded"))]
+         Err("Open the system Files app, then Horizon Android / Reports.".into())
+     }
+ }
 diff --git a/crates/horizon-client/src/android/platform.rs b/crates/horizon-client/src/android/platform.rs
 index e88933fda9..57b312b13d 100644
 --- a/crates/horizon-client/src/android/platform.rs
@@ -1032,6 +1103,51 @@ index fc510a764c..aff99abfc7 100644
      if options.dedicated.is_none() {
          let automated = options.benchmark.is_some()
              || options.offscreen
+diff --git a/crates/horizon-client/src/game/moved_extras.rs b/crates/horizon-client/src/game/moved_extras.rs
+index bd277033ef..072ea5052e 100644
+--- a/crates/horizon-client/src/game/moved_extras.rs
++++ b/crates/horizon-client/src/game/moved_extras.rs
+@@ -4,13 +4,17 @@
+ //! one line in the chat saying so. The download runs on its own thread; if
+ //! it fails (offline), the game tries again at the next start.
+ 
+-#[cfg(not(feature = "mods"))]
++#[cfg(any(not(feature = "mods"), feature = "blaze-embedded"))]
++#[derive(Default)]
++pub(in crate::game) struct MovedState;
++
++#[cfg(any(not(feature = "mods"), feature = "blaze-embedded"))]
+ impl super::Game<'_> {
+     pub(super) fn start_moved_extras(&mut self) {}
+     pub(super) fn poll_moved_extras(&mut self) {}
+ }
+ 
+-#[cfg(feature = "mods")]
++#[cfg(all(feature = "mods", not(feature = "blaze-embedded")))]
+ mod with_mods {
+     use super::super::Game;
+     use horizon_client::{
+@@ -118,5 +122,5 @@ mod with_mods {
+         }
+     }
+ }
+-#[cfg(feature = "mods")]
++#[cfg(all(feature = "mods", not(feature = "blaze-embedded")))]
+ pub(super) use with_mods::MovedState;
+diff --git a/crates/horizon-client/src/game/packs.rs b/crates/horizon-client/src/game/packs.rs
+index d307cccfe1..27d6bc6303 100644
+--- a/crates/horizon-client/src/game/packs.rs
++++ b/crates/horizon-client/src/game/packs.rs
+@@ -45,6 +45,9 @@ pub fn open_folder(dir: &Path) {
+             let id =
+                 crate::document_store::folder_id(crate::document_store::profile(&home), folder);
+             if !crate::platform::open_documents(&id) {
++                #[cfg(feature = "blaze-embedded")]
++                log::warn!("Open Files, then choose Blaze Launcher / {folder}");
++                #[cfg(not(feature = "blaze-embedded"))]
+                 log::warn!("Open Files, then choose Horizon Android / {folder}");
+             }
+         }
 diff --git a/crates/horizon-client/src/game/split.rs b/crates/horizon-client/src/game/split.rs
 index 0149e9ce44..2a89f869e6 100644
 --- a/crates/horizon-client/src/game/split.rs
@@ -1140,6 +1256,42 @@ index 9f3f3a5a69..a01a618c49 100644
      }
  }
  
+diff --git a/crates/horizon-client/src/moved_extras.rs b/crates/horizon-client/src/moved_extras.rs
+index 91f0a9a51e..a7dfbe10a2 100644
+--- a/crates/horizon-client/src/moved_extras.rs
++++ b/crates/horizon-client/src/moved_extras.rs
+@@ -13,7 +13,10 @@ use std::{
+ 
+ /// Horizon's registry; `HORIZON_MOD_INDEX` points elsewhere (a local file
+ /// for trials, whose files may then be `file://`), as for the launcher.
++#[cfg(not(feature = "blaze-embedded"))]
+ pub const INDEX_URL: &str = "https://horizon-rust.github.io/horizon-mods/index.json";
++#[cfg(feature = "blaze-embedded")]
++pub const INDEX_URL: &str = "";
+ const MAX_INDEX: u64 = 16 << 20;
+ 
+ /// An extra that is an official mod now.
+@@ -151,6 +154,7 @@ fn get(url: &str, local: bool, max: u64) -> Result<Vec<u8>, String> {
+ }
+ 
+ /// The registry's index, from the network (or `HORIZON_MOD_INDEX`).
++#[cfg(not(feature = "blaze-embedded"))]
+ pub fn fetch_index() -> Result<Index, String> {
+     let at = location();
+     let local = !at.starts_with("https://");
+@@ -162,6 +166,12 @@ pub fn fetch_index() -> Result<Index, String> {
+     }
+ }
+ 
++/// Registry auto-download is disabled under `blaze-embedded`.
++#[cfg(feature = "blaze-embedded")]
++pub fn fetch_index() -> Result<Index, String> {
++    Err("Disabled in blaze-embedded".into())
++}
++
+ /// Installs `m` into the game folder `dir` (where `options.txt` is), for a
+ /// player whose extras were `e`: its newest version for this game that
+ /// wasn't taken down and that this Horizon's mod API level runs, checked
 diff --git a/crates/horizon-client/src/no_resources.rs b/crates/horizon-client/src/no_resources.rs
 index 7b639201d6..61f15ceba4 100644
 --- a/crates/horizon-client/src/no_resources.rs
