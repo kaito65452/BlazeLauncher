@@ -498,7 +498,7 @@ fun RustGameOverlay(
             )
 
             GamepadModePromptDialog(
-                visible = gamepadViewModel.gamepadPromptShowing,
+                visible = gamepadViewModel.modePromptVisible,
                 onConfirm = { mode ->
                     if (mode == GamepadInputMode.SdlDirect) {
                         AllSettings.gamepadInputMode.save(GamepadInputMode.Mapped)

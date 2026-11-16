@@ -8,9 +8,13 @@ import org.json.JSONObject
  * Singleton JNI bridge to the pure Rust backend (libhorizon_android.so).
  */
 object BlazeNativeBridge {
+    @Volatile
+    private var loaded = false
+
     init {
         try {
             System.loadLibrary("horizon_android")
+            loaded = true
         } catch (e: UnsatisfiedLinkError) {
             System.err.println("BlazeNativeBridge: failed to load horizon_android: ${e.message}")
         }

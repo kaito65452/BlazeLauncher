@@ -1020,7 +1020,7 @@ index aff99abfc7..c5b61cf6a1 100644
 +                            winit::keyboard::Key::Character(s.into())
 +                        } else {
 +                            winit::keyboard::Key::Unidentified(
-+                                winit::keyboard::NativeKeyCode::Unidentified,
++                                winit::keyboard::NativeKeyCode::Unidentified.into(),
 +                            )
 +                        };
 +                        let text = if pressed {
