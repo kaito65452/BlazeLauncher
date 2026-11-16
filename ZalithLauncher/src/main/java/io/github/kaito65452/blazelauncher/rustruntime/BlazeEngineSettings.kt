@@ -31,6 +31,7 @@ data class BlazeEngineSettingsPayload(
     val renderScalePercent: Int = 100,
     val touchLookSensitivity: Float = 1.0f,
     val showControls: Boolean = true,
+    val useEngineTouchFallback: Boolean = false,
     val source: String = BlazeEngineSettings.DEFAULT_SOURCE
 )
 
@@ -51,6 +52,7 @@ object BlazeEngineSettings {
         renderScalePercent: Int,
         touchLookSensitivityPercent: Int,
         showControls: Boolean,
+        useEngineTouchFallback: Boolean = false,
         source: String = DEFAULT_SOURCE
     ): BlazeEngineSettingsPayload {
         val scale = sanitizeRenderScale(renderScalePercent)
@@ -60,6 +62,7 @@ object BlazeEngineSettings {
             renderScalePercent = scale,
             touchLookSensitivity = sens,
             showControls = showControls,
+            useEngineTouchFallback = useEngineTouchFallback,
             source = source.ifBlank { DEFAULT_SOURCE }
         )
     }
@@ -67,7 +70,8 @@ object BlazeEngineSettings {
     fun fromAllSettings(): BlazeEngineSettingsPayload = fromValues(
         renderScalePercent = AllSettings.rustRenderScalePercent.getValue(),
         touchLookSensitivityPercent = AllSettings.rustTouchLookSensitivityPercent.getValue(),
-        showControls = AllSettings.rustShowControls.getValue()
+        showControls = AllSettings.rustShowControls.getValue(),
+        useEngineTouchFallback = AllSettings.rustUseEngineTouchFallback.getValue()
     )
 
     private val gson = GsonBuilder().setPrettyPrinting().create()
@@ -78,6 +82,7 @@ object BlazeEngineSettings {
             addProperty("render_scale_percent", sanitizeRenderScale(payload.renderScalePercent))
             addProperty("touch_look_sensitivity", payload.touchLookSensitivity.coerceIn(0.25f, 3.0f).toDouble())
             addProperty("show_controls", payload.showControls)
+            addProperty("use_engine_touch_fallback", payload.useEngineTouchFallback)
             addProperty("source", payload.source.ifBlank { DEFAULT_SOURCE })
         }
         return gson.toJson(obj)
@@ -95,6 +100,7 @@ object BlazeEngineSettings {
             val sensRaw = obj.get("touch_look_sensitivity")?.takeIf { it.isJsonPrimitive }?.asFloat ?: 1.0f
             val sens = if (sensRaw.isFinite()) sensRaw.coerceIn(0.25f, 3.0f) else 1.0f
             val showControls = obj.get("show_controls")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true
+            val fallback = obj.get("use_engine_touch_fallback")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: false
             val source = obj.get("source")?.takeIf { it.isJsonPrimitive }?.asString?.ifBlank { DEFAULT_SOURCE }
                 ?: DEFAULT_SOURCE
             BlazeEngineSettingsPayload(
@@ -102,6 +108,7 @@ object BlazeEngineSettings {
                 renderScalePercent = scale,
                 touchLookSensitivity = sens,
                 showControls = showControls,
+                useEngineTouchFallback = fallback,
                 source = source
             )
         }.getOrNull()
@@ -129,6 +136,7 @@ object BlazeEngineSettings {
         if (!file.isFile) return "default (no $SETTINGS_FILE_NAME)"
         val parsed = fromJsonOrNull(runCatching { file.readText() }.getOrNull())
             ?: return "invalid ($SETTINGS_FILE_NAME)"
-        return "${parsed.source} ($SETTINGS_FILE_NAME: scale=${parsed.renderScalePercent}%, sens=${"%.2f".format(Locale.US, parsed.touchLookSensitivity)}x, controls=${parsed.showControls})"
+        val mode = if (parsed.useEngineTouchFallback) "engine_touch_fallback" else "zl2_desktop"
+        return "${parsed.source} ($SETTINGS_FILE_NAME: scale=${parsed.renderScalePercent}%, sens=${"%.2f".format(Locale.US, parsed.touchLookSensitivity)}x, controls=${parsed.showControls}, input=$mode)"
     }
 }

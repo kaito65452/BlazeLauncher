@@ -30,6 +30,8 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -39,7 +41,41 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.OnBackPressedDispatcher
+import androidx.activity.OnBackPressedDispatcherOwner
+import androidx.activity.setViewTreeOnBackPressedDispatcherOwner
+import androidx.annotation.Keep
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
+import com.movtery.zalithlauncher.game.input.EfficientAndroidLWJGLKeycode
+import com.movtery.zalithlauncher.game.input.LWJGLCharSender
+import com.movtery.zalithlauncher.setting.AllSettings
+import com.movtery.zalithlauncher.ui.control.gamepad.isGamepadKeyEvent
+import com.movtery.zalithlauncher.ui.control.input.TextInputMode
+import com.movtery.zalithlauncher.ui.theme.ZalithLauncherTheme
+import com.movtery.zalithlauncher.utils.device.PhysicalMouseChecker
+import com.movtery.zalithlauncher.viewmodel.GamepadViewModel
 import dev.horizon.android.bridge.BlazeNativeBridge
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter
+import io.github.kaito65452.blazelauncher.rustruntime.input.RustGameOverlay
+import io.github.kaito65452.blazelauncher.rustruntime.input.RustInputBridge
+import java.io.File
 import kotlin.math.roundToInt
 
 /**
@@ -53,16 +89,33 @@ import kotlin.math.roundToInt
 class RustActivity : NativeActivity() {
     private var initialProbeDispatched = false
     private var directLaunchMode = false
+    private var desktopOverlayAttached = false
+    private var textInputMode by mutableStateOf(TextInputMode.DISABLE)
+    private var activeLayoutFile by mutableStateOf<File?>(null)
+    private val composeHost by lazy { NativeActivityComposeHost() }
+    private val gamepadViewModel by lazy { GamepadViewModel() }
 
     private external fun nativeDocumentResult(requestCode: Int, resultCode: Int, uriString: String?)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         directLaunchMode = intent?.getBooleanExtra(EXTRA_DIRECT_LAUNCH, false) == true
+        val useEngineTouchFallback = runCatching { AllSettings.rustUseEngineTouchFallback.getValue() }
+            .getOrDefault(false)
+        val desktopInputActive = directLaunchMode && !useEngineTouchFallback
+        activeLayoutFile = intent?.getStringExtra(EXTRA_CONTROL_LAYOUT_PATH)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isFile }
+
         val pid = Process.myPid()
-        Log.i(TAG, "Starting RustActivity pid=$pid directLaunch=$directLaunchMode savedState=${savedInstanceState != null}")
+        Log.i(
+            TAG,
+            "Starting RustActivity pid=$pid directLaunch=$directLaunchMode " +
+                "desktopInput=$desktopInputActive fallback=$useEngineTouchFallback savedState=${savedInstanceState != null}"
+        )
         RustDiagnosticsCollector.recordRustEvent(
             this,
-            "onCreate pid=$pid directLaunch=$directLaunchMode savedState=${savedInstanceState != null}"
+            "onCreate pid=$pid directLaunch=$directLaunchMode desktopInput=$desktopInputActive savedState=${savedInstanceState != null}"
         )
         configureDisplayCutoutMode()
         // Consume session and set direct-launch mode BEFORE super.onCreate starts android_main.
@@ -77,14 +130,20 @@ class RustActivity : NativeActivity() {
         when (startupDecision) {
             is StartupDecision.Proceed -> {
                 BlazeNativeBridge.setDirectLaunch(directLaunchMode)
+                BlazeInputRouter.selectRust(RustInputBridge)
+                RustInputBridge.configureDesktopInputMode(desktopInputActive)
                 super.onCreate(savedInstanceState)
-                if (!directLaunchMode) {
+                if (desktopInputActive) {
+                    attachDesktopInputOverlay(savedInstanceState)
+                } else if (!directLaunchMode) {
                     attachSpikeOverlay()
                     triggerSyntheticTouchProbe(source = "onCreate_post")
                 }
             }
             is StartupDecision.ExitToLauncher -> {
                 BlazeNativeBridge.setDirectLaunch(false)
+                RustInputBridge.configureDesktopInputMode(false)
+                BlazeInputRouter.selectJava()
                 RustSessionHandoff.clearPendingSessionFiles(this)
                 RustDiagnosticsCollector.recordExitReason(
                     this,
@@ -99,6 +158,230 @@ class RustActivity : NativeActivity() {
                 finish()
             }
         }
+    }
+
+    @Suppress("unused")
+    @Keep
+    fun onCursorGrabChanged(grabbing: Boolean) {
+        RustInputBridge.onCursorGrabChanged(grabbing)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (desktopOverlayAttached) {
+            composeHost.onStart()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (desktopOverlayAttached) {
+            composeHost.onResume()
+        }
+    }
+
+    override fun onPause() {
+        if (directLaunchMode) {
+            BlazeInputRouter.currentSink().resetInputState()
+            persistInputBridgeDiagnostics()
+        }
+        if (desktopOverlayAttached) {
+            composeHost.onPause()
+        }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        if (desktopOverlayAttached) {
+            composeHost.onStop()
+        }
+        super.onStop()
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (desktopOverlayAttached) {
+            composeHost.onBackPressedDispatcher.onBackPressed()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!desktopOverlayAttached || !RustInputBridge.desktopInputEnabled) {
+            return super.dispatchKeyEvent(event)
+        }
+        if (event.action == KeyEvent.ACTION_UP && (event.flags and KeyEvent.FLAG_CANCELED) != 0) {
+            return true
+        }
+        val isDown = event.action == KeyEvent.ACTION_DOWN
+
+        if ((event.source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE &&
+            event.keyCode == KeyEvent.KEYCODE_BACK
+        ) {
+            if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
+                BlazeInputRouter.currentSink().sendMouseButton(
+                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt(),
+                    isDown
+                )
+            }
+            return true
+        }
+
+        if (event.isGamepadKeyEvent()) {
+            if (AllSettings.gamepadControl.state && gamepadViewModel.checkModePrompt()) {
+                return true
+            }
+            if (AllSettings.gamepadControl.state) {
+                gamepadViewModel.sendKeyEvent(event)
+                return true
+            }
+            return AllSettings.showMenuBall.state
+        }
+
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                composeHost.onBackPressedDispatcher.onBackPressed()
+            }
+            return true
+        }
+
+        if (isDown && event.keyCode == AllSettings.physicalKeyImeCode.state) {
+            textInputMode = if (textInputMode == TextInputMode.ENABLE) {
+                TextInputMode.DISABLE
+            } else {
+                TextInputMode.ENABLE
+            }
+            return true
+        }
+
+        if (textInputMode == TextInputMode.ENABLE && handleComposeTextModeKey(event, isDown)) {
+            return true
+        }
+
+        if ((event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD &&
+            event.keyCode == KeyEvent.KEYCODE_ENTER && isDown
+        ) {
+            LWJGLCharSender.sendEnter()
+            return true
+        }
+
+        val index = EfficientAndroidLWJGLKeycode.getIndexByKey(event.keyCode)
+        if (index >= 0) {
+            EfficientAndroidLWJGLKeycode.execKey(event, index)
+            return true
+        }
+
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_UP,
+            KeyEvent.KEYCODE_UNKNOWN -> super.dispatchKeyEvent(event)
+            else -> super.dispatchKeyEvent(event)
+        }
+    }
+
+    private fun handleComposeTextModeKey(event: KeyEvent, isDown: Boolean): Boolean {
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_SHIFT_LEFT,
+            KeyEvent.KEYCODE_SHIFT_RIGHT -> {
+                LWJGLCharSender.sendModifierShift(isDown)
+                true
+            }
+            KeyEvent.KEYCODE_CTRL_LEFT,
+            KeyEvent.KEYCODE_CTRL_RIGHT -> {
+                LWJGLCharSender.sendModifierCtrl(isDown)
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (isDown) LWJGLCharSender.sendUp()
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                if (isDown) LWJGLCharSender.sendDown()
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                if (isDown) LWJGLCharSender.sendLeft()
+                true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (isDown) LWJGLCharSender.sendRight()
+                true
+            }
+            KeyEvent.KEYCODE_TAB -> {
+                if (isDown) LWJGLCharSender.sendTab()
+                true
+            }
+            KeyEvent.KEYCODE_ENTER -> {
+                if (isDown) LWJGLCharSender.sendEnter()
+                true
+            }
+            KeyEvent.KEYCODE_DEL -> {
+                if (isDown) LWJGLCharSender.sendBackspace()
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun attachDesktopInputOverlay(savedInstanceState: Bundle?) {
+        PhysicalMouseChecker.initChecker(this)
+        composeHost.attachToDecorView(window.decorView)
+        composeHost.onCreate(savedInstanceState)
+        composeHost.onBackPressedDispatcher.addCallback(
+            composeHost,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    RustInputBridge.sendAndroidBack()
+                }
+            }
+        )
+
+        val container = FrameLayout(this)
+        applySafeDisplayInsets(container)
+        applyGestureExclusionOnLayout(container, resources.displayMetrics.density)
+
+        val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                ZalithLauncherTheme {
+                    RustGameOverlay(
+                        initialLayoutFile = activeLayoutFile,
+                        gamepadViewModel = gamepadViewModel,
+                        textInputMode = textInputMode,
+                        onTextInputModeChange = { textInputMode = it },
+                        onLayoutChanged = { newFile -> activeLayoutFile = newFile },
+                        onForceClose = ::exitRustProcess
+                    )
+                }
+            }
+        }
+
+        container.addView(
+            composeView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        addContentView(
+            container,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        desktopOverlayAttached = true
+    }
+
+    private fun persistInputBridgeDiagnostics() {
+        val nativeDiag = runCatching { BlazeNativeBridge.inputDiagnostics() }
+            .getOrElse { "unavailable (${it.javaClass.simpleName})" }
+        RustDiagnosticsCollector.recordInputBridgeStats(
+            context = this,
+            bridgeSummary = RustInputBridge.formatCountersSummary(),
+            nativeDiagnostics = nativeDiag
+        )
     }
 
     @Suppress("unused")
@@ -159,6 +442,9 @@ class RustActivity : NativeActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus && directLaunchMode) {
+            BlazeInputRouter.currentSink().resetInputState()
+        }
         if (hasFocus && !initialProbeDispatched && !directLaunchMode) {
             initialProbeDispatched = true
             triggerSyntheticTouchProbe(source = "window_focus")
@@ -306,8 +592,12 @@ class RustActivity : NativeActivity() {
     private fun exitRustProcess() {
         val pid = Process.myPid()
         Log.i(TAG, "Signaling engine exit and terminating :rust pid=$pid")
-        RustDiagnosticsCollector.recordExitReason(this, REASON_USER_QUIT, "Exit button in spike overlay")
+        RustDiagnosticsCollector.recordExitReason(this, REASON_USER_QUIT, "Exit button in overlay")
         RustDiagnosticsCollector.recordRustEvent(this, "exit_requested pid=$pid")
+        if (directLaunchMode) {
+            persistInputBridgeDiagnostics()
+        }
+        BlazeInputRouter.selectJava()
         runCatching { BlazeNativeBridge.signalEngineExit() }
         RustSessionHandoff.clearPendingSessionFiles(this)
         finish()
@@ -317,12 +607,85 @@ class RustActivity : NativeActivity() {
     override fun onDestroy() {
         val pid = Process.myPid()
         RustDiagnosticsCollector.recordRustEvent(this, "onDestroy finishing=$isFinishing pid=$pid")
+        if (directLaunchMode) {
+            BlazeInputRouter.currentSink().resetInputState()
+            persistInputBridgeDiagnostics()
+        }
+        if (desktopOverlayAttached) {
+            composeHost.onDestroy()
+        }
+        BlazeInputRouter.selectJava()
         super.onDestroy()
         if (isFinishing) {
             Log.i(TAG, "RustActivity finishing; clearing session & terminating :rust pid=$pid")
             runCatching { BlazeNativeBridge.signalEngineExit() }
             RustSessionHandoff.clearPendingSessionFiles(this)
             Process.killProcess(pid)
+        }
+    }
+
+    private inner class NativeActivityComposeHost :
+        LifecycleOwner,
+        SavedStateRegistryOwner,
+        ViewModelStoreOwner,
+        OnBackPressedDispatcherOwner {
+
+        private val lifecycleRegistry = LifecycleRegistry(this)
+        private val savedStateController = SavedStateRegistryController.create(this)
+        private val ownerViewModelStore = ViewModelStore()
+        private var created = false
+
+        override val lifecycle: Lifecycle
+            get() = lifecycleRegistry
+
+        override val savedStateRegistry: SavedStateRegistry
+            get() = savedStateController.savedStateRegistry
+
+        override val viewModelStore: ViewModelStore
+            get() = ownerViewModelStore
+
+        override val onBackPressedDispatcher: OnBackPressedDispatcher =
+            OnBackPressedDispatcher {
+                finish()
+            }
+
+        fun attachToDecorView(decorView: View) {
+            decorView.setViewTreeLifecycleOwner(this)
+            decorView.setViewTreeViewModelStoreOwner(this)
+            decorView.setViewTreeSavedStateRegistryOwner(this)
+            decorView.setViewTreeOnBackPressedDispatcherOwner(this)
+        }
+
+        fun onCreate(savedInstanceState: Bundle?) {
+            if (created) return
+            savedStateController.performAttach()
+            savedStateController.performRestore(savedInstanceState)
+            lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+            created = true
+        }
+
+        fun onStart() {
+            if (created) lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+        }
+
+        fun onResume() {
+            if (created) lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
+        }
+
+        fun onPause() {
+            if (created) lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+        }
+
+        fun onStop() {
+            if (created) lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        }
+
+        fun onDestroy() {
+            if (created) {
+                lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
+                created = false
+            }
+            ownerViewModelStore.clear()
         }
     }
 
@@ -343,6 +706,7 @@ class RustActivity : NativeActivity() {
     companion object {
         private const val TAG = "BlazeRustSpike"
         internal const val EXTRA_DIRECT_LAUNCH = "io.github.kaito65452.blazelauncher.EXTRA_DIRECT_LAUNCH"
+        internal const val EXTRA_CONTROL_LAYOUT_PATH = "io.github.kaito65452.blazelauncher.EXTRA_CONTROL_LAYOUT_PATH"
         internal const val DOCUMENT_PICKER_REQUEST_CODE = 4101
         internal const val MAX_DOCUMENT_URI_LENGTH = 8192
         internal const val MAX_SYSTEM_GESTURE_STRIP_DP = 200

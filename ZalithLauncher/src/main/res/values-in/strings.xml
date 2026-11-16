@@ -1419,6 +1419,8 @@
     <string name="developer_rust_touch_sensitivity_summary">Persentase sensitivitas kamera sentuh milik launcher</string>
     <string name="developer_rust_show_controls_title">Tampilkan kontrol engine Rust</string>
     <string name="developer_rust_show_controls_summary">Tampilkan kontrol sentuh di dalam Rust Edition</string>
+    <string name="developer_rust_touch_fallback_title">Gunakan kontrol sentuh engine (cadangan)</string>
+    <string name="developer_rust_touch_fallback_summary">Kembalikan Rust Edition ke kontrol sentuh bawaan engine sebagai pengganti overlay kontrol ZL2</string>
     <string name="developer_copy_report">Salin laporan</string>
     <string name="developer_copy_report_summary">Salin laporan kapabilitas perangkat dan diagnostik :rust</string>
     <string name="developer_prepare_title">Siapkan data engine (spike)</string>
@@ -1441,4 +1443,6 @@
     <string name="rust_engine_data_preparing">Menyiapkan data engine Rust Edition</string>
     <string name="rust_engine_data_preparing_bundled">Membuka paket tabel engine Rust Edition bawaan (tanpa javac)</string>
     <string name="rust_engine_data_preparing_slow">Menyiapkan data engine Rust Edition di perangkat (jalur lambat/eksperimental javac + datagen)</string>
+    <string name="blaze_rust_log_not_available">Penampil log runtime belum tersedia di Rust Edition</string>
+    <string name="blaze_rust_no_control_layout_to_edit">Tidak ada tata letak kontrol yang dipilih untuk diedit</string>
 </resources>

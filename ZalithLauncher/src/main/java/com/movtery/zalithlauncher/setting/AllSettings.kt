@@ -634,4 +634,9 @@ object AllSettings : SettingsRegistry() {
      * Rust Edition launcher-owned on-screen controls visibility
      */
     val rustShowControls = boolSetting("rustShowControls", true)
+
+    /**
+     * Rust Edition fallback toggle: use the engine's compiled-in touch controls instead of ZL2 overlay
+     */
+    val rustUseEngineTouchFallback = boolSetting("rustUseEngineTouchFallback", false)
 }

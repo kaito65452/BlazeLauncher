@@ -34,6 +34,7 @@ import java.util.Locale
 object RustDiagnosticsCollector {
     private const val STATUS_FILE = "rust_spike_last_status.txt"
     private const val LAST_EXIT_FILE = "rust_last_exit_reason.txt"
+    private const val INPUT_BRIDGE_FILE = "rust_input_bridge_stats.txt"
     private const val MAX_STATUS_LINES = 24
     private const val MAX_LOGCAT_LINES = 80
     private const val MAX_FILE_LOG_LINES = 40
@@ -88,6 +89,38 @@ object RustDiagnosticsCollector {
         if (file.isFile) redactDiagnosticText(file.readText().trim()) else ""
     }.getOrDefault("").ifBlank { "none recorded" }
 
+    fun formatInputModeLine(useEngineTouchFallback: Boolean): String = if (useEngineTouchFallback) {
+        "input_mode: engine_touch_fallback (Developer fallback toggle ON)"
+    } else {
+        "input_mode: zl2_desktop_jni (ZL2 overlay + RustInputBridge -> desktop key/mouse queue)"
+    }
+
+    fun recordInputBridgeStats(context: Context, bridgeSummary: String, nativeDiagnostics: String) {
+        recordInputBridgeStatsToDir(statusDir(context), bridgeSummary, nativeDiagnostics)
+    }
+
+    internal fun recordInputBridgeStatsToDir(
+        statusDir: File,
+        bridgeSummary: String,
+        nativeDiagnostics: String
+    ) {
+        val stamp = formatTimestamp(System.currentTimeMillis())
+        val body = buildString {
+            appendLine("updated_at=$stamp")
+            appendLine("kotlin_bridge: ${redactDiagnosticText(bridgeSummary.trim())}")
+            appendLine("native_queue: ${redactDiagnosticText(nativeDiagnostics.trim())}")
+        }
+        runCatching {
+            statusDir.mkdirs()
+            File(statusDir, INPUT_BRIDGE_FILE).writeText(body)
+        }
+    }
+
+    internal fun readInputBridgeStats(statusDir: File): String = runCatching {
+        val file = File(statusDir, INPUT_BRIDGE_FILE)
+        if (file.isFile) redactDiagnosticText(file.readText().trim()) else ""
+    }.getOrDefault("").ifBlank { "none recorded" }
+
     fun redactDiagnosticText(input: String?): String {
         if (input.isNullOrBlank()) return ""
         var cleaned = redactSensitiveData(input)
@@ -121,6 +154,9 @@ object RustDiagnosticsCollector {
         jvmWorkerLogFile = runCatching {
             com.movtery.zalithlauncher.game.download.jvm_server.LATEST_PROCESS_LOG_FILE
         }.getOrNull(),
+        useEngineTouchFallback = runCatching {
+            com.movtery.zalithlauncher.setting.AllSettings.rustUseEngineTouchFallback.getValue()
+        }.getOrDefault(false),
         nowMs = System.currentTimeMillis()
     )
 
@@ -147,6 +183,7 @@ object RustDiagnosticsCollector {
         historicalExits: String = "",
         logcatProvider: () -> String = { readSameUidLogcat() },
         jvmWorkerLogFile: File? = null,
+        useEngineTouchFallback: Boolean = false,
         nowMs: Long = System.currentTimeMillis()
     ): String = buildString {
         appendLine("=== :rust Process Status Trace ===")
@@ -165,6 +202,11 @@ object RustDiagnosticsCollector {
         appendLine(engineUiStatusLine())
         appendLine("last_exit_reason: ${readLastExitReason(statusDir)}")
         appendLine("settings_source: ${redactDiagnosticText(BlazeEngineSettings.describeSettingsSource(filesDir))}")
+
+        appendLine()
+        appendLine("=== Input Bridge (Stage L-B) ===")
+        appendLine(formatInputModeLine(useEngineTouchFallback))
+        appendLine(readInputBridgeStats(statusDir))
 
         appendLine()
         appendLine("=== Engine Data Check ===")

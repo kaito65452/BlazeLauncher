@@ -1489,6 +1489,8 @@
     <string name="developer_rust_touch_sensitivity_summary">Launcher-owned touch camera sensitivity percentage</string>
     <string name="developer_rust_show_controls_title">Show Rust engine controls</string>
     <string name="developer_rust_show_controls_summary">Display on-screen touch controls inside Rust Edition</string>
+    <string name="developer_rust_touch_fallback_title">Use engine touch controls (fallback)</string>
+    <string name="developer_rust_touch_fallback_summary">Revert Rust Edition to compiled-in Horizon touch controls instead of ZL2 desktop controls overlay</string>
     <string name="developer_copy_report">Copy report</string>
     <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
     <string name="developer_prepare_title">Prepare engine data (spike)</string>
@@ -1511,4 +1513,6 @@
     <string name="rust_engine_data_preparing">Preparing Rust Edition engine data</string>
     <string name="rust_engine_data_preparing_bundled">Unpacking bundled Rust Edition engine tables (no javac)</string>
     <string name="rust_engine_data_preparing_slow">Preparing Rust Edition engine data on-device (slow/experimental javac + datagen)</string>
+    <string name="blaze_rust_log_not_available">Runtime log viewer is not available in Rust Edition yet</string>
+    <string name="blaze_rust_no_control_layout_to_edit">No control layout selected to edit</string>
 </resources>

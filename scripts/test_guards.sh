@@ -788,6 +788,16 @@ keep = [
     "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetDirectLaunch",
     "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSignalEngineExit",
     "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeConfigureEmbedded",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectKey",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectMouseButton",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectCursorPos",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectCursorDelta",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectScroll",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectChar",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectAndroidBack",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeResetInputState",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetDesktopInputMode",
+    "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInputDiagnostics",
     "BlazeWgpu:",
     "BlazePerf pipelines_created_ms=",
     "BlazePerf surface_to_first_frame_ms=",
@@ -833,6 +843,11 @@ BAD_SO_MISSING_NOTICE="$TMP_ROOT/bad_missing_notice.so"
 make_embedded_so "$BAD_SO_MISSING_NOTICE" "" "Not affiliated with Mojang or Microsoft"
 expect_fail "Check 15 rejects embedded .so missing Mojang non-affiliation disclaimer" "missing mandatory A0 KEEP-list" \
     bash scripts/guard.sh --check-embedded-so "$BAD_SO_MISSING_NOTICE"
+
+BAD_SO_MISSING_INPUT_JNI="$TMP_ROOT/bad_missing_input_jni.so"
+make_embedded_so "$BAD_SO_MISSING_INPUT_JNI" "" "Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectKey"
+expect_fail "Check 15 rejects embedded .so missing Stage L-B input injector JNI" "missing mandatory A0 KEEP-list" \
+    bash scripts/guard.sh --check-embedded-so "$BAD_SO_MISSING_INPUT_JNI"
 
 echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="

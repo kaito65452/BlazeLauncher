@@ -110,16 +110,19 @@ object RustLaunchDispatcher {
             context,
             "stage_d_launch version=${version.getVersionName()} direct=true ${staged.summary}"
         )
-        context.startActivity(buildLaunchIntent(context))
+        context.startActivity(buildLaunchIntent(context, version.getControlPath()?.absolutePath))
     }
 
-    internal fun buildLaunchIntent(context: Context): Intent =
+    internal fun buildLaunchIntent(context: Context, controlLayoutPath: String? = null): Intent =
         Intent(context, RustActivity::class.java).apply {
             populateLaunchIntent(
                 isActivityContext = context is Activity,
                 setNewTaskFlag = { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) },
                 putDirectLaunchExtra = { key, value -> putExtra(key, value) }
             )
+            if (!controlLayoutPath.isNullOrBlank()) {
+                putExtra(RustActivity.EXTRA_CONTROL_LAYOUT_PATH, controlLayoutPath)
+            }
         }
 
     internal fun populateLaunchIntent(

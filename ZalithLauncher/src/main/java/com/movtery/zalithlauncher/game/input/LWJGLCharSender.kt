@@ -21,51 +21,53 @@ package com.movtery.zalithlauncher.game.input
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
-import org.lwjgl.glfw.CallbackBridge
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter
 
 object LWJGLCharSender : CharacterSenderStrategy {
     override fun sendBackspace() {
-        CallbackBridge.sendKeycode(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt(), '\u0008', 0, 0, true)
-        CallbackBridge.sendKeycode(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt(), '\u0008', 0, 0, false)
+        val sink = BlazeInputRouter.currentSink()
+        sink.sendKeycode(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt(), '\u0008', 0, 0, true)
+        sink.sendKeycode(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt(), '\u0008', 0, 0, false)
     }
 
     override fun sendEnter() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
     }
 
     override fun sendTab() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_TAB.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_TAB.toInt())
     }
 
     override fun sendLeft() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_LEFT.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_LEFT.toInt())
     }
 
     override fun sendRight() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_RIGHT.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_RIGHT.toInt())
     }
 
     override fun sendUp() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_UP.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_UP.toInt())
     }
 
     override fun sendDown() {
-        CallbackBridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_DOWN.toInt())
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_DOWN.toInt())
     }
 
     override fun sendChar(character: Char) {
         // 按键与字符成对发送：lwjglx 系 LWJGL2 兼容层将字母等 keydown 暂存，
         // 待 charMods 事件合并后才投给游戏，只发字符无法驱动按键绑定
+        val sink = BlazeInputRouter.currentSink()
         val index = EfficientAndroidLWJGLKeycode.getIndexByKey(
             EfficientAndroidLWJGLKeycode.getAndroidKeycode(character)
         )
         if (index < 0) {
-            CallbackBridge.sendChar(character, 0)
+            sink.sendChar(character, 0)
             return
         }
         val keycode = EfficientAndroidLWJGLKeycode.getValueByIndex(index).toInt()
-        CallbackBridge.sendKeycode(keycode, character, 0, CallbackBridge.getCurrentMods(), true)
-        CallbackBridge.sendKeycode(keycode, character, 0, CallbackBridge.getCurrentMods(), false)
+        sink.sendKeycode(keycode, character, 0, sink.getCurrentMods(), true)
+        sink.sendKeycode(keycode, character, 0, sink.getCurrentMods(), false)
     }
 
     override fun sendOther(key: KeyEvent) {
@@ -93,15 +95,17 @@ object LWJGLCharSender : CharacterSenderStrategy {
     }
 
     override fun sendModifierShift(press: Boolean) {
+        val sink = BlazeInputRouter.currentSink()
         val keycode = LwjglGlfwKeycode.GLFW_KEY_LEFT_SHIFT.toInt()
-        CallbackBridge.sendKeyPress(keycode, CallbackBridge.getCurrentMods(), press)
-        CallbackBridge.setModifiers(keycode, press)
+        sink.sendKeyPress(keycode, sink.getCurrentMods(), press)
+        sink.setModifiers(keycode, press)
     }
 
     override fun sendModifierCtrl(press: Boolean) {
+        val sink = BlazeInputRouter.currentSink()
         val keycode = LwjglGlfwKeycode.GLFW_KEY_LEFT_CONTROL.toInt()
-        CallbackBridge.sendKeyPress(keycode, CallbackBridge.getCurrentMods(), press)
-        CallbackBridge.setModifiers(keycode, press)
+        sink.sendKeyPress(keycode, sink.getCurrentMods(), press)
+        sink.setModifiers(keycode, press)
     }
 
     /**

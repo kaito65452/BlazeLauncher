@@ -252,6 +252,67 @@ object BlazeNativeBridge {
     fun configureEmbedded(json: String): Boolean = runCatching {
         nativeConfigureEmbedded(json)
     }.getOrDefault(false)
+
+    external fun nativeInjectKey(keyCode: Int, unicodeChar: Int, mods: Int, pressed: Boolean)
+    external fun nativeInjectMouseButton(button: Int, mods: Int, pressed: Boolean)
+    external fun nativeInjectCursorPos(normX: Float, normY: Float)
+    external fun nativeInjectCursorDelta(dx: Float, dy: Float)
+    external fun nativeInjectScroll(dx: Float, dy: Float)
+    external fun nativeInjectChar(codepoint: Int)
+    external fun nativeInjectAndroidBack()
+    external fun nativeResetInputState()
+    external fun nativeSetDesktopInputMode(enabled: Boolean)
+    external fun nativeInputDiagnostics(): String
+
+    fun injectKey(keyCode: Int, unicodeChar: Int, mods: Int, pressed: Boolean) {
+        if (!loaded) return
+        runCatching { nativeInjectKey(keyCode, unicodeChar, mods, pressed) }
+    }
+
+    fun injectMouseButton(button: Int, mods: Int, pressed: Boolean) {
+        if (!loaded) return
+        runCatching { nativeInjectMouseButton(button, mods, pressed) }
+    }
+
+    fun injectCursorPos(normX: Float, normY: Float) {
+        if (!loaded) return
+        runCatching { nativeInjectCursorPos(normX, normY) }
+    }
+
+    fun injectCursorDelta(dx: Float, dy: Float) {
+        if (!loaded) return
+        runCatching { nativeInjectCursorDelta(dx, dy) }
+    }
+
+    fun injectScroll(dx: Float, dy: Float) {
+        if (!loaded) return
+        runCatching { nativeInjectScroll(dx, dy) }
+    }
+
+    fun injectChar(codepoint: Int) {
+        if (!loaded) return
+        runCatching { nativeInjectChar(codepoint) }
+    }
+
+    fun injectAndroidBack() {
+        if (!loaded) return
+        runCatching { nativeInjectAndroidBack() }
+    }
+
+    fun resetInputState() {
+        if (!loaded) return
+        runCatching { nativeResetInputState() }
+    }
+
+    fun setDesktopInputMode(enabled: Boolean) {
+        if (!loaded) return
+        runCatching { nativeSetDesktopInputMode(enabled) }
+    }
+
+    fun inputDiagnostics(): String {
+        if (!loaded) return ""
+        return runCatching { nativeInputDiagnostics() }.getOrDefault("")
+    }
 }
 
 data class BlazeAccount(

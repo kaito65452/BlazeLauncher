@@ -1,0 +1,2735 @@
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index e60a7c99e5..e8f8c3b578 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -361,6 +361,7 @@ pub struct BlazeEngineSettings {
+     pub render_scale_percent: u32,
+     pub touch_look_sensitivity: f32,
+     pub show_controls: bool,
++    pub use_engine_touch_fallback: bool,
+     pub source: String,
+ }
+ 
+@@ -371,6 +372,7 @@ impl Default for BlazeEngineSettings {
+             render_scale_percent: 100,
+             touch_look_sensitivity: 1.0,
+             show_controls: true,
++            use_engine_touch_fallback: false,
+             source: "default".into(),
+         }
+     }
+@@ -483,3 +485,536 @@ mod embedded_state_tests {
+         assert_eq!(nan_cfg.touch_look_sensitivity, 1.0);
+     }
+ }
++
++static BLAZE_DESKTOP_INPUT: AtomicBool = AtomicBool::new(cfg!(feature = "blaze-embedded"));
++
++pub fn set_blaze_desktop_input(enabled: bool) {
++    BLAZE_DESKTOP_INPUT.store(enabled, Ordering::Release);
++}
++
++pub fn blaze_desktop_input_enabled() -> bool {
++    BLAZE_DESKTOP_INPUT.load(Ordering::Acquire)
++}
++
++pub const BLAZE_INPUT_QUEUE_CAP: usize = 512;
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub enum BlazeInputEvent {
++    Noop,
++    Key {
++        glfw_key: i32,
++        unicode_char: u32,
++        mods: i32,
++        pressed: bool,
++    },
++    MouseButton {
++        glfw_button: i32,
++        mods: i32,
++        pressed: bool,
++    },
++    CursorPos {
++        norm_x: f32,
++        norm_y: f32,
++    },
++    Scroll {
++        dx: f32,
++        dy: f32,
++    },
++    Char {
++        codepoint: u32,
++    },
++    AndroidBack,
++    ResetState,
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
++pub struct BlazeInputCounters {
++    pub key_events: u64,
++    pub mouse_button_events: u64,
++    pub cursor_pos_events: u64,
++    pub mouse_delta_events: u64,
++    pub mouse_delta_coalesced: u64,
++    pub scroll_events: u64,
++    pub char_events: u64,
++    pub android_back_events: u64,
++    pub dropped_overflow: u64,
++    pub drained_events: u64,
++    pub raw_touch_ignored: u64,
++}
++
++struct BlazeInputQueue {
++    ring: [BlazeInputEvent; BLAZE_INPUT_QUEUE_CAP],
++    head: usize,
++    len: usize,
++    pending_delta_x: f64,
++    pending_delta_y: f64,
++    delta_pending_batches: u64,
++    counters: BlazeInputCounters,
++}
++
++impl BlazeInputQueue {
++    const fn new() -> Self {
++        Self {
++            ring: [BlazeInputEvent::Noop; BLAZE_INPUT_QUEUE_CAP],
++            head: 0,
++            len: 0,
++            pending_delta_x: 0.0,
++            pending_delta_y: 0.0,
++            delta_pending_batches: 0,
++            counters: BlazeInputCounters {
++                key_events: 0,
++                mouse_button_events: 0,
++                cursor_pos_events: 0,
++                mouse_delta_events: 0,
++                mouse_delta_coalesced: 0,
++                scroll_events: 0,
++                char_events: 0,
++                android_back_events: 0,
++                dropped_overflow: 0,
++                drained_events: 0,
++                raw_touch_ignored: 0,
++            },
++        }
++    }
++
++    fn push(&mut self, event: BlazeInputEvent) {
++        match event {
++            BlazeInputEvent::Noop => return,
++            BlazeInputEvent::Key { .. } => self.counters.key_events += 1,
++            BlazeInputEvent::MouseButton { .. } => self.counters.mouse_button_events += 1,
++            BlazeInputEvent::CursorPos { .. } => {
++                self.counters.cursor_pos_events += 1;
++                // Coalesce consecutive CursorPos events at the ring tail.
++                if self.len > 0 {
++                    let tail = (self.head + self.len - 1) % BLAZE_INPUT_QUEUE_CAP;
++                    if matches!(self.ring[tail], BlazeInputEvent::CursorPos { .. }) {
++                        self.ring[tail] = event;
++                        return;
++                    }
++                }
++            }
++            BlazeInputEvent::Scroll { .. } => self.counters.scroll_events += 1,
++            BlazeInputEvent::Char { .. } => self.counters.char_events += 1,
++            BlazeInputEvent::AndroidBack => self.counters.android_back_events += 1,
++            BlazeInputEvent::ResetState => {}
++        }
++        if self.len == BLAZE_INPUT_QUEUE_CAP {
++            self.counters.dropped_overflow += 1;
++            self.head = (self.head + 1) % BLAZE_INPUT_QUEUE_CAP;
++            self.len -= 1;
++        }
++        let slot = (self.head + self.len) % BLAZE_INPUT_QUEUE_CAP;
++        self.ring[slot] = event;
++        self.len += 1;
++    }
++
++    fn drain_chunk(&mut self, out: &mut [BlazeInputEvent]) -> usize {
++        let count = self.len.min(out.len());
++        for slot in out.iter_mut().take(count) {
++            *slot = self.ring[self.head];
++            self.ring[self.head] = BlazeInputEvent::Noop;
++            self.head = (self.head + 1) % BLAZE_INPUT_QUEUE_CAP;
++        }
++        self.len -= count;
++        if self.len == 0 {
++            self.head = 0;
++        }
++        self.counters.drained_events += count as u64;
++        count
++    }
++
++    fn push_delta(&mut self, dx: f64, dy: f64) {
++        if !dx.is_finite() || !dy.is_finite() {
++            return;
++        }
++        self.counters.mouse_delta_events += 1;
++        if self.delta_pending_batches > 0 {
++            self.counters.mouse_delta_coalesced += 1;
++        }
++        self.pending_delta_x += dx;
++        self.pending_delta_y += dy;
++        self.delta_pending_batches += 1;
++    }
++
++    fn drain_delta(&mut self) -> (f64, f64) {
++        let out = (self.pending_delta_x, self.pending_delta_y);
++        self.pending_delta_x = 0.0;
++        self.pending_delta_y = 0.0;
++        self.delta_pending_batches = 0;
++        out
++    }
++
++    fn clear_events(&mut self) {
++        for slot in &mut self.ring {
++            *slot = BlazeInputEvent::Noop;
++        }
++        self.head = 0;
++        self.len = 0;
++        self.pending_delta_x = 0.0;
++        self.pending_delta_y = 0.0;
++        self.delta_pending_batches = 0;
++    }
++}
++
++static BLAZE_INPUT_QUEUE: std::sync::Mutex<BlazeInputQueue> =
++    std::sync::Mutex::new(BlazeInputQueue::new());
++
++pub fn push_input_event(event: BlazeInputEvent) {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.push(event);
++}
++
++pub fn push_mouse_delta(dx: f64, dy: f64) {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.push_delta(dx, dy);
++}
++
++pub fn drain_input_chunk(out: &mut [BlazeInputEvent]) -> usize {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.drain_chunk(out)
++}
++
++pub fn drain_mouse_delta() -> (f64, f64) {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.drain_delta()
++}
++
++pub fn clear_input_queue() {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.clear_events();
++}
++
++pub fn reset_input_metrics_for_test() {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    *guard = BlazeInputQueue::new();
++}
++
++pub fn record_raw_touch_ignored() {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.counters.raw_touch_ignored += 1;
++}
++
++pub fn input_counters() -> BlazeInputCounters {
++    let guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    guard.counters
++}
++
++pub fn input_diagnostics_json() -> String {
++    let counters = input_counters();
++    serde_json::json!({
++        "desktop_input_enabled": blaze_desktop_input_enabled(),
++        "counters": counters,
++    })
++    .to_string()
++}
++
++pub fn glfw_keycode_to_winit(glfw_key: i32) -> Option<winit::keyboard::KeyCode> {
++    use winit::keyboard::KeyCode;
++    Some(match glfw_key {
++        32 => KeyCode::Space,
++        39 => KeyCode::Quote,
++        44 => KeyCode::Comma,
++        45 => KeyCode::Minus,
++        46 => KeyCode::Period,
++        47 => KeyCode::Slash,
++        48 => KeyCode::Digit0,
++        49 => KeyCode::Digit1,
++        50 => KeyCode::Digit2,
++        51 => KeyCode::Digit3,
++        52 => KeyCode::Digit4,
++        53 => KeyCode::Digit5,
++        54 => KeyCode::Digit6,
++        55 => KeyCode::Digit7,
++        56 => KeyCode::Digit8,
++        57 => KeyCode::Digit9,
++        59 => KeyCode::Semicolon,
++        61 => KeyCode::Equal,
++        65 => KeyCode::KeyA,
++        66 => KeyCode::KeyB,
++        67 => KeyCode::KeyC,
++        68 => KeyCode::KeyD,
++        69 => KeyCode::KeyE,
++        70 => KeyCode::KeyF,
++        71 => KeyCode::KeyG,
++        72 => KeyCode::KeyH,
++        73 => KeyCode::KeyI,
++        74 => KeyCode::KeyJ,
++        75 => KeyCode::KeyK,
++        76 => KeyCode::KeyL,
++        77 => KeyCode::KeyM,
++        78 => KeyCode::KeyN,
++        79 => KeyCode::KeyO,
++        80 => KeyCode::KeyP,
++        81 => KeyCode::KeyQ,
++        82 => KeyCode::KeyR,
++        83 => KeyCode::KeyS,
++        84 => KeyCode::KeyT,
++        85 => KeyCode::KeyU,
++        86 => KeyCode::KeyV,
++        87 => KeyCode::KeyW,
++        88 => KeyCode::KeyX,
++        89 => KeyCode::KeyY,
++        90 => KeyCode::KeyZ,
++        91 => KeyCode::BracketLeft,
++        92 => KeyCode::Backslash,
++        93 => KeyCode::BracketRight,
++        96 => KeyCode::Backquote,
++        256 => KeyCode::Escape,
++        257 => KeyCode::Enter,
++        258 => KeyCode::Tab,
++        259 => KeyCode::Backspace,
++        260 => KeyCode::Insert,
++        261 => KeyCode::Delete,
++        262 => KeyCode::ArrowRight,
++        263 => KeyCode::ArrowLeft,
++        264 => KeyCode::ArrowDown,
++        265 => KeyCode::ArrowUp,
++        266 => KeyCode::PageUp,
++        267 => KeyCode::PageDown,
++        268 => KeyCode::Home,
++        269 => KeyCode::End,
++        280 => KeyCode::CapsLock,
++        281 => KeyCode::ScrollLock,
++        282 => KeyCode::NumLock,
++        283 => KeyCode::PrintScreen,
++        284 => KeyCode::Pause,
++        290 => KeyCode::F1,
++        291 => KeyCode::F2,
++        292 => KeyCode::F3,
++        293 => KeyCode::F4,
++        294 => KeyCode::F5,
++        295 => KeyCode::F6,
++        296 => KeyCode::F7,
++        297 => KeyCode::F8,
++        298 => KeyCode::F9,
++        299 => KeyCode::F10,
++        300 => KeyCode::F11,
++        301 => KeyCode::F12,
++        302 => KeyCode::F13,
++        303 => KeyCode::F14,
++        304 => KeyCode::F15,
++        305 => KeyCode::F16,
++        306 => KeyCode::F17,
++        307 => KeyCode::F18,
++        308 => KeyCode::F19,
++        309 => KeyCode::F20,
++        310 => KeyCode::F21,
++        311 => KeyCode::F22,
++        312 => KeyCode::F23,
++        313 => KeyCode::F24,
++        314 => KeyCode::F25,
++        320 => KeyCode::Numpad0,
++        321 => KeyCode::Numpad1,
++        322 => KeyCode::Numpad2,
++        323 => KeyCode::Numpad3,
++        324 => KeyCode::Numpad4,
++        325 => KeyCode::Numpad5,
++        326 => KeyCode::Numpad6,
++        327 => KeyCode::Numpad7,
++        328 => KeyCode::Numpad8,
++        329 => KeyCode::Numpad9,
++        330 => KeyCode::NumpadDecimal,
++        331 => KeyCode::NumpadDivide,
++        332 => KeyCode::NumpadMultiply,
++        333 => KeyCode::NumpadSubtract,
++        334 => KeyCode::NumpadAdd,
++        335 => KeyCode::NumpadEnter,
++        336 => KeyCode::NumpadEqual,
++        340 => KeyCode::ShiftLeft,
++        341 => KeyCode::ControlLeft,
++        342 => KeyCode::AltLeft,
++        343 => KeyCode::SuperLeft,
++        344 => KeyCode::ShiftRight,
++        345 => KeyCode::ControlRight,
++        346 => KeyCode::AltRight,
++        347 => KeyCode::SuperRight,
++        348 => KeyCode::ContextMenu,
++        _ => return None,
++    })
++}
++
++pub fn glfw_keycode_to_named(glfw_key: i32) -> Option<winit::keyboard::NamedKey> {
++    use winit::keyboard::NamedKey;
++    Some(match glfw_key {
++        32 => NamedKey::Space,
++        256 => NamedKey::Escape,
++        257 | 335 => NamedKey::Enter,
++        258 => NamedKey::Tab,
++        259 => NamedKey::Backspace,
++        260 => NamedKey::Insert,
++        261 => NamedKey::Delete,
++        262 => NamedKey::ArrowRight,
++        263 => NamedKey::ArrowLeft,
++        264 => NamedKey::ArrowDown,
++        265 => NamedKey::ArrowUp,
++        266 => NamedKey::PageUp,
++        267 => NamedKey::PageDown,
++        268 => NamedKey::Home,
++        269 => NamedKey::End,
++        280 => NamedKey::CapsLock,
++        281 => NamedKey::ScrollLock,
++        282 => NamedKey::NumLock,
++        283 => NamedKey::PrintScreen,
++        284 => NamedKey::Pause,
++        290 => NamedKey::F1,
++        291 => NamedKey::F2,
++        292 => NamedKey::F3,
++        293 => NamedKey::F4,
++        294 => NamedKey::F5,
++        295 => NamedKey::F6,
++        296 => NamedKey::F7,
++        297 => NamedKey::F8,
++        298 => NamedKey::F9,
++        299 => NamedKey::F10,
++        300 => NamedKey::F11,
++        301 => NamedKey::F12,
++        302 => NamedKey::F13,
++        303 => NamedKey::F14,
++        304 => NamedKey::F15,
++        305 => NamedKey::F16,
++        306 => NamedKey::F17,
++        307 => NamedKey::F18,
++        308 => NamedKey::F19,
++        309 => NamedKey::F20,
++        310 => NamedKey::F21,
++        311 => NamedKey::F22,
++        312 => NamedKey::F23,
++        313 => NamedKey::F24,
++        340 | 344 => NamedKey::Shift,
++        341 | 345 => NamedKey::Control,
++        342 | 346 => NamedKey::Alt,
++        343 | 347 => NamedKey::Super,
++        348 => NamedKey::ContextMenu,
++        _ => return None,
++    })
++}
++
++pub fn glfw_mods_to_winit(mods: i32) -> winit::keyboard::ModifiersState {
++    use winit::keyboard::ModifiersState;
++    let mut state = ModifiersState::empty();
++    if mods & 0x0001 != 0 {
++        state |= ModifiersState::SHIFT;
++    }
++    if mods & 0x0002 != 0 {
++        state |= ModifiersState::CONTROL;
++    }
++    if mods & 0x0004 != 0 {
++        state |= ModifiersState::ALT;
++    }
++    if mods & 0x0008 != 0 {
++        state |= ModifiersState::SUPER;
++    }
++    state
++}
++
++pub fn glfw_button_to_winit(button: i32) -> Option<winit::event::MouseButton> {
++    use winit::event::MouseButton;
++    Some(match button {
++        0 => MouseButton::Left,
++        1 => MouseButton::Right,
++        2 => MouseButton::Middle,
++        3 => MouseButton::Back,
++        4 => MouseButton::Forward,
++        _ => return None,
++    })
++}
++
++#[cfg(test)]
++mod input_bridge_tests {
++    use super::*;
++    use winit::event::MouseButton;
++    use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
++
++    #[test]
++    fn maps_core_glfw_keys_buttons_and_modifiers() {
++        assert_eq!(glfw_keycode_to_winit(87), Some(KeyCode::KeyW));
++        assert_eq!(glfw_keycode_to_winit(65), Some(KeyCode::KeyA));
++        assert_eq!(glfw_keycode_to_winit(83), Some(KeyCode::KeyS));
++        assert_eq!(glfw_keycode_to_winit(68), Some(KeyCode::KeyD));
++        assert_eq!(glfw_keycode_to_winit(32), Some(KeyCode::Space));
++        assert_eq!(glfw_keycode_to_winit(256), Some(KeyCode::Escape));
++        assert_eq!(glfw_keycode_to_winit(257), Some(KeyCode::Enter));
++        assert_eq!(glfw_keycode_to_winit(258), Some(KeyCode::Tab));
++        assert_eq!(glfw_keycode_to_winit(259), Some(KeyCode::Backspace));
++        assert_eq!(glfw_keycode_to_winit(290), Some(KeyCode::F1));
++        assert_eq!(glfw_keycode_to_winit(292), Some(KeyCode::F3));
++        assert_eq!(glfw_keycode_to_winit(301), Some(KeyCode::F12));
++        assert_eq!(glfw_keycode_to_winit(340), Some(KeyCode::ShiftLeft));
++        assert_eq!(glfw_keycode_to_winit(341), Some(KeyCode::ControlLeft));
++        assert_eq!(glfw_keycode_to_winit(342), Some(KeyCode::AltLeft));
++        assert_eq!(glfw_keycode_to_winit(-1), None);
++
++        assert_eq!(glfw_keycode_to_named(256), Some(NamedKey::Escape));
++        assert_eq!(glfw_keycode_to_named(32), Some(NamedKey::Space));
++        assert_eq!(glfw_keycode_to_named(87), None);
++
++        assert_eq!(glfw_button_to_winit(0), Some(MouseButton::Left));
++        assert_eq!(glfw_button_to_winit(1), Some(MouseButton::Right));
++        assert_eq!(glfw_button_to_winit(2), Some(MouseButton::Middle));
++        assert_eq!(glfw_button_to_winit(3), Some(MouseButton::Back));
++        assert_eq!(glfw_button_to_winit(4), Some(MouseButton::Forward));
++        assert_eq!(glfw_button_to_winit(9), None);
++
++        let mods = glfw_mods_to_winit(0x01 | 0x02 | 0x04);
++        assert!(mods.contains(ModifiersState::SHIFT));
++        assert!(mods.contains(ModifiersState::CONTROL));
++        assert!(mods.contains(ModifiersState::ALT));
++        assert!(!mods.contains(ModifiersState::SUPER));
++    }
++
++    #[test]
++    fn coalesces_mouse_deltas_and_cursor_positions_without_heap_allocations() {
++        let mut queue = BlazeInputQueue::new();
++        for i in 0..100 {
++            queue.push_delta(1.5, -0.5);
++            if i == 0 || i == 99 {
++                queue.push(BlazeInputEvent::CursorPos {
++                    norm_x: 0.25 + (i as f32) * 0.001,
++                    norm_y: 0.5,
++                });
++            }
++        }
++        let (dx, dy) = queue.drain_delta();
++        assert!((dx - 150.0).abs() < 1e-6);
++        assert!((dy - (-50.0)).abs() < 1e-6);
++        assert_eq!(queue.counters.mouse_delta_events, 100);
++        assert_eq!(queue.counters.mouse_delta_coalesced, 99);
++
++        let mut buf = [BlazeInputEvent::Noop; 16];
++        let n = queue.drain_chunk(&mut buf);
++        assert_eq!(n, 1);
++        assert_eq!(
++            buf[0],
++            BlazeInputEvent::CursorPos {
++                norm_x: 0.349,
++                norm_y: 0.5,
++            }
++        );
++    }
++
++    #[test]
++    fn ring_overflow_drops_oldest_and_counts_accurately() {
++        let mut queue = BlazeInputQueue::new();
++        for k in 0..(BLAZE_INPUT_QUEUE_CAP + 10) {
++            queue.push(BlazeInputEvent::Key {
++                glfw_key: k as i32,
++                unicode_char: 0,
++                mods: 0,
++                pressed: true,
++            });
++        }
++        assert_eq!(queue.counters.dropped_overflow, 10);
++        let mut buf = [BlazeInputEvent::Noop; 64];
++        let n = queue.drain_chunk(&mut buf);
++        assert_eq!(n, 64);
++        assert_eq!(
++            buf[0],
++            BlazeInputEvent::Key {
++                glfw_key: 10,
++                unicode_char: 0,
++                mods: 0,
++                pressed: true,
++            }
++        );
++    }
++}
+diff --git a/crates/horizon-client/src/android/embedded_launcher.rs b/crates/horizon-client/src/android/embedded_launcher.rs
+index 7f4cd45346..fa1bd9564b 100644
+--- a/crates/horizon-client/src/android/embedded_launcher.rs
++++ b/crates/horizon-client/src/android/embedded_launcher.rs
+@@ -90,18 +90,21 @@ impl Launcher {
+         self.embedded_settings = embedded_settings;
+         self.config.render_scale =
+             crate::display::RenderScale::new(self.embedded_settings.render_scale_percent);
+-        self.config.input_host = if self.embedded_settings.show_controls {
+-            crate::catalog::InputHost::Touch
+-        } else {
++        let desktop_input = !self.embedded_settings.use_engine_touch_fallback;
++        horizon_client::android_runtime::set_blaze_desktop_input(desktop_input);
++        self.config.input_host = if desktop_input || !self.embedded_settings.show_controls {
+             crate::catalog::InputHost::KeyboardMouse
++        } else {
++            crate::catalog::InputHost::Touch
+         };
+         log::info!(
+-            "BlazeSettings: launch source={} from_file={} render_scale={} touch_look_sensitivity={:.2} show_controls={}",
++            "BlazeSettings: launch source={} from_file={} render_scale={} touch_look_sensitivity={:.2} show_controls={} desktop_input={}",
+             self.embedded_settings.source,
+             from_file,
+             self.config.render_scale.percent(),
+             self.embedded_settings.touch_look_sensitivity,
+-            self.embedded_settings.show_controls
++            self.embedded_settings.show_controls,
++            desktop_input
+         );
+ 
+         crate::platform::set_orientation(self.config.orientation);
+diff --git a/crates/horizon-client/src/android/jni_bridge.rs b/crates/horizon-client/src/android/jni_bridge.rs
+index cc4d1bd965..e8274b52bf 100644
+--- a/crates/horizon-client/src/android/jni_bridge.rs
++++ b/crates/horizon-client/src/android/jni_bridge.rs
+@@ -870,3 +870,141 @@ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeD
+ ) -> jboolean {
+     0
+ }
++
++/// Inject a desktop keyboard event (GLFW keycode + modifiers + optional Unicode char) into the main loop.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectKey(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    key_code: jint,
++    unicode_char: jint,
++    mods: jint,
++    pressed: jboolean,
++) {
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::Key {
++            glfw_key: key_code,
++            unicode_char: unicode_char.max(0) as u32,
++            mods,
++            pressed: pressed != 0,
++        },
++    );
++}
++
++/// Inject a mouse button event (GLFW mouse button + modifiers) into the main loop.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectMouseButton(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    button: jint,
++    mods: jint,
++    pressed: jboolean,
++) {
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::MouseButton {
++            glfw_button: button,
++            mods,
++            pressed: pressed != 0,
++        },
++    );
++}
++
++/// Inject a normalized cursor position [0.0..1.0] across the active game viewport.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectCursorPos(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    norm_x: jni::sys::jfloat,
++    norm_y: jni::sys::jfloat,
++) {
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::CursorPos { norm_x, norm_y },
++    );
++}
++
++/// Inject relative camera mouse delta (coalesced per frame with zero heap allocation).
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectCursorDelta(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    dx: jni::sys::jfloat,
++    dy: jni::sys::jfloat,
++) {
++    horizon_client::android_runtime::push_mouse_delta(f64::from(dx), f64::from(dy));
++}
++
++/// Inject scroll wheel delta into the main loop.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectScroll(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    dx: jni::sys::jfloat,
++    dy: jni::sys::jfloat,
++) {
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::Scroll { dx, dy },
++    );
++}
++
++/// Inject a Unicode character (e.g. non-ASCII text bar commit) into the main loop.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectChar(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    codepoint: jint,
++) {
++    if codepoint > 0 {
++        horizon_client::android_runtime::push_input_event(
++            horizon_client::android_runtime::BlazeInputEvent::Char {
++                codepoint: codepoint as u32,
++            },
++        );
++    }
++}
++
++/// Forward Android system Back to Stage L-A's embedded back handler (pause in-game, exit on title).
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInjectAndroidBack(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++) {
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::AndroidBack,
++    );
++}
++
++/// Release held keys/buttons and flush pending deltas on focus loss or pause.
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeResetInputState(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++) {
++    horizon_client::android_runtime::clear_input_queue();
++    horizon_client::android_runtime::push_input_event(
++        horizon_client::android_runtime::BlazeInputEvent::ResetState,
++    );
++}
++
++/// Switch between ZL2 desktop-style input (true) and fallback compiled-in engine touch controls (false).
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeSetDesktopInputMode(
++    _env: JNIEnv<'_>,
++    _class: JClass<'_>,
++    enabled: jboolean,
++) {
++    let on = enabled != 0;
++    horizon_client::android_runtime::set_blaze_desktop_input(on);
++    if on {
++        crate::platform::hide();
++    }
++}
++
++/// JSON diagnostics snapshot for Developer Copy report (input mode & counters).
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeInputDiagnostics(
++    mut env: JNIEnv<'_>,
++    _class: JClass<'_>,
++) -> jstring {
++    let json = horizon_client::android_runtime::input_diagnostics_json();
++    str_to_jstring(&mut env, &json)
++}
+diff --git a/crates/horizon-client/src/android/platform.rs b/crates/horizon-client/src/android/platform.rs
+index 57b312b13d..be1a272cdf 100644
+--- a/crates/horizon-client/src/android/platform.rs
++++ b/crates/horizon-client/src/android/platform.rs
+@@ -493,10 +493,30 @@ pub fn notify_engine_exit(reason_code: i32, message: &str) {
+ }
+ 
+ pub fn capture_mouse(capture: bool) -> bool {
++    if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++        return false;
++    }
+     crate::native_ime::capture_mouse(capture)
+ }
+ 
++pub fn notify_cursor_grab(grabbing: bool) {
++    let _ = with_context(|env, activity| {
++        let arg = u8::from(grabbing);
++        if let Err(err) =
++            env.call_method(activity, "onCursorGrabChanged", "(Z)V", &[JValue::Bool(arg)])
++        {
++            let _ = env.exception_clear();
++            log::debug!("BlazeInput: onCursorGrabChanged callback skipped: {err}");
++        }
++        Ok(())
++    });
++}
++
+ pub fn show_secret(text: &str) {
++    if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++        crate::native_ime::hide();
++        return;
++    }
+     MULTILINE.with(|mode| mode.set(false));
+     if crate::native_ime::show_secret(text) {
+         EDIT.with(|e| *e.borrow_mut() = Some(text.into()));
+@@ -510,6 +530,10 @@ pub fn show_multiline(text: &str) {
+     show_editor(text, true);
+ }
+ fn show_editor(text: &str, multiline: bool) {
++    if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++        crate::native_ime::hide();
++        return;
++    }
+     MULTILINE.with(|mode| mode.set(multiline));
+     if crate::native_ime::show(text) {
+         EDIT.with(|e| *e.borrow_mut() = Some(text.into()));
+diff --git a/crates/horizon-client/src/android_main.rs b/crates/horizon-client/src/android_main.rs
+index 5a80924987..cd5529da21 100644
+--- a/crates/horizon-client/src/android_main.rs
++++ b/crates/horizon-client/src/android_main.rs
+@@ -102,13 +102,15 @@ mod backend {
+ 
+ use std::cell::RefCell;
+ pub(crate) fn keyboard_mouse_input() -> bool {
+-    horizon_client::android_runtime::active_input() == catalog::InputHost::KeyboardMouse
++    horizon_client::android_runtime::blaze_desktop_input_enabled()
++        || horizon_client::android_runtime::active_input() == catalog::InputHost::KeyboardMouse
+ }
+ pub(crate) fn configure_input_mode(mode: catalog::InputHost) {
+     horizon_client::android_runtime::configure_input(mode);
+ }
+ pub(crate) fn touch_visible() -> bool {
+-    horizon_client::android_runtime::active_input() == catalog::InputHost::Touch
++    !horizon_client::android_runtime::blaze_desktop_input_enabled()
++        && horizon_client::android_runtime::active_input() == catalog::InputHost::Touch
+ }
+ pub(crate) fn touch_input(touch: bool) {
+     horizon_client::android_runtime::note_input(if touch {
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index aff99abfc7..c5b61cf6a1 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -2053,6 +2053,29 @@ fn follow_keymap(event: &mut WindowEvent) {
+     }
+ }
+ 
++#[derive(Clone, Debug)]
++pub(super) struct DesktopKeyInput<'a> {
++    pub physical_key: PhysicalKey,
++    pub logical_key: winit::keyboard::Key,
++    pub text: Option<std::borrow::Cow<'a, str>>,
++    pub state: ElementState,
++    pub repeat: bool,
++    pub is_synthetic_bridge: bool,
++}
++
++impl<'a> DesktopKeyInput<'a> {
++    fn from_winit(event: &'a winit::event::KeyEvent) -> Self {
++        Self {
++            physical_key: event.physical_key,
++            logical_key: event.logical_key.clone(),
++            text: event.text.as_deref().map(std::borrow::Cow::Borrowed),
++            state: event.state,
++            repeat: event.repeat,
++            is_synthetic_bridge: false,
++        }
++    }
++}
++
+ /// Q throws the whole stack with Control down: the same modifier word the
+ /// screens read (`has_control_down`), never a latched sprint toggle.
+ fn drop_whole_stack(modifiers: winit::keyboard::ModifiersState) -> bool {
+@@ -7730,8 +7753,13 @@ impl Game<'_> {
+         self.agent_pointer = false;
+         // Splitscreen: another player has the pointer; this one's menus leave it alone.
+         if !self.keyboard_mouse {
++            let prev = self.captured;
+             self.captured = false;
+             self.os_mouse_captured = false;
++            #[cfg(target_os = "android")]
++            if prev {
++                crate::platform::notify_cursor_grab(false);
++            }
+             return;
+         }
+         if capture && !self.captured && !cfg!(target_os = "macos") {
+@@ -7826,6 +7854,10 @@ impl Game<'_> {
+             let pointer = pointer && (!crate::touch_visible() || self.settings.keypad.enabled);
+             window.set_cursor_visible(pointer);
+         }
++        #[cfg(target_os = "android")]
++        if self.captured != was_grabbed {
++            crate::platform::notify_cursor_grab(self.captured);
++        }
+     }
+     /// `GuiGraphicsExtractor.applyCursor` -> `Window.selectCursor` at the end
+     /// of a frame: the cursor the frame's widgets asked for, set on the window
+@@ -15090,7 +15122,7 @@ impl Game<'_> {
+         };
+         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
+         #[cfg(target_os = "android")]
+-        {
++        if !horizon_client::android_runtime::blaze_desktop_input_enabled() {
+             self.pad.touch.auxiliary_only =
+                 self.settings.keypad.enabled && self.pad.touch.editor.is_none();
+             self.pad.touch.update_visibility(
+@@ -15099,7 +15131,10 @@ impl Game<'_> {
+             );
+         }
+         #[cfg(target_os = "android")]
+-        if self.pad.touch.editor.is_some() {
++        if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++            self.pad.touch_ui.pointer_off = true;
++            self.pad.touch_ui.virtual_mouse = false;
++        } else if self.pad.touch.editor.is_some() {
+             let profile_name = self.pad.touch.settings.preset_name.clone();
+             horizon_client::touch_ui::draw_hud_editor(
+                 &self.pad.touch,
+@@ -15162,18 +15197,22 @@ impl Game<'_> {
+         }
+         #[cfg(target_os = "android")]
+         {
+-            self.android_sync_pointer();
++            if !horizon_client::android_runtime::blaze_desktop_input_enabled() {
++                self.android_sync_pointer();
++            }
+             if self.pad.touch.editor.is_none() {
+-                self.pad.touch_ui.goy_mode = self.pad.touch.settings.control_style
+-                    == horizon_client::touch::ControlStyle::GoyControl;
+-                self.pad
+-                    .touch_ui
+-                    .draw(&mut hud, &self.gui.atlas, self.pad_in_menu());
+-                self.pad.touch_ui.draw_floating_menu(
+-                    &mut hud,
+-                    &self.gui.atlas,
+-                    &self.pad.touch.settings,
+-                );
++                if !horizon_client::android_runtime::blaze_desktop_input_enabled() {
++                    self.pad.touch_ui.goy_mode = self.pad.touch.settings.control_style
++                        == horizon_client::touch::ControlStyle::GoyControl;
++                    self.pad
++                        .touch_ui
++                        .draw(&mut hud, &self.gui.atlas, self.pad_in_menu());
++                    self.pad.touch_ui.draw_floating_menu(
++                        &mut hud,
++                        &self.gui.atlas,
++                        &self.pad.touch.settings,
++                    );
++                }
+                 if let Some(status) = shader_packs::pending_shader_pack_status() {
+                     let mut ui =
+                         horizon_client::ui_theme::Ui::mobile(&self.gui.atlas, &mut hud, (0.0, 0.0));
+@@ -16291,9 +16330,31 @@ impl ApplicationHandler for Game<'_> {
+         self.previous = Instant::now();
+     }
+     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        #[cfg(target_os = "android")]
++        if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++            match &event {
++                WindowEvent::Touch(_) => {
++                    horizon_client::android_runtime::record_raw_touch_ignored();
++                    return;
++                }
++                WindowEvent::KeyboardInput { .. }
++                | WindowEvent::MouseInput { .. }
++                | WindowEvent::CursorMoved { .. }
++                | WindowEvent::MouseWheel { .. }
++                | WindowEvent::ModifiersChanged(_)
++                | WindowEvent::Ime(_) => return,
++                _ => {}
++            }
++        }
+         self.handle_window_event(event_loop, id, event);
+     }
+     fn device_event(&mut self, _: &ActiveEventLoop, device: DeviceId, event: DeviceEvent) {
++        #[cfg(target_os = "android")]
++        if horizon_client::android_runtime::blaze_desktop_input_enabled()
++            && matches!(event, DeviceEvent::MouseMotion { .. })
++        {
++            return;
++        }
+         #[cfg(target_os = "android")]
+         if matches!(event, DeviceEvent::Removed) {
+             self.android_release_touch_keys(true);
+@@ -16360,109 +16421,261 @@ impl ApplicationHandler for Game<'_> {
+ /// winit's events for a window's game, with any loop: a headless client (#4951) has no
+ /// winit loop and calls these from its own.
+ impl Game<'_> {
+-    /// winit's `window_event`. The control socket and the pad menu call it too, with the
+-    /// input they make up.
+-    pub(super) fn handle_window_event(
++    #[cfg(target_os = "android")]
++    pub(super) fn handle_embedded_android_back(&mut self, event_loop: &dyn EventLoopCtl) {
++        self.pad.touch.clear();
++        crate::platform::hide();
++        #[cfg(feature = "blaze-embedded")]
++        if self.screen != Screen::Options
++            && self.sign_edit.is_none()
++            && self.book.is_none()
++            && self.title.as_ref().is_some_and(|t| t.is_at_main_root())
++        {
++            horizon_client::android_runtime::set_exit_reason(
++                horizon_client::android_runtime::EmbeddedExitReason::TitleBack,
++                "Back pressed on title screen",
++            );
++            crate::game::exit_app(event_loop);
++            return;
++        }
++        if let Err(e) = self.pad_back() {
++            log::warn!("Android Back: {e}");
++        }
++    }
++
++    #[cfg(target_os = "android")]
++    pub(super) fn drain_blaze_input(&mut self, event_loop: &dyn EventLoopCtl) {
++        use horizon_client::android_runtime::{
++            BlazeInputEvent, drain_input_chunk, drain_mouse_delta, glfw_button_to_winit,
++            glfw_keycode_to_named, glfw_keycode_to_winit, glfw_mods_to_winit,
++        };
++        let id = self.window.as_ref().map_or(WindowId::dummy(), |w| w.id());
++        let mut chunk = [BlazeInputEvent::Noop; 64];
++        loop {
++            let count = drain_input_chunk(&mut chunk);
++            if count == 0 {
++                break;
++            }
++            for ev in &chunk[..count] {
++                match *ev {
++                    BlazeInputEvent::Noop => {}
++                    BlazeInputEvent::Key {
++                        glfw_key,
++                        unicode_char,
++                        mods,
++                        pressed,
++                    } => {
++                        let new_mods = glfw_mods_to_winit(mods);
++                        if new_mods != self.modifiers {
++                            self.handle_window_event(
++                                event_loop,
++                                id,
++                                WindowEvent::ModifiersChanged(new_mods.into()),
++                            );
++                        }
++                        let physical_key = glfw_keycode_to_winit(glfw_key)
++                            .map(PhysicalKey::Code)
++                            .unwrap_or(PhysicalKey::Unidentified(
++                                winit::keyboard::NativeKeyCode::Unidentified,
++                            ));
++                        let mut utf8_buf = [0u8; 4];
++                        let char_str = char::from_u32(unicode_char)
++                            .filter(|c| *c != '\u{0000}' && (!c.is_control() || *c == ' '))
++                            .map(|c| c.encode_utf8(&mut utf8_buf) as &str);
++                        let logical_key = if let Some(named) = glfw_keycode_to_named(glfw_key) {
++                            winit::keyboard::Key::Named(named)
++                        } else if let Some(s) = char_str {
++                            winit::keyboard::Key::Character(s.into())
++                        } else {
++                            winit::keyboard::Key::Unidentified(
++                                winit::keyboard::NativeKeyCode::Unidentified,
++                            )
++                        };
++                        let text = if pressed {
++                            char_str.map(std::borrow::Cow::Borrowed)
++                        } else {
++                            None
++                        };
++                        self.handle_desktop_key_input(
++                            event_loop,
++                            id,
++                            DesktopKeyInput {
++                                physical_key,
++                                logical_key,
++                                text,
++                                state: if pressed {
++                                    ElementState::Pressed
++                                } else {
++                                    ElementState::Released
++                                },
++                                repeat: false,
++                                is_synthetic_bridge: true,
++                            },
++                        );
++                    }
++                    BlazeInputEvent::MouseButton {
++                        glfw_button,
++                        mods,
++                        pressed,
++                    } => {
++                        let new_mods = glfw_mods_to_winit(mods);
++                        if new_mods != self.modifiers {
++                            self.handle_window_event(
++                                event_loop,
++                                id,
++                                WindowEvent::ModifiersChanged(new_mods.into()),
++                            );
++                        }
++                        if let Some(button) = glfw_button_to_winit(glfw_button) {
++                            self.handle_window_event(
++                                event_loop,
++                                id,
++                                WindowEvent::MouseInput {
++                                    device_id: DeviceId::dummy(),
++                                    state: if pressed {
++                                        ElementState::Pressed
++                                    } else {
++                                        ElementState::Released
++                                    },
++                                    button,
++                                },
++                            );
++                        }
++                    }
++                    BlazeInputEvent::CursorPos { norm_x, norm_y } => {
++                        let [rw, rh] = self
++                            .renderer
++                            .as_ref()
++                            .map(|r| [r.config.width.max(1), r.config.height.max(1)])
++                            .or_else(|| {
++                                self.window.as_ref().map(|w| {
++                                    let s = w.inner_size();
++                                    [s.width.max(1), s.height.max(1)]
++                                })
++                            })
++                            .unwrap_or([1, 1]);
++                        let position = winit::dpi::PhysicalPosition::new(
++                            f64::from(norm_x.clamp(0.0, 1.0)) * f64::from(rw),
++                            f64::from(norm_y.clamp(0.0, 1.0)) * f64::from(rh),
++                        );
++                        self.handle_window_event(
++                            event_loop,
++                            id,
++                            WindowEvent::CursorMoved {
++                                device_id: DeviceId::dummy(),
++                                position,
++                            },
++                        );
++                    }
++                    BlazeInputEvent::Scroll { dx, dy } => {
++                        self.handle_window_event(
++                            event_loop,
++                            id,
++                            WindowEvent::MouseWheel {
++                                device_id: DeviceId::dummy(),
++                                delta: MouseScrollDelta::LineDelta(dx, dy),
++                                phase: winit::event::TouchPhase::Moved,
++                            },
++                        );
++                    }
++                    BlazeInputEvent::Char { codepoint } => {
++                        if self.pending_save.is_none()
++                            && let Some(ch) = char::from_u32(codepoint)
++                            && !ch.is_control()
++                        {
++                            let mut utf8_buf = [0u8; 4];
++                            let s = ch.encode_utf8(&mut utf8_buf);
++                            self.ime_commit(s);
++                            self.last_input = Instant::now();
++                        }
++                    }
++                    BlazeInputEvent::AndroidBack => {
++                        self.handle_embedded_android_back(event_loop);
++                    }
++                    BlazeInputEvent::ResetState => {
++                        self.keys.clear();
++                        self.physical_keys.clear();
++                        self.physical_buttons.clear();
++                        self.modifiers = winit::keyboard::ModifiersState::empty();
++                        for slot in 0..4 {
++                            self.toggles.0[slot].set_down(false, false);
++                        }
++                        self.sync_toggle(SNEAK);
++                        self.sync_toggle(SPRINT);
++                        self.left = false;
++                        self.right = false;
++                        self.stop_mining();
++                    }
++                }
++            }
++        }
++        let (dx, dy) = drain_mouse_delta();
++        if (dx != 0.0 || dy != 0.0)
++            && self.pending_save.is_none()
++            && self.captured
++            && self.focused
++            && !self.options.offscreen
++            && self.screen == Screen::Playing
++        {
++            let _ = horizon_client::android_runtime::note_input(
++                horizon_client::android_gamepad::InputMode::KeyboardMouse,
++            );
++            crate::touch_input(false);
++            self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
++            self.last_input = Instant::now();
++        }
++    }
++
++    pub(super) fn handle_desktop_key_input(
+         &mut self,
+         event_loop: &dyn EventLoopCtl,
+         id: WindowId,
+-        mut event: WindowEvent,
++        mut event: DesktopKeyInput<'_>,
+     ) {
+-        // A headless game has no window: its events (the frame, the control socket's input)
+-        // carry `WindowId::dummy()`.
+-        let ours = match &self.window {
+-            Some(w) => w.id() == id,
+-            None => self.options.headless,
+-        };
+-        if !ours {
+-            return;
+-        }
+         #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &mut event
+-            && !matches!(event.physical_key, PhysicalKey::Code(_))
++        if !matches!(event.physical_key, PhysicalKey::Code(_))
+             && let Some(code) =
+                 horizon_client::keypad::resolve_key(event.physical_key, &event.logical_key)
+         {
+             event.physical_key = PhysicalKey::Code(code);
+         }
+         #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && event.state == ElementState::Pressed
+-            && let PhysicalKey::Code(key) = event.physical_key
+-            && self.pad.touch.capture_custom_key_code(key)
+-        {
+-            self.settings.touch = self.pad.touch.settings.clone();
+-            crate::platform::hide();
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && let PhysicalKey::Code(key) = event.physical_key
+-        {
+-            if event.state == ElementState::Pressed {
+-                self.pad.hardware_keys.insert(key);
+-            } else {
+-                self.pad.hardware_keys.remove(&key);
+-            }
+-            if self.pad.custom_keys.contains(&key) {
+-                return;
+-            }
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::CursorMoved { device_id, .. }
+-        | WindowEvent::MouseInput { device_id, .. }
+-        | WindowEvent::MouseWheel { device_id, .. } = &event
+-            && winit::platform::android::native_pointer_device(*device_id)
+-        {
+-            let accepted = horizon_client::android_runtime::note_input(
+-                horizon_client::android_gamepad::InputMode::KeyboardMouse,
+-            );
+-            if !accepted && !self.pad_in_menu() {
++        if !event.is_synthetic_bridge {
++            if event.state == ElementState::Pressed
++                && let PhysicalKey::Code(key) = event.physical_key
++                && self.pad.touch.capture_custom_key_code(key)
++            {
++                self.settings.touch = self.pad.touch.settings.clone();
++                crate::platform::hide();
+                 return;
+             }
+-            if crate::keyboard_mouse_input() && self.captured && !self.os_mouse_captured {
+-                self.os_mouse_captured = crate::platform::capture_mouse(true);
+-            }
+-        }
+-        #[cfg(target_os = "android")]
+-        match &event {
+-            WindowEvent::Touch(_) => {
+-                crate::touch_input(true);
+-                if self.os_mouse_captured {
+-                    self.os_mouse_captured = false;
+-                    let _ = crate::platform::capture_mouse(false);
++            if let PhysicalKey::Code(key) = event.physical_key {
++                if event.state == ElementState::Pressed {
++                    self.pad.hardware_keys.insert(key);
++                } else {
++                    self.pad.hardware_keys.remove(&key);
++                }
++                if self.pad.custom_keys.contains(&key) {
++                    return;
+                 }
+             }
+-            WindowEvent::KeyboardInput {
+-                device_id,
+-                event,
+-                is_synthetic: false,
+-            } if event.state == ElementState::Pressed
+-                && winit::platform::android::native_device_id(*device_id) > 0 =>
++            if !self.pad_in_menu()
++                && matches!(
++                    horizon_client::android_runtime::input_mode(),
++                    horizon_client::android_gamepad::InputMode::Touch
++                        | horizon_client::android_gamepad::InputMode::Controller
++                )
++                && event.state == ElementState::Pressed
++                && !matches!(
++                    event.logical_key,
++                    winit::keyboard::Key::Named(
++                        winit::keyboard::NamedKey::Escape | winit::keyboard::NamedKey::BrowserBack
++                    )
++                )
+             {
+-                crate::touch_input(false);
+-                if crate::keyboard_mouse_input() && self.captured && !self.os_mouse_captured {
+-                    self.os_mouse_captured = crate::platform::capture_mouse(true);
+-                }
++                return;
+             }
+-            _ => {}
+-        }
+-        #[cfg(target_os = "android")]
+-        if !self.pad_in_menu()
+-            && matches!(
+-                horizon_client::android_runtime::input_mode(),
+-                horizon_client::android_gamepad::InputMode::Touch
+-                    | horizon_client::android_gamepad::InputMode::Controller
+-            )
+-            && matches!(&event, WindowEvent::KeyboardInput { event, .. }
+-                if event.state == ElementState::Pressed
+-                    && !matches!(event.logical_key, winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape | winit::keyboard::NamedKey::BrowserBack)))
+-        {
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event {
+-            match self.android_keypad_menu_key(event_loop, event) {
++            match self.android_keypad_menu_key(event_loop, &event) {
+                 Ok(true) => return,
+                 Ok(false) => {}
+                 Err(error) => {
+@@ -16470,151 +16683,580 @@ impl Game<'_> {
+                     return;
+                 }
+             }
+-        }
+-        #[cfg(target_os = "android")]
+-        if self.android_aux_mouse(event_loop, id, &event) {
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && let Some(key) =
++            if let Some(key) =
+                 horizon_client::keypad::resolve_key(event.physical_key, &event.logical_key)
+-            && (!self.pad_in_menu() || event.state == ElementState::Released)
+-            && horizon_client::android_runtime::keypad_key(
+-                key,
+-                event.state == ElementState::Pressed,
+-            )
+-        {
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if matches!(&event,WindowEvent::KeyboardInput {event,..} if event.state==ElementState::Pressed && event.logical_key==winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack))
+-        {
+-            if crate::platform::active() {
+-                crate::platform::hide();
+-                return;
+-            }
+-            if self.pad.touch.editor.is_some() {
+-                if self.pad.touch.request_editor_back() {
+-                    let _ = self.pad.touch.settings.save();
+-                    self.settings.touch = self.pad.touch.settings.clone();
+-                    self.pause = false;
+-                }
+-                return;
+-            }
+-            self.pad.touch.clear();
+-            crate::platform::hide();
+-            #[cfg(feature = "blaze-embedded")]
+-            if self.screen != Screen::Options
+-                && self.sign_edit.is_none()
+-                && self.book.is_none()
+-                && self.title.as_ref().is_some_and(|t| t.is_at_main_root())
++                && (!self.pad_in_menu() || event.state == ElementState::Released)
++                && horizon_client::android_runtime::keypad_key(
++                    key,
++                    event.state == ElementState::Pressed,
++                )
+             {
+-                horizon_client::android_runtime::set_exit_reason(
+-                    horizon_client::android_runtime::EmbeddedExitReason::TitleBack,
+-                    "Back pressed on title screen",
+-                );
+-                crate::game::exit_app(event_loop);
+-                return;
+-            }
+-            if let Err(e) = self.pad_back() {
+-                log::warn!("Android Back: {e}");
+-            }
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if self.pad.touch.editor.is_some()
+-            && matches!(&event,WindowEvent::KeyboardInput{event,..}
+-            if event.state==ElementState::Pressed && event.physical_key==PhysicalKey::Code(KeyCode::Escape))
+-        {
+-            if crate::platform::active() {
+-                crate::platform::hide();
+                 return;
+             }
+-            if self.pad.touch.request_editor_back() {
+-                let _ = self.pad.touch.settings.save();
+-                self.settings.touch = self.pad.touch.settings.clone();
+-                self.pause = false;
+-            }
+-            return;
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && event.state == ElementState::Pressed
+-        {
+-            if self.pad.touch.editor.is_some() {
+-                if let PhysicalKey::Code(code) = event.physical_key
+-                    && self.pad.touch.capture_custom_key_code(code)
+-                {
+-                    self.settings.touch = self.pad.touch.settings.clone();
++            if event.state == ElementState::Pressed
++                && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack)
++            {
++                if crate::platform::active() {
+                     crate::platform::hide();
+                     return;
+                 }
+-                if let Some(txt) = event.text.as_deref()
+-                    && self.pad.touch.capture_custom_text(txt)
+-                {
+-                    self.settings.touch = self.pad.touch.settings.clone();
+-                    crate::platform::hide();
++                if self.pad.touch.editor.is_some() {
++                    if self.pad.touch.request_editor_back() {
++                        let _ = self.pad.touch.settings.save();
++                        self.settings.touch = self.pad.touch.settings.clone();
++                        self.pause = false;
++                    }
+                     return;
+                 }
++                self.handle_embedded_android_back(event_loop);
++                return;
+             }
+-            if self.pad.touch_ui.custom_input_picker != horizon_client::touch::PickerStep::None {
+-                if let PhysicalKey::Code(code) = event.physical_key
+-                    && let Some(token) = self.pad.touch_ui.capture_custom_input_key(code)
+-                {
++            if self.pad.touch.editor.is_some()
++                && event.state == ElementState::Pressed
++                && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
++            {
++                if crate::platform::active() {
+                     crate::platform::hide();
+-                    self.android_custom_token_tap(&token);
+                     return;
+                 }
+-                if let Some(txt) = event.text.as_deref()
+-                    && let Some(token) = self.pad.touch_ui.capture_custom_input_text(txt)
+-                {
+-                    crate::platform::hide();
+-                    self.android_custom_token_tap(&token);
+-                    return;
++                if self.pad.touch.request_editor_back() {
++                    let _ = self.pad.touch.settings.save();
++                    self.settings.touch = self.pad.touch.settings.clone();
++                    self.pause = false;
+                 }
++                return;
+             }
+-        }
+-        #[cfg(target_os = "android")]
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && event.state == ElementState::Pressed
+-            && (self
+-                .pad
+-                .touch
+-                .editor
+-                .as_ref()
+-                .is_some_and(|e| e.save_dialog_open)
+-                || self.pad.touch_ui.preset_dialog.is_some())
+-        {
+-            if let PhysicalKey::Code(code) = event.physical_key {
+-                if matches!(code, KeyCode::Backspace | KeyCode::Enter | KeyCode::Escape) {
+-                    let out = horizon_client::osk::Output::Key(code);
+-                    horizon_client::touch_ui::apply_editor_or_preset_output(
+-                        self.pad.touch.editor.as_mut(),
+-                        self.pad.touch_ui.preset_dialog.as_mut(),
+-                        &out,
+-                    );
+-                    if horizon_client::touch_ui::output_dismisses(&out) {
++            if event.state == ElementState::Pressed {
++                if self.pad.touch.editor.is_some() {
++                    if let PhysicalKey::Code(code) = event.physical_key
++                        && self.pad.touch.capture_custom_key_code(code)
++                    {
++                        self.settings.touch = self.pad.touch.settings.clone();
+                         crate::platform::hide();
++                        return;
++                    }
++                    if let Some(txt) = event.text.as_deref()
++                        && self.pad.touch.capture_custom_text(txt)
++                    {
++                        self.settings.touch = self.pad.touch.settings.clone();
++                        crate::platform::hide();
++                        return;
++                    }
++                }
++                if self.pad.touch_ui.custom_input_picker != horizon_client::touch::PickerStep::None {
++                    if let PhysicalKey::Code(code) = event.physical_key
++                        && let Some(token) = self.pad.touch_ui.capture_custom_input_key(code)
++                    {
++                        crate::platform::hide();
++                        self.android_custom_token_tap(&token);
++                        return;
++                    }
++                    if let Some(txt) = event.text.as_deref()
++                        && let Some(token) = self.pad.touch_ui.capture_custom_input_text(txt)
++                    {
++                        crate::platform::hide();
++                        self.android_custom_token_tap(&token);
++                        return;
+                     }
+-                    return;
+                 }
+             }
+-            if let Some(txt) = event.text.as_deref()
+-                && !txt.is_empty()
++            if event.state == ElementState::Pressed
++                && (self
++                    .pad
++                    .touch
++                    .editor
++                    .as_ref()
++                    .is_some_and(|e| e.save_dialog_open)
++                    || self.pad.touch_ui.preset_dialog.is_some())
+             {
+-                let out = horizon_client::osk::Output::Text(txt.to_owned());
+-                horizon_client::touch_ui::apply_editor_or_preset_output(
+-                    self.pad.touch.editor.as_mut(),
+-                    self.pad.touch_ui.preset_dialog.as_mut(),
+-                    &out,
++                if let PhysicalKey::Code(code) = event.physical_key {
++                    if matches!(code, KeyCode::Backspace | KeyCode::Enter | KeyCode::Escape) {
++                        let out = horizon_client::osk::Output::Key(code);
++                        horizon_client::touch_ui::apply_editor_or_preset_output(
++                            self.pad.touch.editor.as_mut(),
++                            self.pad.touch_ui.preset_dialog.as_mut(),
++                            &out,
++                        );
++                        if horizon_client::touch_ui::output_dismisses(&out) {
++                            crate::platform::hide();
++                        }
++                        return;
++                    }
++                }
++                if let Some(txt) = event.text.as_deref()
++                    && !txt.is_empty()
++                {
++                    let out = horizon_client::osk::Output::Text(txt.to_owned());
++                    horizon_client::touch_ui::apply_editor_or_preset_output(
++                        self.pad.touch.editor.as_mut(),
++                        self.pad.touch_ui.preset_dialog.as_mut(),
++                        &out,
++                    );
++                    if horizon_client::touch_ui::output_dismisses(&out) {
++                        crate::platform::hide();
++                    }
++                    return;
++                }
++            }
++        }
++        let _ = id;
++        if let winit::keyboard::Key::Named(named) = &event.logical_key {
++            match named {
++                winit::keyboard::NamedKey::Escape => event.physical_key = PhysicalKey::Code(KeyCode::Escape),
++                winit::keyboard::NamedKey::CapsLock => event.physical_key = PhysicalKey::Code(KeyCode::CapsLock),
++                _ => {}
++            }
++        }
++        if let PhysicalKey::Code(key) = event.physical_key {
++            if event.state == ElementState::Pressed {
++                self.physical_keys.insert(key);
++            } else {
++                self.physical_keys.remove(&key);
++            }
++        }
++        if event.state == ElementState::Pressed
++            && let PhysicalKey::Code(key) = event.physical_key
++            && horizon_client::keybinds::key_name(key)
++                == Some(self.settings.keys.get("key.fullscreen"))
++            && !(self.screen == Screen::Options && self.options_waiting_for_key())
++        {
++            self.last_input = Instant::now();
++            if !event.repeat {
++                self.toggle_fullscreen();
++            }
++            return;
++        }
++        if event.state == ElementState::Pressed
++            && let PhysicalKey::Code(key) = event.physical_key
++        {
++            self.last_input = Instant::now();
++            if self.screenshot_shortcut(key, event.repeat) {
++                return;
++            }
++        }
++        if let PhysicalKey::Code(key) = event.physical_key {
++            use horizon_client::debug_keys::KeyAction;
++            let action = match (event.state, event.repeat) {
++                (ElementState::Released, _) => KeyAction::Release,
++                (_, false) => KeyAction::Press,
++                (_, true) => KeyAction::Repeat,
++            };
++            if self.debug_key(key, action) {
++                return;
++            }
++        }
++        self.narrator_hotkey(&event);
++        self.last_input = Instant::now();
++        if !self.key_focus_quiet() {
++            if let PhysicalKey::Code(key) = event.physical_key {
++                narrator::narrate_key(
++                    &mut self.narration,
++                    key,
++                    event.state == ElementState::Pressed,
+                 );
+-                if horizon_client::touch_ui::output_dismisses(&out) {
+-                    crate::platform::hide();
++            } else if event.state == ElementState::Pressed {
++                self.narration.keyboard_action();
++            }
++        }
++        if let Some(loader) = &self.world_loader
++            && loader.upgrade.is_file_fixing()
++            && !loader.cancelled
++        {
++            return;
++        }
++        if (self.pending_entry.is_some() || self.world_loader.is_some())
++            && event.state == ElementState::Pressed
++            && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
++        {
++            self.pending_entry = None;
++            if let Some(loader) = self.world_loader.take() {
++                self.world_loader = Some(if loader.cancelled {
++                    loader
++                } else {
++                    loader.cancel()
++                });
++            }
++            self.perf.cancel_world_opening();
++            return;
++        }
++        if self.pending_entry.is_some()
++            || self.world_loader.is_some()
++            || self.integrated_starting.is_some()
++            || self.pack_reload.is_some()
++            || self.pending_save.is_some()
++        {
++            return;
++        }
++        let mut typed: Option<std::borrow::Cow<'_, str>> = None;
++        if event.state == ElementState::Pressed {
++            if self.screen_hooks_open() && self.screen != Screen::Options {
++                typed = event.text.take();
++            }
++            let canceled = match event.physical_key {
++                PhysicalKey::Code(key) => self.screen_key_pressed(key, event.repeat),
++                PhysicalKey::Unidentified(_) => false,
++            };
++            if self.screen == Screen::Options && self.screen_hooks_open() {
++                if let Some(text) = event.text.as_deref() {
++                    let left = self.screen_text_typed(text);
++                    if left.as_deref() != Some(text) {
++                        event.text = left.map(std::borrow::Cow::Owned);
++                    }
++                }
++            }
++            if canceled {
++                if let Some(text) = typed.as_deref() {
++                    self.screen_chars_typed(Some(text));
++                } else if self.screen == Screen::Options
++                    && let Some(text) = event.text.as_deref()
++                    && self.types_text()
++                {
++                    let text: String = text.chars().filter(|c| !c.is_control()).collect();
++                    if !text.is_empty() {
++                        let _ = self.type_chars_into_screen(&text);
++                    }
+                 }
+                 return;
+             }
+         }
++        if event.state == ElementState::Pressed
++            && let PhysicalKey::Code(key) = event.physical_key
++            && self.key_focus_key(event_loop, key)
++        {
++            self.screen_chars_typed(typed.as_deref());
++            return;
++        }
++        let result: Result<()> = (|| {
++            if self.screen == Screen::Dead && self.ui.death_confirm.is_some() {
++                if event.state == ElementState::Pressed
++                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
++                    && self
++                        .ui
++                        .death_confirm
++                        .is_some_and(|t| t.elapsed().as_millis() >= 1000)
++                {
++                    self.death_confirm_answer(false)?;
++                }
++            } else if self.link_prompt.is_some() {
++                if event.state == ElementState::Pressed
++                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
++                {
++                    self.answer_link_prompt(false);
++                }
++            } else if self.code_of_conduct.is_some() {
++            } else if self.server_packs.prompt.is_some() {
++                if event.state == ElementState::Pressed
++                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
++                {
++                    self.answer_pack_prompt(false)?;
++                }
++            } else if self.dialog_open() {
++                let shortcut = self.edit_shortcut(&event);
++                if event.state == ElementState::Pressed
++                    && let PhysicalKey::Code(key) = event.physical_key
++                {
++                    self.dialog_key(key, shortcut, event.text.as_deref())?;
++                }
++            } else if self.screen == Screen::Chat && self.title.is_none() {
++                if let PhysicalKey::Code(key) = event.physical_key {
++                    if event.state == ElementState::Pressed {
++                        self.keys.insert(key);
++                        self.chat_key(&event);
++                    } else {
++                        self.keys.remove(&key);
++                    }
++                }
++            } else if self.sign_edit.is_some() {
++                self.sign_edit_key(&event);
++            } else if self.book.is_some() {
++                self.book_key(&event);
++            } else if self.screen == Screen::Creative
++                && self.creative_screen.tab().search
++                && event.state == ElementState::Pressed
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                if let PhysicalKey::Code(key) = event.physical_key
++                    && self.search_tab_hotbar_key(key)
++                {
++                    typed = None;
++                } else if let Some(shortcut) = self.edit_shortcut(&event) {
++                    self.creative_search_shortcut(shortcut);
++                } else if let PhysicalKey::Code(key) = event.physical_key {
++                    let before = self.creative_screen.search.value.clone();
++                    let (ctrl, shift) = (self.has_control_down(), self.has_shift_down());
++                    if self.creative_screen.search.key(key, ctrl, shift) {
++                        if self.creative_screen.search.value != before {
++                            self.creative_screen.scroll = 0.0;
++                        }
++                    } else {
++                        self.creative_search_edit(event.text.as_deref());
++                    }
++                } else {
++                    self.creative_search_edit(event.text.as_deref());
++                }
++            } else if self.recipe_search_focused()
++                && event.state == ElementState::Pressed
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                self.recipe_key(&event);
++            } else if self.mod_browser_typing()
++                && event.state == ElementState::Pressed
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                self.mod_browser_key(&event);
++            } else if self.station_typing()
++                && event.state == ElementState::Pressed
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                if let Some(shortcut) = self.edit_shortcut(&event) {
++                    self.station_shortcut(shortcut);
++                } else if let PhysicalKey::Code(key) = event.physical_key
++                    && self.station_key(key)
++                {
++                } else {
++                    let backspace = event.physical_key == PhysicalKey::Code(KeyCode::Backspace);
++                    self.station_text(event.text.as_deref(), backspace);
++                }
++            } else if self.screen == Screen::WorldOptions
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                self.world_options_key(&event);
++            } else if self.screen == Screen::Win {
++                self.win_key(&event)?;
++            } else if self.screen == Screen::CommandBlock {
++                self.command_block_key(&event);
++            } else if self.screen == Screen::DebugOptions {
++                self.debug_options_key(&event);
++            } else if self.screen == Screen::BlockEditor {
++                self.block_editor_key(&event);
++            } else if self.screen == Screen::Options && event.state == ElementState::Pressed {
++                if let Some(shortcut) = self.edit_shortcut(&event)
++                    && self.options_shortcut(shortcut)
++                {
++                    return Ok(());
++                }
++                if let PhysicalKey::Code(key) = event.physical_key {
++                    self.options_key(key, event.text.as_deref())?;
++                }
++            } else if self.screen == Screen::Mod && self.title.is_some() {
++                if event.state == ElementState::Pressed
++                    && let PhysicalKey::Code(key) = event.physical_key
++                {
++                    self.key_pressed(key)?;
++                }
++            } else if self.screen == Screen::Paused
++                && event.state == ElementState::Pressed
++                && self.pause_menu
++                && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
++            {
++                if let PhysicalKey::Code(key) = event.physical_key {
++                    self.native_key_event(key, true, event.repeat);
++                    self.pause_key(key)?;
++                }
++            } else if self.screen == Screen::Dead && event.state == ElementState::Pressed {
++                if let PhysicalKey::Code(key) = event.physical_key {
++                    self.native_key_event(key, true, event.repeat);
++                    self.death_key(key)?;
++                }
++            } else if self.title.is_some() {
++                if event.state == ElementState::Pressed {
++                    if let Some(shortcut) = self.edit_shortcut(&event) {
++                        self.title_shortcut(shortcut);
++                        return Ok(());
++                    }
++                    let (w, h) = self.gui_size();
++                    match event.physical_key {
++                        PhysicalKey::Code(
++                            code @ (KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space),
++                        ) if code != KeyCode::Space
++                            || self.title.as_ref().is_some_and(|t| {
++                                t.list_focused() || t.focused_button.is_some()
++                            }) =>
++                        {
++                            let (action, sound) = self
++                                .title
++                                .as_mut()
++                                .map_or((Action::None, false), |t| t.confirm_key_size((w, h)));
++                            self.save_title_options();
++                            if sound {
++                                self.audio.play_button_click();
++                            }
++                            self.title_action(event_loop, action)?;
++                        }
++                        PhysicalKey::Code(
++                            key @ (KeyCode::Backspace
++                            | KeyCode::Delete
++                            | KeyCode::ArrowLeft
++                            | KeyCode::ArrowRight
++                            | KeyCode::Home
++                            | KeyCode::End),
++                        ) if self.title.as_mut().is_some_and(|t| t.has_caret_field()) => {
++                            let (ctrl, shift) =
++                                (self.has_control_down(), self.has_shift_down());
++                            if let Some(t) = self.title.as_mut() {
++                                t.field_key(key, ctrl, shift);
++                            }
++                        }
++                        PhysicalKey::Code(
++                            key @ (KeyCode::ArrowLeft
++                            | KeyCode::ArrowRight
++                            | KeyCode::ArrowUp
++                            | KeyCode::ArrowDown),
++                        ) => {
++                            if let Some(t) = self.title.as_mut() {
++                                t.arrow_key(key, (w, h));
++                            }
++                        }
++                        PhysicalKey::Code(KeyCode::Backspace) => self.title_edit(None, true),
++                        PhysicalKey::Code(KeyCode::Tab) => {
++                            let shift = self.has_shift_down();
++                            if let Some(t) = self.title.as_mut() {
++                                t.tab_dir(shift, (w, h));
++                            }
++                        }
++                        PhysicalKey::Code(KeyCode::Escape) => {
++                            if let Some(t) = self.title.as_mut() {
++                                t.escape();
++                                self.reopen_data_packs(event_loop)?;
++                            }
++                            self.save_title_options();
++                        }
++                        PhysicalKey::Code(KeyCode::F5) => {
++                            if let Some(t) = self.title.as_mut() {
++                                t.refresh_servers();
++                            }
++                        }
++                        _ => self.title_edit(event.text.as_deref(), false),
++                    }
++                }
++            } else {
++                let PhysicalKey::Code(key) = event.physical_key else {
++                    return Ok(());
++                };
++                self.mod_key(key, event.state == ElementState::Pressed, event.repeat);
++                self.native_key_event(key, event.state == ElementState::Pressed, event.repeat);
++                if event.state == ElementState::Pressed
++                    && self.screen == Screen::Inventory
++                    && (self.merchant_key(key) || self.recipe_book_key(key))
++                {
++                    return Ok(());
++                }
++                if self.screen == Screen::Playing
++                    && event.state == ElementState::Pressed
++                    && !event.repeat
++                    && horizon_client::keybinds::key_name(key)
++                        .is_some_and(|n| self.settings.keys.get("key.smoothCamera") == n)
++                {
++                    self.smooth_camera = !self.smooth_camera;
++                }
++                for mapped in self.settings.keys.translate_all(key) {
++                    match mapped {
++                        Ok(k) => {
++                            self.mapped_key(
++                                k,
++                                event.state == ElementState::Pressed,
++                                event.repeat,
++                            )?;
++                        }
++                        Err(button) => {
++                            let action = match (event.state, event.repeat) {
++                                (ElementState::Released, _) => KeyAction::Release,
++                                (_, false) => KeyAction::Press,
++                                (_, true) => KeyAction::Repeat,
++                            };
++                            if let Some(pressed) = keyboard_button(
++                                gameplay_has_keyboard(
++                                    self.screen,
++                                    self.title.is_some(),
++                                    self.dialog_open(),
++                                ),
++                                action,
++                            ) {
++                                self.play_mouse(button, pressed)?;
++                            } else if container_key_clones(button, action) {
++                                self.inventory_pick_key();
++                            }
++                        }
++                    }
++                }
++            }
++            Ok(())
++        })();
++        self.screen_chars_typed(typed.as_deref());
++        if let Err(e) = result {
++            self.error = Some(e);
++            self.exit_on_error(event_loop);
++        }
++    }
++
++    /// winit's `window_event`. The control socket and the pad menu call it too, with the
++    /// input they make up.
++    pub(super) fn handle_window_event(
++        &mut self,
++        event_loop: &dyn EventLoopCtl,
++        id: WindowId,
++        mut event: WindowEvent,
++    ) {
++        // A headless game has no window: its events (the frame, the control socket's input)
++        // carry `WindowId::dummy()`.
++        let ours = match &self.window {
++            Some(w) => w.id() == id,
++            None => self.options.headless,
++        };
++        if !ours {
++            return;
++        }
++        if let WindowEvent::KeyboardInput {
++            device_id,
++            event: key_event,
++            is_synthetic,
++        } = &event
++        {
++            #[cfg(target_os = "android")]
++            if !*is_synthetic
++                && key_event.state == ElementState::Pressed
++                && winit::platform::android::native_device_id(*device_id) > 0
++            {
++                crate::touch_input(false);
++                if crate::keyboard_mouse_input() && self.captured && !self.os_mouse_captured {
++                    self.os_mouse_captured = crate::platform::capture_mouse(true);
++                }
++            }
++            #[cfg(not(target_os = "android"))]
++            let _ = (device_id, is_synthetic);
++            horizon_client::keybinds::learn_layout(key_event);
++            let desktop_key = DesktopKeyInput::from_winit(key_event);
++            self.handle_desktop_key_input(event_loop, id, desktop_key);
++            return;
++        }
++        #[cfg(target_os = "android")]
++        if let WindowEvent::CursorMoved { device_id, .. }
++        | WindowEvent::MouseInput { device_id, .. }
++        | WindowEvent::MouseWheel { device_id, .. } = &event
++            && winit::platform::android::native_pointer_device(*device_id)
++        {
++            let accepted = horizon_client::android_runtime::note_input(
++                horizon_client::android_gamepad::InputMode::KeyboardMouse,
++            );
++            if !accepted && !self.pad_in_menu() {
++                return;
++            }
++            if crate::keyboard_mouse_input() && self.captured && !self.os_mouse_captured {
++                self.os_mouse_captured = crate::platform::capture_mouse(true);
++            }
++        }
++        #[cfg(target_os = "android")]
++        if let WindowEvent::Touch(_) = &event {
++            crate::touch_input(true);
++            if self.os_mouse_captured {
++                self.os_mouse_captured = false;
++                let _ = crate::platform::capture_mouse(false);
++            }
++        }
++        #[cfg(target_os = "android")]
++        if self.android_aux_mouse(event_loop, id, &event) {
++            return;
++        }
+         #[cfg(target_os = "android")]
+         if let WindowEvent::Touch(touch) = &event {
+             use winit::event::TouchPhase;
+@@ -16908,16 +17550,6 @@ impl Game<'_> {
+         {
+             *button = MouseButton::Right;
+         }
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && let PhysicalKey::Code(key) = event.physical_key
+-        {
+-            if event.state == ElementState::Pressed {
+-                self.physical_keys.insert(key);
+-                horizon_client::keybinds::learn_layout(event);
+-            } else {
+-                self.physical_keys.remove(&key);
+-            }
+-        }
+         if let WindowEvent::MouseInput { state, button, .. } = &event {
+             if *state == ElementState::Pressed {
+                 self.physical_buttons.insert(*button);
+@@ -16969,57 +17601,9 @@ impl Game<'_> {
+         {
+             title.drop_file(path.clone());
+         }
+-        // Fullscreen is a window shortcut, before screens consume keyboard input.
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && event.state == ElementState::Pressed
+-            && let PhysicalKey::Code(key) = event.physical_key
+-            && horizon_client::keybinds::key_name(key)
+-                == Some(self.settings.keys.get("key.fullscreen"))
+-            && !(self.screen == Screen::Options && self.options_waiting_for_key())
+-        {
+-            self.last_input = Instant::now();
+-            if !event.repeat {
+-                self.toggle_fullscreen();
+-            }
+-            return;
+-        }
+-        // A screenshot is a window shortcut too: vanilla takes it before a
+-        // screen or a text box consumes the key (`handleGlobalKeyPress`), so
+-        // it works with chat, a sign or a book open.
+-        if let WindowEvent::KeyboardInput { event, .. } = &event
+-            && event.state == ElementState::Pressed
+-            && let PhysicalKey::Code(key) = event.physical_key
+-        {
+-            self.last_input = Instant::now();
+-            if self.screenshot_shortcut(key, event.repeat) {
+-                return;
+-            }
+-        }
+-        // KeyboardHandler.keyPress: the debug keys come before the game's.
+-        if let WindowEvent::KeyboardInput {
+-            event: key_event, ..
+-        } = &event
+-            && let PhysicalKey::Code(key) = key_event.physical_key
+-        {
+-            use horizon_client::debug_keys::KeyAction;
+-            let action = match (key_event.state, key_event.repeat) {
+-                (ElementState::Released, _) => KeyAction::Release,
+-                (_, false) => KeyAction::Press,
+-                (_, true) => KeyAction::Repeat,
+-            };
+-            if self.debug_key(key, action) {
+-                return;
+-            }
+-        }
+-        // KeyboardHandler.keyPress: the narrator hotkey, on every screen and
+-        // in game, before the screen takes the key.
+-        if let WindowEvent::KeyboardInput { event, .. } = &event {
+-            self.narrator_hotkey(event);
+-        }
+         if matches!(
+             event,
+-            WindowEvent::KeyboardInput { .. }
+-                | WindowEvent::MouseInput { .. }
++            WindowEvent::MouseInput { .. }
+                 | WindowEvent::MouseWheel { .. }
+                 | WindowEvent::CursorMoved { .. }
+         ) {
+@@ -17059,25 +17643,6 @@ impl Game<'_> {
+                 }
+                 _ => {}
+             }
+-            if matches!(&event, WindowEvent::KeyboardInput { .. }) {
+-                return;
+-            }
+-        }
+-        if (self.pending_entry.is_some() || self.world_loader.is_some())
+-            && matches!(&event, WindowEvent::KeyboardInput { event, .. }
+-                if event.state == ElementState::Pressed
+-                    && event.physical_key == PhysicalKey::Code(KeyCode::Escape))
+-        {
+-            self.pending_entry = None;
+-            if let Some(loader) = self.world_loader.take() {
+-                self.world_loader = Some(if loader.cancelled {
+-                    loader
+-                } else {
+-                    loader.cancel()
+-                });
+-            }
+-            self.perf.cancel_world_opening();
+-            return;
+         }
+         if (self.pending_entry.is_some()
+             || self.world_loader.is_some()
+@@ -17140,77 +17705,6 @@ impl Game<'_> {
+             }
+             return;
+         }
+-        // ScreenEvent.KeyPressed.Pre: the open screen hears of the key before
+-        // it acts on it, and a cancelled press goes no further — no focus
+-        // move, no Escape-close, no inventory or hotbar key, no typing by the
+-        // key itself, no `native_key`. It fires after the window's own
+-        // shortcuts (fullscreen, screenshot, the debug keys, the narrator) so
+-        // those keep working with a mod that cancels; the key's release still
+-        // comes through.
+-        //
+-        // A key's characters are a separate callback of GLFW's, and it comes
+-        // after the key callback (`KeyboardHandler.charTyped`): they are taken
+-        // off the key here and dispatched once the screen has acted on it, on
+-        // the screen that is open then (`ScreenEvent.CharacterTyped.Pre`).
+-        // Options keeps its text on the key: its own key path routes a key's
+-        // text between its boxes and its key-bind capture, and no key that
+-        // carries text closes that screen or moves its focus.
+-        let mut typed: Option<String> = None;
+-        if let WindowEvent::KeyboardInput {
+-            event: key_event, ..
+-        } = &mut event
+-            && key_event.state == ElementState::Pressed
+-        {
+-            if self.screen_hooks_open() && self.screen != Screen::Options {
+-                typed = key_event.text.take().map(|text| text.to_string());
+-            }
+-            let canceled = match key_event.physical_key {
+-                PhysicalKey::Code(key) => self.screen_key_pressed(key, key_event.repeat),
+-                PhysicalKey::Unidentified(_) => false,
+-            };
+-            if self.screen == Screen::Options && self.screen_hooks_open() {
+-                // The hook after the key's own, then the text the key path
+-                // types in place (its own routing keeps it).
+-                if let Some(text) = key_event.text.as_deref() {
+-                    let left = self.screen_text_typed(text);
+-                    if left.as_deref() != Some(text) {
+-                        key_event.text = left.map(Into::into);
+-                    }
+-                }
+-            }
+-            if canceled {
+-                // charTyped is a separate callback: the characters still
+-                // reach the text box, without the key's own effects. Options'
+-                // characters already passed the hook in place.
+-                if let Some(text) = typed.as_deref() {
+-                    self.screen_chars_typed(Some(text));
+-                } else if self.screen == Screen::Options
+-                    && let Some(text) = key_event.text.as_deref()
+-                    && self.types_text()
+-                {
+-                    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+-                    if !text.is_empty() {
+-                        // Err only says no box of the screen takes it.
+-                        let _ = self.type_chars_into_screen(&text);
+-                    }
+-                }
+-                return;
+-            }
+-        }
+-        // Screen.keyPressed: Tab, the arrows and Enter move and press the
+-        // menu's focus, unless the focused widget or the screen keeps them.
+-        if let WindowEvent::KeyboardInput {
+-            event: key_event, ..
+-        } = &event
+-            && key_event.state == ElementState::Pressed
+-            && let PhysicalKey::Code(key) = key_event.physical_key
+-            && self.key_focus_key(event_loop, key)
+-        {
+-            // The keyboard's focus took the key; its characters are a separate
+-            // callback and still come (`KeyboardHandler.charTyped`).
+-            self.screen_chars_typed(typed.as_deref());
+-            return;
+-        }
+         let result: Result<()> = (|| {
+             // ScreenEvent.MouseButtonPressed.Pre / MouseButtonReleased.Pre:
+             // the open screen hears of the press before anything reads it, and
+@@ -17738,317 +18232,6 @@ impl Game<'_> {
+                         _ => {}
+                     }
+                 }
+-                // ConfirmScreen.keyPressed: Escape answers no, once its delay is over.
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Dead && self.ui.death_confirm.is_some() =>
+-                {
+-                    if event.state == ElementState::Pressed
+-                        && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+-                        && self
+-                            .ui
+-                            .death_confirm
+-                            .is_some_and(|t| t.elapsed().as_millis() >= 1000)
+-                    {
+-                        self.death_confirm_answer(false)?;
+-                    }
+-                }
+-                // ConfirmScreen.keyPressed: Escape answers no.
+-                WindowEvent::KeyboardInput { event, .. } if self.link_prompt.is_some() => {
+-                    if event.state == ElementState::Pressed
+-                        && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+-                    {
+-                        self.answer_link_prompt(false);
+-                    }
+-                }
+-                // CodeOfConductScreen.shouldCloseOnEsc is false: no key leaves the screen.
+-                WindowEvent::KeyboardInput { .. } if self.code_of_conduct.is_some() => {}
+-                WindowEvent::KeyboardInput { event, .. } if self.server_packs.prompt.is_some() => {
+-                    if event.state == ElementState::Pressed
+-                        && event.physical_key == PhysicalKey::Code(KeyCode::Escape)
+-                    {
+-                        self.answer_pack_prompt(false)?;
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.dialog_open() => {
+-                    let shortcut = self.edit_shortcut(&event);
+-                    if event.state == ElementState::Pressed
+-                        && let PhysicalKey::Code(key) = event.physical_key
+-                    {
+-                        self.dialog_key(key, shortcut, event.text.as_deref())?
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Chat && self.title.is_none() =>
+-                {
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        if event.state == ElementState::Pressed {
+-                            self.keys.insert(key);
+-                            self.chat_key(&event);
+-                        } else {
+-                            self.keys.remove(&key);
+-                        }
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.sign_edit.is_some() => {
+-                    self.sign_edit_key(&event)
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.book.is_some() => {
+-                    self.book_key(&event)
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Creative
+-                        && self.creative_screen.tab().search
+-                        && event.state == ElementState::Pressed
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    if let PhysicalKey::Code(key) = event.physical_key
+-                        && self.search_tab_hotbar_key(key)
+-                    {
+-                        // The hovered slot took the key, and its characters
+-                        // go nowhere (`ignoreTextInput`).
+-                        typed = None;
+-                    } else if let Some(shortcut) = self.edit_shortcut(&event) {
+-                        self.creative_search_shortcut(shortcut);
+-                    } else if let PhysicalKey::Code(key) = event.physical_key {
+-                        // EditBox.keyPressed: arrows, Home, End, Delete and Backspace.
+-                        let before = self.creative_screen.search.value.clone();
+-                        let (ctrl, shift) = (self.has_control_down(), self.has_shift_down());
+-                        if self.creative_screen.search.key(key, ctrl, shift) {
+-                            if self.creative_screen.search.value != before {
+-                                self.creative_screen.scroll = 0.0;
+-                            }
+-                        } else {
+-                            self.creative_search_edit(event.text.as_deref());
+-                        }
+-                    } else {
+-                        self.creative_search_edit(event.text.as_deref());
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.recipe_search_focused()
+-                        && event.state == ElementState::Pressed
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    // The recipe book's search box takes every key but Escape.
+-                    self.recipe_key(&event);
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.mod_browser_typing()
+-                        && event.state == ElementState::Pressed
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    // A mod's item panel's search box, as the recipe book's.
+-                    self.mod_browser_key(&event);
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.station_typing()
+-                        && event.state == ElementState::Pressed
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    // The anvil rename box takes every key but Escape (AnvilScreen.keyPressed).
+-                    if let Some(shortcut) = self.edit_shortcut(&event) {
+-                        self.station_shortcut(shortcut);
+-                    } else if let PhysicalKey::Code(key) = event.physical_key
+-                        && self.station_key(key)
+-                    {
+-                    } else {
+-                        let backspace = event.physical_key == PhysicalKey::Code(KeyCode::Backspace);
+-                        self.station_text(event.text.as_deref(), backspace);
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::WorldOptions
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    self.world_options_key(&event)
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.screen == Screen::Win => {
+-                    self.win_key(&event)?
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.screen == Screen::CommandBlock => {
+-                    self.command_block_key(&event)
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.screen == Screen::DebugOptions => {
+-                    self.debug_options_key(&event)
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.screen == Screen::BlockEditor => {
+-                    self.block_editor_key(&event)
+-                }
+-                // Options consumes presses; releases still reach the bound
+-                // gameplay mapping below, including sneak/sprint toggles.
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Options && event.state == ElementState::Pressed =>
+-                {
+-                    if let Some(shortcut) = self.edit_shortcut(&event)
+-                        && self.options_shortcut(shortcut)
+-                    {
+-                        return Ok(());
+-                    }
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        self.options_key(key, event.text.as_deref())?;
+-                    }
+-                }
+-                // A mod's settings page at the title takes its keys like Options.
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Mod && self.title.is_some() =>
+-                {
+-                    if event.state == ElementState::Pressed
+-                        && let PhysicalKey::Code(key) = event.physical_key
+-                    {
+-                        self.key_pressed(key)?;
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Paused
+-                        && event.state == ElementState::Pressed
+-                        && self.pause_menu
+-                        && !matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape)) =>
+-                {
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        self.native_key_event(key, true, event.repeat);
+-                    }
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        self.pause_key(key)?;
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. }
+-                    if self.screen == Screen::Dead && event.state == ElementState::Pressed =>
+-                {
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        self.native_key_event(key, true, event.repeat);
+-                    }
+-                    if let PhysicalKey::Code(key) = event.physical_key {
+-                        self.death_key(key)?;
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. } if self.title.is_some() => {
+-                    if event.state == ElementState::Pressed {
+-                        if let Some(shortcut) = self.edit_shortcut(&event) {
+-                            self.title_shortcut(shortcut);
+-                            return Ok(());
+-                        }
+-                        let (w, h) = self.gui_size();
+-                        match event.physical_key {
+-                            // `WorldListEntry.keyPressed`: Space joins too, with the button click sound.
+-                            PhysicalKey::Code(
+-                                code @ (KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space),
+-                            ) if code != KeyCode::Space
+-                                || self.title.as_ref().is_some_and(|t| {
+-                                    t.list_focused() || t.focused_button.is_some()
+-                                }) =>
+-                            {
+-                                let (action, sound) = self
+-                                    .title
+-                                    .as_mut()
+-                                    .map_or((Action::None, false), |t| t.confirm_key_size((w, h)));
+-                                self.save_title_options();
+-                                if sound {
+-                                    self.audio.play_button_click();
+-                                }
+-                                self.title_action(event_loop, action)?;
+-                            }
+-                            PhysicalKey::Code(
+-                                key @ (KeyCode::Backspace
+-                                | KeyCode::Delete
+-                                | KeyCode::ArrowLeft
+-                                | KeyCode::ArrowRight
+-                                | KeyCode::Home
+-                                | KeyCode::End),
+-                            ) if self.title.as_mut().is_some_and(|t| t.has_caret_field()) => {
+-                                let (ctrl, shift) =
+-                                    (self.has_control_down(), self.has_shift_down());
+-                                if let Some(t) = self.title.as_mut() {
+-                                    t.field_key(key, ctrl, shift);
+-                                }
+-                            }
+-                            PhysicalKey::Code(
+-                                key @ (KeyCode::ArrowLeft
+-                                | KeyCode::ArrowRight
+-                                | KeyCode::ArrowUp
+-                                | KeyCode::ArrowDown),
+-                            ) => {
+-                                if let Some(t) = self.title.as_mut() {
+-                                    t.arrow_key(key, (w, h));
+-                                }
+-                            }
+-                            PhysicalKey::Code(KeyCode::Backspace) => self.title_edit(None, true),
+-                            PhysicalKey::Code(KeyCode::Tab) => {
+-                                let shift = self.has_shift_down();
+-                                if let Some(t) = self.title.as_mut() {
+-                                    t.tab_dir(shift, (w, h));
+-                                }
+-                            }
+-                            PhysicalKey::Code(KeyCode::Escape) => {
+-                                if let Some(t) = self.title.as_mut() {
+-                                    t.escape();
+-                                    self.reopen_data_packs(event_loop)?;
+-                                }
+-                                self.save_title_options();
+-                            }
+-                            PhysicalKey::Code(KeyCode::F5) => {
+-                                if let Some(t) = self.title.as_mut() {
+-                                    t.refresh_servers();
+-                                }
+-                            }
+-                            _ => self.title_edit(event.text.as_deref(), false),
+-                        }
+-                    }
+-                }
+-                WindowEvent::KeyboardInput { event, .. } => {
+-                    let PhysicalKey::Code(key) = event.physical_key else {
+-                        return Ok(());
+-                    };
+-                    self.mod_key(key, event.state == ElementState::Pressed, event.repeat);
+-                    self.native_key_event(key, event.state == ElementState::Pressed, event.repeat);
+-                    // Screen.keyPressed sees the physical key, repeats included.
+-                    if event.state == ElementState::Pressed
+-                        && self.screen == Screen::Inventory
+-                        && (self.merchant_key(key) || self.recipe_book_key(key))
+-                    {
+-                        return Ok(());
+-                    }
+-                    // key.smoothCamera toggles the cinematic camera.
+-                    if self.screen == Screen::Playing
+-                        && event.state == ElementState::Pressed
+-                        && !event.repeat
+-                        && horizon_client::keybinds::key_name(key)
+-                            .is_some_and(|n| self.settings.keys.get("key.smoothCamera") == n)
+-                    {
+-                        self.smooth_camera = !self.smooth_camera;
+-                    }
+-                    // Key binds: act as the default key of every mapping bound
+-                    // to it (KeyMapping.set drives them all).
+-                    for mapped in self.settings.keys.translate_all(key) {
+-                        match mapped {
+-                            Ok(k) => {
+-                                self.mapped_key(
+-                                    k,
+-                                    event.state == ElementState::Pressed,
+-                                    event.repeat,
+-                                )?;
+-                            }
+-                            Err(button) => {
+-                                let action = match (event.state, event.repeat) {
+-                                    (ElementState::Released, _) => KeyAction::Release,
+-                                    (_, false) => KeyAction::Press,
+-                                    (_, true) => KeyAction::Repeat,
+-                                };
+-                                if let Some(pressed) = keyboard_button(
+-                                    gameplay_has_keyboard(
+-                                        self.screen,
+-                                        self.title.is_some(),
+-                                        self.dialog_open(),
+-                                    ),
+-                                    action,
+-                                ) {
+-                                    self.play_mouse(button, pressed)?;
+-                                } else if container_key_clones(button, action) {
+-                                    self.inventory_pick_key();
+-                                }
+-                            }
+-                        }
+-                    }
+-                }
+                 WindowEvent::RedrawRequested => {
+                     #[cfg(target_os = "android")]
+                     crate::diagnostics::heartbeat(
+@@ -18294,10 +18477,6 @@ impl Game<'_> {
+ 
+             Ok(())
+         })();
+-        // ScreenEvent.CharacterTyped.Pre: GLFW's char callback comes after its
+-        // key callback, so a key's characters reach the screen the key left
+-        // open, after the key's own effects (`KeyboardHandler.charTyped`).
+-        self.screen_chars_typed(typed.as_deref());
+         if let Err(e) = result {
+             self.error = Some(e);
+             self.exit_on_error(event_loop);
+@@ -18318,6 +18497,8 @@ impl Game<'_> {
+         #[cfg(target_os = "android")]
+         self.android_apply_display_scale();
+         #[cfg(target_os = "android")]
++        self.drain_blaze_input(event_loop);
++        #[cfg(target_os = "android")]
+         self.android_poll_keyboard();
+         #[cfg(target_os = "android")]
+         if let Some(renderer) = &mut self.renderer {
+diff --git a/crates/horizon-client/src/game/android_input.rs b/crates/horizon-client/src/game/android_input.rs
+index ffc5c991e0..94cd825660 100644
+--- a/crates/horizon-client/src/game/android_input.rs
++++ b/crates/horizon-client/src/game/android_input.rs
+@@ -20,7 +20,7 @@ impl Game<'_> {
+     pub(super) fn android_keypad_menu_key(
+         &mut self,
+         events: &dyn super::event_loop::EventLoopCtl,
+-        event: &winit::event::KeyEvent,
++        event: &super::DesktopKeyInput<'_>,
+     ) -> Result<bool> {
+         if !self.pad_in_menu()
+             || crate::platform::active()
+@@ -513,6 +513,11 @@ impl Game<'_> {
+ 
+     /// State-driven Virtual Mouse visibility synchronization across MCPE and GoyControl.
+     pub(super) fn android_sync_pointer(&mut self) {
++        if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++            self.pad.touch_ui.pointer_off = true;
++            self.pad.touch_ui.virtual_mouse = false;
++            return;
++        }
+         self.pad.touch_ui.pointer_off = !self.pad.touch.settings.virtual_mouse_enabled;
+         let in_menu = self.pad_in_menu();
+         if let Some(b) = self.gui_scale() {
+@@ -1144,6 +1149,10 @@ impl Game<'_> {
+         Ok(false)
+     }
+     pub(super) fn android_show_keyboard(&mut self) {
++        if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++            crate::platform::hide();
++            return;
++        }
+         // The in-world keyboard button needs a real editor to receive text.
+         if !self.pad_in_menu() {
+             self.open_chat("");
+diff --git a/crates/horizon-client/src/game/block_editor.rs b/crates/horizon-client/src/game/block_editor.rs
+index e90ccf7bf9..d33105c6a4 100644
+--- a/crates/horizon-client/src/game/block_editor.rs
++++ b/crates/horizon-client/src/game/block_editor.rs
+@@ -413,7 +413,7 @@ impl Game<'_> {
+         }
+     }
+ 
+-    pub(super) fn block_editor_key(&mut self, event: &KeyEvent) {
++    pub(super) fn block_editor_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/books.rs b/crates/horizon-client/src/game/books.rs
+index 2a937fbbee..44a12176cb 100644
+--- a/crates/horizon-client/src/game/books.rs
++++ b/crates/horizon-client/src/game/books.rs
+@@ -354,7 +354,7 @@ impl Game<'_> {
+             g.write_book(p.slot as usize, p.pages, p.title)
+         });
+     }
+-    pub(super) fn book_key(&mut self, event: &KeyEvent) {
++    pub(super) fn book_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/chat.rs b/crates/horizon-client/src/game/chat.rs
+index f78f2a4dd3..c3084e6f47 100644
+--- a/crates/horizon-client/src/game/chat.rs
++++ b/crates/horizon-client/src/game/chat.rs
+@@ -761,7 +761,7 @@ impl Game<'_> {
+         }
+     }
+     /// Keys while the chat screen is open.
+-    pub(super) fn chat_key(&mut self, event: &KeyEvent) {
++    pub(super) fn chat_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if let Some(shortcut) = self.edit_shortcut(event) {
+             let m = Measure(&self.gui.atlas.font);
+             let c = Commands {
+diff --git a/crates/horizon-client/src/game/clipboard.rs b/crates/horizon-client/src/game/clipboard.rs
+index 12d636a0cd..6c5bd6871f 100644
+--- a/crates/horizon-client/src/game/clipboard.rs
++++ b/crates/horizon-client/src/game/clipboard.rs
+@@ -2,13 +2,12 @@
+ //! shortcuts of `EditBox`, `MultiLineEditBox` and `TextFieldHelper`.
+ use super::*;
+ use horizon_client::clipboard::{self, EditShortcut};
+-use winit::event::KeyEvent;
+ 
+ impl Game<'_> {
+     /// `InputWithModifiers.isSelectAll`/`isCopy`/`isPaste`/`isCut` of a key
+     /// press (or repeat): the keyboard's modifier state, or a modifier key an
+     /// agent holds.
+-    pub(super) fn edit_shortcut(&self, event: &KeyEvent) -> Option<EditShortcut> {
++    pub(super) fn edit_shortcut(&self, event: &super::DesktopKeyInput<'_>) -> Option<EditShortcut> {
+         if event.state != ElementState::Pressed {
+             return None;
+         }
+diff --git a/crates/horizon-client/src/game/command_blocks.rs b/crates/horizon-client/src/game/command_blocks.rs
+index bd60a71bbf..532c753c52 100644
+--- a/crates/horizon-client/src/game/command_blocks.rs
++++ b/crates/horizon-client/src/game/command_blocks.rs
+@@ -788,7 +788,7 @@ impl Game<'_> {
+     }
+     /// `AbstractCommandBlockEditScreen.keyPressed`: the suggestions first,
+     /// then Enter is Done, Escape cancels, the rest edits the command.
+-    pub(super) fn command_block_key(&mut self, event: &KeyEvent) {
++    pub(super) fn command_block_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/debug_options.rs b/crates/horizon-client/src/game/debug_options.rs
+index 37564b92d7..bd8440157b 100644
+--- a/crates/horizon-client/src/game/debug_options.rs
++++ b/crates/horizon-client/src/game/debug_options.rs
+@@ -419,7 +419,7 @@ impl Game<'_> {
+         }
+     }
+     /// A key the debug keys left: Escape closes, the rest edits the search.
+-    pub(super) fn debug_options_key(&mut self, event: &KeyEvent) {
++    pub(super) fn debug_options_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/lan_screen.rs b/crates/horizon-client/src/game/lan_screen.rs
+index f3742582c5..00977aa8de 100644
+--- a/crates/horizon-client/src/game/lan_screen.rs
++++ b/crates/horizon-client/src/game/lan_screen.rs
+@@ -1181,7 +1181,7 @@ impl Game<'_> {
+         self.system_message(message);
+     }
+ 
+-    pub(super) fn world_options_key(&mut self, event: &KeyEvent) {
++    pub(super) fn world_options_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != winit::event::ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/narrator.rs b/crates/horizon-client/src/game/narrator.rs
+index 154821bf30..7a9040f6d9 100644
+--- a/crates/horizon-client/src/game/narrator.rs
++++ b/crates/horizon-client/src/game/narrator.rs
+@@ -205,7 +205,7 @@ impl Game<'_> {
+     /// The narrator hotkey on a key press or repeat, before the screen or
+     /// the game takes the key (it doesn't consume it): the next status,
+     /// announced with its toast, saved, then the screen hears of it.
+-    pub(super) fn narrator_hotkey(&mut self, event: &KeyEvent) {
++    pub(super) fn narrator_hotkey(&mut self, event: &super::DesktopKeyInput<'_>) {
+         let letter = clipboard::shortcut_letter(&event.logical_key, event.physical_key);
+         if letter != Some('b') {
+             return;
+diff --git a/crates/horizon-client/src/game/native_panel.rs b/crates/horizon-client/src/game/native_panel.rs
+index 4a29393652..86d3ffbb71 100644
+--- a/crates/horizon-client/src/game/native_panel.rs
++++ b/crates/horizon-client/src/game/native_panel.rs
+@@ -465,7 +465,7 @@ impl Game<'_> {
+             && self.panel.search.as_ref().is_some_and(|s| s.focused)
+     }
+     /// A key press while the search box has focus.
+-    pub(super) fn mod_browser_key(&mut self, event: &winit::event::KeyEvent) {
++    pub(super) fn mod_browser_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         use winit::keyboard::PhysicalKey;
+         let shortcut = self.edit_shortcut(event);
+         let ctrl = self.has_control_down();
+diff --git a/crates/horizon-client/src/game/recipe_book.rs b/crates/horizon-client/src/game/recipe_book.rs
+index 470799b830..9a365ece9b 100644
+--- a/crates/horizon-client/src/game/recipe_book.rs
++++ b/crates/horizon-client/src/game/recipe_book.rs
+@@ -196,7 +196,7 @@ impl Game<'_> {
+         }
+     }
+     /// A key press while the search box has focus.
+-    pub(super) fn recipe_key(&mut self, event: &winit::event::KeyEvent) {
++    pub(super) fn recipe_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         use winit::keyboard::PhysicalKey;
+         if let Some(shortcut) = self.edit_shortcut(event) {
+             self.recipe_shortcut(shortcut);
+diff --git a/crates/horizon-client/src/game/sign_edit.rs b/crates/horizon-client/src/game/sign_edit.rs
+index ee37b2d18e..49027947cb 100644
+--- a/crates/horizon-client/src/game/sign_edit.rs
++++ b/crates/horizon-client/src/game/sign_edit.rs
+@@ -464,7 +464,7 @@ impl Game<'_> {
+             );
+         }
+     }
+-    pub(super) fn sign_edit_key(&mut self, event: &KeyEvent) {
++    pub(super) fn sign_edit_key(&mut self, event: &super::DesktopKeyInput<'_>) {
+         if event.state != ElementState::Pressed {
+             return;
+         }
+diff --git a/crates/horizon-client/src/game/startup_menu.rs b/crates/horizon-client/src/game/startup_menu.rs
+index a7f43b59f9..147bb06d2b 100644
+--- a/crates/horizon-client/src/game/startup_menu.rs
++++ b/crates/horizon-client/src/game/startup_menu.rs
+@@ -2482,7 +2482,7 @@ impl Loading {
+             false,
+         );
+         #[cfg(target_os = "android")]
+-        {
++        if !horizon_client::android_runtime::blaze_desktop_input_enabled() {
+             let size = self.menu_size();
+             self.menu.controls.viewport(size[0], size[1]);
+             let waiting_for_key =
+@@ -2536,6 +2536,8 @@ impl Loading {
+             self.menu
+                 .touch
+                 .draw_floating_menu(batch, &gui.atlas, &self.menu.controls.settings);
++        } else {
++            self.menu.touch.virtual_mouse = false;
+         }
+         self.menu
+             .frame_graph
+diff --git a/crates/horizon-client/src/game/win.rs b/crates/horizon-client/src/game/win.rs
+index dc6ba15d80..41f3ab005b 100644
+--- a/crates/horizon-client/src/game/win.rs
++++ b/crates/horizon-client/src/game/win.rs
+@@ -103,7 +103,7 @@ impl Game<'_> {
+         win.screen.draw(batch, &self.gui.atlas, delta_ticks, fill);
+     }
+     /// `WinScreen.keyPressed` / `keyReleased`; Escape closes it (`onClose`).
+-    pub(super) fn win_key(&mut self, event: &KeyEvent) -> Result<()> {
++    pub(super) fn win_key(&mut self, event: &super::DesktopKeyInput<'_>) -> Result<()> {
+         let PhysicalKey::Code(code) = event.physical_key else {
+             return Ok(());
+         };

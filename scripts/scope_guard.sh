@@ -60,6 +60,9 @@ for file in $CHANGED_FILES; do
         ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/version/installed/VersionConfig.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/version/installed/Version.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/download/game/GameDownloadInfo.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/download/game/GameInstaller.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/GameLaunchFlow.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/launch/GameLauncher.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/download/game/DownloadGameWithAddonScreen.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/VersionsManageElements.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/screens/content/elements/LauncherElements.kt)
             # Stage D runtime field, installer selector & Stage B task, Rust Edition launch dispatch, and version badge
             ;;
+        ZalithLauncher/src/main/java/com/movtery/zalithlauncher/ui/control/event/Events.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/input/LWJGLCharSender.kt|ZalithLauncher/src/main/java/com/movtery/zalithlauncher/game/input/EfficientAndroidLWJGLKeycode.java)
+            # Stage L-B input sink routing (Java CallbackBridge untouched vs RustInputBridge)
+            ;;
         ZalithLauncher/zalith_launcher.jks|ZalithLauncher/zalith_launcher_debug.jks)
             # Removal of upstream keystores
             ;;

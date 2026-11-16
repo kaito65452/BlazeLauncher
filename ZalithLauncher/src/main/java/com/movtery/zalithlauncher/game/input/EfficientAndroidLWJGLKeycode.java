@@ -18,14 +18,13 @@
 
 package com.movtery.zalithlauncher.game.input;
 
-import static org.lwjgl.glfw.CallbackBridge.sendKeyPress;
-
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 
 import com.movtery.inputmap.keycodes.LwjglGlfwKeycode;
 
-import org.lwjgl.glfw.CallbackBridge;
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter;
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputSink;
 
 import java.util.Arrays;
 
@@ -192,25 +191,27 @@ public class EfficientAndroidLWJGLKeycode {
     }
 
     public static void execKey(KeyEvent keyEvent, int valueIndex) {
-        //valueIndex points to where the value is stored in the array.
-        CallbackBridge.holdingAlt = keyEvent.isAltPressed();
-        CallbackBridge.holdingCapslock = keyEvent.isCapsLockOn();
-        CallbackBridge.holdingCtrl = keyEvent.isCtrlPressed();
-        CallbackBridge.holdingNumlock = keyEvent.isNumLockOn();
-        CallbackBridge.holdingShift = keyEvent.isShiftPressed();
+        BlazeInputSink sink = BlazeInputRouter.currentSink();
+        sink.syncModifiers(
+                keyEvent.isAltPressed(),
+                keyEvent.isCapsLockOn(),
+                keyEvent.isCtrlPressed(),
+                keyEvent.isNumLockOn(),
+                keyEvent.isShiftPressed()
+        );
 
         char key = (char)(keyEvent.getUnicodeChar() != 0 ? keyEvent.getUnicodeChar() : '\u0000');
-        sendKeyPress(
+        sink.sendKeycode(
                 getValueByIndex(valueIndex),
                 key,
                 keyEvent.getScanCode(),
-                CallbackBridge.getCurrentMods(),
+                sink.getCurrentMods(),
                 keyEvent.getAction() == KeyEvent.ACTION_DOWN);
     }
 
     public static void execKeyIndex(int index){
         //Send a quick key press.
-        sendKeyPress(getValueByIndex(index));
+        BlazeInputRouter.currentSink().sendKeyPress(getValueByIndex(index));
     }
 
     public static short getValueByIndex(int index) {

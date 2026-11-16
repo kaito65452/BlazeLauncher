@@ -19,7 +19,7 @@
 package com.movtery.zalithlauncher.ui.control.event
 
 import com.movtery.inputmap.keycodes.ControlEventKeycode
-import org.lwjgl.glfw.CallbackBridge
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter
 
 /**
  * 点击按键时，处理LWJGL按键事件
@@ -30,12 +30,13 @@ fun lwjglEvent(
     isPressed: Boolean
 ) {
     val keycode: Int = ControlEventKeycode.getKeycodeFromEvent(eventKey)?.toInt() ?: return
+    val sink = BlazeInputRouter.currentSink()
 
     if (isMouse) {
-        CallbackBridge.sendMouseButton(keycode, isPressed)
+        sink.sendMouseButton(keycode, isPressed)
     } else {
-        CallbackBridge.sendKeyPress(keycode, CallbackBridge.getCurrentMods(), isPressed)
-        CallbackBridge.setModifiers(keycode, isPressed)
+        sink.sendKeyPress(keycode, sink.getCurrentMods(), isPressed)
+        sink.setModifiers(keycode, isPressed)
     }
 }
 

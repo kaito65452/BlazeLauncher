@@ -208,6 +208,14 @@ fun DeveloperSettingsSection(
             summary = stringResource(R.string.developer_rust_show_controls_summary)
         )
 
+        SwitchSettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
+            unit = AllSettings.rustUseEngineTouchFallback,
+            title = stringResource(R.string.developer_rust_touch_fallback_title),
+            summary = stringResource(R.string.developer_rust_touch_fallback_summary)
+        )
+
         val latestSummary = DeveloperDiagnosticsStore.lastReportOutput?.lineSequence()?.firstOrNull()
             ?: stringResource(R.string.developer_copy_report_summary)
         SettingsCard(
