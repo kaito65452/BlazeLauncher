@@ -180,7 +180,7 @@ class StageLBInputBridgeTest {
 
         bridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_W.toInt())
         assertEquals(
-            RecordedCall.Key(LwjglGlfwKeycode.GLFW_KEY_W.toInt(), 'w'.code, expectedMods, true),
+            RecordedCall.Key(LwjglGlfwKeycode.GLFW_KEY_W.toInt(), '\u0000'.code, expectedMods, true),
             transport.calls[4]
         )
         assertEquals(
@@ -188,20 +188,32 @@ class StageLBInputBridgeTest {
             transport.calls[5]
         )
 
-        bridge.putMouseEvent(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt())
-        assertEquals(1, delayedTasks.size)
+        bridge.setModifiers(LwjglGlfwKeycode.GLFW_KEY_LEFT_CONTROL.toInt(), false)
+        val shiftOnly = LwjglGlfwKeycode.GLFW_MOD_SHIFT
+        bridge.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_W.toInt())
         assertEquals(
-            RecordedCall.MouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt(), expectedMods, true),
+            RecordedCall.Key(LwjglGlfwKeycode.GLFW_KEY_W.toInt(), 'W'.code, shiftOnly, true),
             transport.calls[6]
         )
-        delayedTasks.removeAt(0).run()
         assertEquals(
-            RecordedCall.MouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt(), expectedMods, false),
+            RecordedCall.Key(LwjglGlfwKeycode.GLFW_KEY_W.toInt(), '\u0000'.code, shiftOnly, false),
             transport.calls[7]
         )
 
+        bridge.putMouseEvent(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt())
+        assertEquals(1, delayedTasks.size)
+        assertEquals(
+            RecordedCall.MouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt(), shiftOnly, true),
+            transport.calls[8]
+        )
+        delayedTasks.removeAt(0).run()
+        assertEquals(
+            RecordedCall.MouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT.toInt(), shiftOnly, false),
+            transport.calls[9]
+        )
+
         bridge.sendScroll(0.0, 2.0)
-        assertEquals(RecordedCall.Scroll(0f, 2f), transport.calls[8])
+        assertEquals(RecordedCall.Scroll(0f, 2f), transport.calls[10])
 
         bridge.onCursorGrabChanged(true)
         assertTrue(bridge.isGrabbing)
@@ -216,7 +228,7 @@ class StageLBInputBridgeTest {
 
         val summary = bridge.formatCountersSummary()
         assertTrue(summary.contains("viewport=2000x1000"))
-        assertTrue(summary.contains("keys=2"))
+        assertTrue(summary.contains("keys=4"))
         assertTrue(summary.contains("mouseBtns=2"))
         assertTrue(summary.contains("pos=3"))
         assertTrue(summary.contains("delta=1"))
