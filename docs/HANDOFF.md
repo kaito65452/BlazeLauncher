@@ -1,35 +1,38 @@
 # BlazeLauncher Handoff Status
 
-> Updated after **Stage L-A completion** (green CI + signed APK) on branch `feat/stage-l`, before starting **Stage L-B**.
+> Updated after **Stage L-B completion** (green CI + signed APK) on branch `feat/stage-l`. Both **Stage L-A** and **Stage L-B** are implemented and CI-green; **on-device verification on SM-N975F remains `UNVERIFIED`**.
 
 ## Current Git & CI Baseline
 - **Branch**: `feat/stage-l` (branched from `feat/overnight-stages` @ `5c864f1de608fb1d7b51649408aa84cd6f9db11d`)
-- **HEAD**: `21e9e0bc` (before adding `docs/STAGE_LA.md` + this `HANDOFF.md` update)
-- **Pinned Engine Submodule**: `engine/starling` @ `fa548eb7abe91c194d3780e4580b9746323cd606` (`v0.7.8-2-gfa548eb7ab`), modified ONLY via `engine/patches/0001`–`0008`
-- **Latest Green CI Run (Stage L-A @ `21e9e0bc`)**:
-  - `CI`: https://github.com/kaito65452/BlazeLauncher/actions/runs/43825267269 (`success`)
-  - `Parallel Fast Checks`: https://github.com/kaito65452/BlazeLauncher/actions/runs/43825267625 (`success`)
-  - **`signed-apks` Artifact ID**: `14208549292` (`385,695,035` bytes)
-  - **`horizon-engine-arm64` Artifact ID**: `14208635452` (`26,898,660` bytes; `libhorizon_android.so` release/stripped `49,759,320` bytes vs `52,021,912` bytes baseline — `-2,262,592` bytes)
-  - **`ci-host-tools` Artifact ID**: `14208156517` (`2,533,308` bytes)
-  - **Produced `versionCode`**: `27591674` (`android:debuggable=false`, R8 on, cert SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`)
+- **HEAD (Stage L-B code + tests)**: `1b433140` (followed by Stage L-B completion docs `docs/STAGE_LB.md` and this `HANDOFF.md` update)
+- **Pinned Engine Submodule**: `engine/starling` @ `fa548eb7abe91c194d3780e4580b9746323cd606` (`v0.7.8-2-gfa548eb7ab`), modified ONLY via `engine/patches/0001`–`0009`
+- **Latest Green CI Run (Stage L-B @ `1b433140`)**:
+  - `CI`: https://github.com/kaito65452/BlazeLauncher/actions/runs/43851022267 (`success`)
+  - `Parallel Fast Checks`: https://github.com/kaito65452/BlazeLauncher/actions/runs/43851022387 (`success`)
+  - **`signed-apks` Artifact ID**: `14220295607` (`385,722,957` bytes)
+  - **`horizon-engine-arm64` Artifact ID**: `14218026294` (`26,911,492` bytes; `libhorizon_android.so` release/stripped `49,775,640` bytes; Check 15: `23 KEEP markers present, 0 forbidden UI/network markers`)
+  - **`ci-host-tools` Artifact ID**: `14218520334` (`2,533,308` bytes)
+  - **Produced `versionCode`**: `27600542` (`> 27591674` Stage L-A and `> 27321741` Nightly; `android:debuggable=false`, R8 on, cert SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`)
+- **Previous Stage L-A Baseline (@ `21e9e0bc`)**:
+  - `CI`: https://github.com/kaito65452/BlazeLauncher/actions/runs/43825267269 (`success`), `signed-apks` ID `14208549292`, `versionCode=27591674`
 - **Repository Variables (`gh variable list -R kaito65452/BlazeLauncher`)**:
   - `BUNDLE_ENGINE_DATA = true`
 
 ## What Works vs UNVERIFIED / BLOCKED
-- **Verified in CI (Stage L-A)**:
-  - Guards & self-tests (`scripts/guard.sh` incl. Check 15 A0/A3 `.so` guard, `scripts/test_guards.sh` `PASS=73 FAIL=0`, `scripts/scope_guard.sh`, `scripts/check_no_zero_files.sh`, `scripts/check_preflight_workflow.sh`).
-  - `engine/starling` arm64-v8a release `.so` (`49,759,320` bytes) with patches `0001`–`0008` (`blaze-embedded` feature enabled): Check 15 confirms 13 KEEP markers present and 0 forbidden Horizon UI/network markers (`Control Hub`, `Horizon Android`, `Horizon 26.3 (Rust)`, `horizon-rust.github.io/horizon-mods`, `telemetry.playhorizon.dev`, Modrinth/GitHub/OAuth).
-  - Rust unit tests (`horizon-client-render --features blaze-embedded --lib android_runtime`: `7 passed`, `horizon-prepare`: `56+1+1+8+1 passed`) and Kotlin JVM unit tests (`StageLAEmbeddedTest` + full debug test suite).
-  - Release-signed APK build (`versionCode=27591674`, `android:debuggable=false`, cert SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`).
+- **Verified in CI (Stage L-A + Stage L-B)**:
+  - Guards & self-tests (`scripts/guard.sh` incl. Check 15 A0/A3/L-B `.so` symbol & stripped-UI checks, `scripts/test_guards.sh` `PASS=74 FAIL=0`, `scripts/scope_guard.sh`, `scripts/check_no_zero_files.sh`, `scripts/check_preflight_workflow.sh`).
+  - `engine/starling` arm64-v8a release `.so` (`49,775,640` bytes) with patches `0001`–`0009` (`blaze-embedded` feature enabled): zero-alloc ring input injector (`BLAZE_INPUT_QUEUE_CAP = 512`), coalesced cursor deltas, `Game::handle_desktop_key_input` unification, cursor grab notification (`onCursorGrabChanged`), 10 JNI entry points on `BlazeNativeBridge`, Check 15 confirms 23 KEEP markers and 0 forbidden Horizon UI/network markers.
+  - Rust unit tests (`horizon-client-render --features blaze-embedded --lib android_runtime`: `10 passed; 0 failed`, covering Stage L-A exit state machine + Stage L-B key/mouse/modifier mapping, delta coalescing & ring overflow; `horizon-prepare`: `56+1+1+8+1 passed`) and Kotlin JVM unit tests (`StageLAEmbeddedTest`, `StageLBInputBridgeTest`, full debug unit test suite).
+  - Launcher-side ZL2 Compose controls overlay (`RustGameOverlay.kt`), runtime-switched `BlazeInputSink` / `BlazeInputRouter` (`JavaCallbackInputSink` untouched vs `RustInputBridge`), hardware/gamepad/IME routing on `RustActivity`, Developer fallback toggle `"Use engine touch controls (fallback)"` (default `false`), cross-process `=== Input Bridge (Stage L-B) ===` diagnostics in Copy report, and `docs/MORNING_TEST_STEPS.md` (Indonesian).
+  - Signed release APK (`versionCode=27600542`, `android:debuggable=false`, R8 on, cert SHA-256 `5aa533d1c85a38a2190f73761d81c033bf7065091660970653d6c63fbd81a2fc`).
 - **UNVERIFIED (CI cannot execute on phone hardware)**:
-  - Physical SM-N975F execution of Stage L-A APK (`14208549292`, `versionCode=27591674`): clean return to Blaze Launcher without `"Horizon Android"` menu on title-screen Back, pause Quit, Leave World, app switch/return, disconnect; stripped `"H"`/`"..."`/Control Hub/watermark; launcher-owned `blaze_engine_settings.json` values (`render_scale_percent`, `touch_look_sensitivity`, `show_controls`); `BUNDLE_ENGINE_DATA=true` asset flow; Android `:jvm` `Internal-25` fallback.
+  - Physical SM-N975F execution of Stage L-A + Stage L-B APK (`14220295607`, `versionCode=27600542`):
+    - Stage L-A: clean return to Blaze Launcher without `"Horizon Android"` menu on title Back, pause Quit, Leave World, app switch/return, disconnect; stripped `"H"`/`"..."`/Control Hub/watermark; `blaze_engine_settings.json` settings application.
+    - Stage L-B: ZL2 `ControlBoxLayout` buttons, `DraggableGameBall`, `GameMenuSubscreen`, `ControlEditor`, `ReplacementControlOperation`, `MinecraftHotbar`, camera touch-look drag vs inventory/menu hover cursor alignment (`onCursorGrabChanged`), `HidableInputLayout` chat/IME input, physical keyboard/mouse/gamepad routing, Developer fallback toggle revert, and Copy report `=== Input Bridge (Stage L-B) ===` counters.
+  - `BUNDLE_ENGINE_DATA=true` end-to-end install/launch on device.
 - **BLOCKED**:
   - `preflight-real.yml` `workflow_dispatch`: GitHub Actions requires workflow files on default branch (`main`) before `workflow_dispatch` is allowed (`HTTP 404` on `feat/*`).
 
 ## Exact Next Step
-Execute **Stage L-B (ZL2 input bridge; desktop-style input)** on `feat/stage-l`:
-1. **B1 (`docs/ZL2_CONTROLS_BRIDGE.md`)**: Write classification of `horizon-client` / `horizon-client-input` into shared desktop core (`Game::handle_window_event`, `Game::device_event`, `horizon-client-input`) vs Android-only layer (`game/android_input.rs`, `touch_ui.rs`, `horizon-client-render/src/touch.rs`, `android/native_ime.rs`), plus chosen bridge design, risks, unmappable items, and single soft keyboard owner decision (`B4`).
-2. **B2 (`engine/patches/0009-blaze-input-injector.patch`)**: Zero-heap-alloc thread-safe ring queue in Rust consumed from `Game::idle` / main loop feeding `Game::handle_window_event` (`KeyboardInput`, `ModifiersChanged`, `CursorMoved`, `MouseInput`, `MouseWheel`, `Ime::Commit`) + `mouse.on_move` (`DeviceEvent::MouseMotion` path) with mouse-delta coalescing; JNI entry points on `BlazeNativeBridge`; cursor-grab callback (`onCursorGrabChanged(Z)V`); Desktop Input Mode dropping native pointer touch events, hiding virtual pointer rendering, disabling `draw_goy_hud` when active, and preserving fallback toggle to compiled-in touch controls.
-3. **B3–B6 (Launcher side)**: `RustInputBridge`, runtime sink switching (`java` untouched vs `rust` -> `RustInputBridge`), GLFW->winit key mapping table + tests, hardware key/mouse/gamepad forwarding on `RustActivity`, ZL2 Compose controls overlay hosted in `RustActivity` preserving insets/cutout/gesture exclusion/SAF 4101/L-A clean exit, Developer toggle "Use engine touch controls (fallback)" (default OFF), additive `scope_guard.sh` allowlist entries.
-4. **B7–B9 (Verification & Docs)**: Synthetic Rust/Kotlin tests, Copy report additions (`input path`, counters, `last exit reason`), Check 15 / guard checks + self-tests, Indonesian `docs/MORNING_TEST_STEPS.md`, `docs/STAGE_LB.md` (with compiled-in touch code inventory `file:line` for post-verification removal), green CI + signed APK, and final `docs/HANDOFF.md` update (including follow-up note to delete compiled-in touch controls once verified on device).
+1. User runs physical verification on SM-N975F using [`docs/MORNING_TEST_STEPS.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/MORNING_TEST_STEPS.md) with APK from `signed-apks` artifact `14220295607` (`versionCode=27600542`).
+2. **Proposed Follow-Up Cleanup (After Physical Verification)**: Once ZL2 controls and desktop-style input are confirmed working cleanly on SM-N975F, physically remove / compile-out the legacy Horizon touch control code listed in [`docs/STAGE_LB.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB.md#L56-L67) (`crates/horizon-client-render/src/touch.rs` + `touch/*`, `crates/horizon-client/src/touch_ui.rs`, `crates/horizon-client/src/game/android_input.rs`, `crates/horizon-client/src/android/native_ime.rs` IME popups) and drop the temporary fallback toggle `"Use engine touch controls (fallback)"`.
