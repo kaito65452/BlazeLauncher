@@ -242,14 +242,16 @@ class StageLBInputBridgeTest {
     fun settingsAndDiagnostics_includeFallbackToggleAndInputBridgeSection() {
         val tempDir: File = Files.createTempDirectory("stage_lb_test").toFile()
         try {
-            val payload = BlazeEngineSettings.SettingsPayload(
+            val payload = BlazeEngineSettings.fromValues(
                 renderScalePercent = 75,
                 touchLookSensitivityPercent = 140,
                 showControls = false,
                 useEngineTouchFallback = true
             )
-            BlazeEngineSettings.writeSettingsFile(tempDir, payload)
-            val parsed = BlazeEngineSettings.readSettingsFile(tempDir)
+            assertTrue(BlazeEngineSettings.writeToDir(tempDir, payload))
+            val parsed = BlazeEngineSettings.fromJsonOrNull(
+                File(tempDir, BlazeEngineSettings.SETTINGS_FILE_NAME).readText()
+            )
             assertNotNull(parsed)
             assertTrue(parsed!!.useEngineTouchFallback)
             assertFalse(parsed.showControls)

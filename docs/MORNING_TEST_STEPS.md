@@ -1,8 +1,36 @@
 # Panduan Uji Pagi di Perangkat Fisik (`SM-N975F` — Samsung Galaxy Note 10+)
 
-> **Tujuan**: Memverifikasi instalasi & peluncuran `26.3 Rust Edition` pada APK rilis terbaru hasil CI branch `feat/stage-l` (Stage L-A: engine tertanam tanpa menu Horizon + pengaturan milik launcher, serta bundled `assets/engine-data.zip`).
+> **Tujuan**: Memverifikasi instalasi & peluncuran `26.3 Rust Edition` pada APK rilis terbaru hasil CI branch `feat/stage-l` (Stage L-A: engine tertanam tanpa menu Horizon + pengaturan milik launcher; **Stage L-B: overlay kontrol & input ZL2 bergaya desktop menggantikan kontrol sentuh Horizon**; serta bundled `assets/engine-data.zip`).
 >
 > **Catatan keamanan**: Jangan bagikan token mentah atau file log lengkap sebelum memeriksa bahwa token hanya tampil sebagai `token_len=...` dan UUID terpotong 8 karakter (`xxxxxxxx...`).
+
+---
+
+## Checklist Utama Stage L-B (Overlay Kontrol ZL2 & Jembatan Input Desktop)
+
+Secara default, toggle Pengembang **`Gunakan kontrol sentuh engine (fallback)`** bernilai **OFF** (`rustUseEngineTouchFallback=false`), sehingga Rust Edition berjalan dengan overlay Compose milik ZL2 (`ControlBoxLayout`, `SwitchableMouseLayout`, `MinecraftHotbar`, `DraggableGameBall`, `GameMenuSubscreen`, `HidableInputLayout`, dan dukungan `ControlEditor`):
+
+1. **Overlay & Menu Ball ZL2 Aktif**:
+   - Luncurkan `26.3-Rust` -> pastikan **overlay tata letak kontrol ZL2** dan **Menu Ball ZL2** muncul menggantikan kontrol sentuh Horizon lama (tidak ada panel sentuh lama milik engine).
+   - Ketuk **Menu Ball ZL2** -> pastikan menu kontrol ZL2 (`GameMenuSubscreen`) terbuka dan game tetap berjalan aman di latar belakang.
+2. **Tata Letak Kontrol & Editor (`ControlEditor` & `Replace Control Layout`)**:
+   - Buka **Menu Ball -> Ganti Tata Letak Kontrol** (`Replace Control Layout`) -> pilih layout berbeda -> **Hasil yang diharapkan**: layout tombol di layar langsung berubah.
+   - Buka **Menu Ball -> Edit Tata Letak** (jika layout valid terpilih), pindahkan salah satu tombol, simpan -> **Hasil yang diharapkan**: posisi baru langsung dipakai di sesi yang sedang berjalan.
+3. **Kursor Terkunci (Kamera Game) vs Kursor Bebas (Menu Minecraft / Inventory / Title Screen)**:
+   - Di **Title Screen** atau **Inventory / Pause Menu** (`cursor grab = OFF`): geser jari / sentuh tombol Minecraft -> **Hasil yang diharapkan**: kursor bergerak bebas mengikuti posisi jari/mouse tanpa mengunci, klik kiri/kanan mengenai tombol & slot item dengan akurat (hover highlight mengikuti posisi).
+   - Masuk ke **World** (`cursor grab = ON`): geser jari di area layar -> **Hasil yang diharapkan**: kamera berputar mulus (`cursor_delta`), ketuk/tekan-lama menembak/menghancurkan/menempatkan blok, tekan tombol **Menu Inventory (`E`)** atau **Pause (`Back` / `Esc`)** -> kursor otomatis terlepas lagi (`onCursorGrabChanged(false)`).
+4. **Hotbar, Papan Ketik Soft IME & Visibilitas Kontrol**:
+   - Ketuk langsung **kotak Hotbar `1..9`** di bawah layar -> **Hasil yang diharapkan**: slot aktif berpindah sesuai yang disentuh.
+   - Buka chat (`T`) atau aktifkan **Ganti Metode Input** di Menu Ball -> ketik pesan teks, tekan **Backspace**, lalu **Enter** -> **Hasil yang diharapkan**: karakter terkirim ke chat game.
+   - Atur **Pengembang -> Tampilkan kontrol engine Rust** = **OFF** lalu luncurkan ulang -> tombol tata letak kontrol disembunyikan sementara sentuh kamera/mouse/menu ball tetap aktif.
+5. **Uji Fallback Sementara & Aksesori Opsional**:
+   - *(Opsional jika punya keyboard/mouse OTG/Bluetooth)*: uji gerak `WASD`, `Space`, `Shift`, `Esc`, `F3`, roda gulir mouse, klik kanan mouse (termasuk tombol kanan yang dikirim Android sebagai `KEYCODE_BACK` dari `SOURCE_MOUSE`), lalu uji **Gamepad** (stick & tombol).
+   - *(Uji toggle darurat)*: nyalakan **Pengembang -> Gunakan kontrol sentuh engine (fallback)** = **ON**, luncurkan ulang `26.3-Rust` -> pastikan kontrol sentuh bawaan engine kembali aktif jika dibutuhkan sebagai cadangan, lalu kembalikan ke **OFF**.
+6. **Yang Perlu Dikirim Balik untuk Stage L-B**:
+   - Hasil uji langkah 1–5 di atas (apakah ada tombol yang macet, koordinat hover inventory meleset, atau lag sentuhan kamera?).
+   - Buka **Pengembang -> `Salin laporan`** (`Copy report`) dan tempel bagian:
+     - `=== Engine UI & Embedded Policy ===`
+     - `=== Input Bridge (Stage L-B) ===` (wajib ada `input_mode:`, `kotlin_bridge:` dengan penghitung `keys=... mouseBtns=... pos=... delta=... scroll=...`, dan `native_queue:`)
 
 ---
 
