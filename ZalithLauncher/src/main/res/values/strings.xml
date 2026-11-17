@@ -1491,6 +1491,8 @@
     <string name="developer_rust_show_controls_summary">Display on-screen touch controls inside Rust Edition</string>
     <string name="developer_rust_touch_fallback_title">Use engine touch controls (fallback)</string>
     <string name="developer_rust_touch_fallback_summary">Revert Rust Edition to compiled-in Horizon touch controls instead of ZL2 desktop controls overlay</string>
+    <string name="developer_rust_input_debug_title">Input debug overlay</string>
+    <string name="developer_rust_input_debug_summary">Show touch routing counters on screen inside Rust Edition</string>
     <string name="developer_copy_report">Copy report</string>
     <string name="developer_copy_report_summary">Copy device capability and :rust diagnostics report</string>
     <string name="developer_prepare_title">Prepare engine data (spike)</string>

@@ -849,6 +849,21 @@ make_embedded_so "$BAD_SO_MISSING_INPUT_JNI" "" "Java_dev_horizon_android_bridge
 expect_fail "Check 15 rejects embedded .so missing Stage L-B input injector JNI" "missing mandatory A0 KEEP-list" \
     bash scripts/guard.sh --check-embedded-so "$BAD_SO_MISSING_INPUT_JNI"
 
+GOOD16="$TMP_ROOT/good16.kt"
+printf '%s\n' 'private fun attachDesktopInputOverlay() {' '  wm.addView(v, LayoutParams(TYPE_APPLICATION_PANEL))' '}' 'private fun persistInputBridgeDiagnostics() {}' > "$GOOD16"
+BAD16="$TMP_ROOT/bad16.kt"
+printf '%s\n' 'private fun attachDesktopInputOverlay() {' '  addContentView(v, lp)' '}' 'private fun persistInputBridgeDiagnostics() {}' > "$BAD16"
+PATCH16="$TMP_ROOT/p16.patch"
+printf '%s\n' '+                WindowEvent::Touch(_) => {' '+                    horizon_client::android_runtime::record_raw_touch_ignored();' > "$PATCH16"
+BADPATCH16="$TMP_ROOT/badp16.patch"
+printf '%s\n' '+                WindowEvent::KeyboardInput { .. } => return,' > "$BADPATCH16"
+expect_pass "Check 16 accepts panel overlay + engine touch drop" \
+    env GUARD_CHECK16_ACTIVITY="$GOOD16" GUARD_CHECK16_PATCH="$PATCH16" bash scripts/guard.sh
+expect_fail "Check 16 rejects addContentView desktop overlay" "uses addContentView" \
+    env GUARD_CHECK16_ACTIVITY="$BAD16" GUARD_CHECK16_PATCH="$PATCH16" bash scripts/guard.sh
+expect_fail "Check 16 rejects engine patch without touch drop" "must ignore WindowEvent::Touch" \
+    env GUARD_CHECK16_ACTIVITY="$GOOD16" GUARD_CHECK16_PATCH="$BADPATCH16" bash scripts/guard.sh
+
 echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then

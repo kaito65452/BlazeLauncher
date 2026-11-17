@@ -149,13 +149,37 @@ class RustInputBridgeImpl(
         return mods
     }
 
+    @Volatile
+    private var overlayOffsetX: Int = 0
+
+    @Volatile
+    private var overlayOffsetY: Int = 0
+
+    @Volatile
+    private var windowWidth: Int = 0
+
+    @Volatile
+    private var windowHeight: Int = 0
+
+    /** Overlay content origin inside the activity window and that window's size (== engine surface aspect). */
+    fun updateOverlayGeometry(offsetX: Int, offsetY: Int, winWidth: Int, winHeight: Int) {
+        overlayOffsetX = offsetX
+        overlayOffsetY = offsetY
+        windowWidth = winWidth
+        windowHeight = winHeight
+    }
+
     override fun sendCursorPos(x: Float, y: Float) {
-        val w = viewportWidth.coerceAtLeast(1).toFloat()
-        val h = viewportHeight.coerceAtLeast(1).toFloat()
-        val nx = if (x.isFinite()) (x / w).coerceIn(0f, 1f) else 0.5f
-        val ny = if (y.isFinite()) (y / h).coerceIn(0f, 1f) else 0.5f
+        val n = RustTouchGeometry.normalize(
+            x, y, viewportWidth, viewportHeight,
+            overlayOffsetX, overlayOffsetY, windowWidth, windowHeight
+        )
+        RustInputDiagnostics.lastTouchRawX = x
+        RustInputDiagnostics.lastTouchRawY = y
+        RustInputDiagnostics.lastMappedX = n.x
+        RustInputDiagnostics.lastMappedY = n.y
         cursorPosCount.incrementAndGet()
-        transport.injectCursorPos(nx, ny)
+        transport.injectCursorPos(n.x, n.y)
     }
 
     override fun sendCursorDelta(dx: Float, dy: Float) {
@@ -258,7 +282,8 @@ class RustInputBridgeImpl(
 
     fun formatCountersSummary(): String {
         val mode = if (desktopInputEnabled) "zl2_desktop_jni" else "engine_touch_fallback"
-        return "path=$mode viewport=${viewportWidth}x${viewportHeight} grab=$grabbingState " +
+        return "path=$mode viewport=${viewportWidth}x${viewportHeight} window=${windowWidth}x$windowHeight " +
+            "grab=$grabbingState " +
             "keys=${keyCount.get()} mouseBtns=${mouseButtonCount.get()} pos=${cursorPosCount.get()} " +
             "delta=${cursorDeltaCount.get()} scroll=${scrollCount.get()} chars=${charCount.get()}"
     }

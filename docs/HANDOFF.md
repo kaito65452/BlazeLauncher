@@ -36,3 +36,8 @@
 ## Exact Next Step
 1. User runs physical verification on SM-N975F using [`docs/MORNING_TEST_STEPS.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/MORNING_TEST_STEPS.md) with APK from `signed-apks` artifact `14220295607` (`versionCode=27600542`).
 2. **Proposed Follow-Up Cleanup (After Physical Verification)**: Once ZL2 controls and desktop-style input are confirmed working cleanly on SM-N975F, physically remove / compile-out the legacy Horizon touch control code listed in [`docs/STAGE_LB.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB.md#L56-L67) (`crates/horizon-client-render/src/touch.rs` + `touch/*`, `crates/horizon-client/src/touch_ui.rs`, `crates/horizon-client/src/game/android_input.rs`, `crates/horizon-client/src/android/native_ime.rs` IME popups) and drop the temporary fallback toggle `"Use engine touch controls (fallback)"`.
+
+## Stage L-B2 (branch feat/stage-l-b2)
+Root cause: NativeActivity owns window surface + input queue, so the addContentView ZL2 overlay never drew or got touches.
+Fix: overlay in a TYPE_APPLICATION_PANEL sub-window, geometry-aware coordinate mapping, engine patch 0010, guard Check 16,
+new Input Bridge touch diagnostics + "Input debug overlay" toggle. See docs/STAGE_LB2.md. All device behavior UNVERIFIED.

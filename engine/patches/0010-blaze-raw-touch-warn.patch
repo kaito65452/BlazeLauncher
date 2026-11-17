@@ -1,0 +1,68 @@
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index e8f8c3b578..b69b56f3c0 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -540,6 +540,7 @@ pub struct BlazeInputCounters {
+     pub dropped_overflow: u64,
+     pub drained_events: u64,
+     pub raw_touch_ignored: u64,
++    pub raw_touch_warnings: u64,
+ }
+ 
+ struct BlazeInputQueue {
+@@ -573,6 +574,7 @@ impl BlazeInputQueue {
+                 dropped_overflow: 0,
+                 drained_events: 0,
+                 raw_touch_ignored: 0,
++                raw_touch_warnings: 0,
+             },
+         }
+     }
+@@ -689,9 +691,28 @@ pub fn reset_input_metrics_for_test() {
+     *guard = BlazeInputQueue::new();
+ }
+ 
++/// Rate limit for the raw-touch warning: first event, then every 500th.
++pub fn raw_touch_warn_due(ignored_count: u64) -> bool {
++    ignored_count == 1 || (ignored_count > 0 && ignored_count % 500 == 0)
++}
++
+ pub fn record_raw_touch_ignored() {
+-    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+-    guard.counters.raw_touch_ignored += 1;
++    let (count, warn) = {
++        let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++        guard.counters.raw_touch_ignored += 1;
++        let count = guard.counters.raw_touch_ignored;
++        let warn = raw_touch_warn_due(count);
++        if warn {
++            guard.counters.raw_touch_warnings += 1;
++        }
++        (count, warn)
++    };
++    if warn {
++        log::warn!(
++            "BlazeInput: raw engine touch reached winit while desktop input is enabled (count={count}); \
++             the Kotlin overlay window should consume all touches"
++        );
++    }
+ }
+ 
+ pub fn input_counters() -> BlazeInputCounters {
+@@ -922,6 +943,16 @@ pub fn glfw_button_to_winit(button: i32) -> Option<winit::event::MouseButton> {
+ #[cfg(test)]
+ mod input_bridge_tests {
+     use super::*;
++
++    #[test]
++    fn raw_touch_warning_is_rate_limited() {
++        assert!(!raw_touch_warn_due(0));
++        assert!(raw_touch_warn_due(1));
++        assert!(!raw_touch_warn_due(2));
++        assert!(!raw_touch_warn_due(499));
++        assert!(raw_touch_warn_due(500));
++        assert!(raw_touch_warn_due(1000));
++    }
+     use winit::event::MouseButton;
+     use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
+ 

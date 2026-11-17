@@ -639,4 +639,9 @@ object AllSettings : SettingsRegistry() {
      * Rust Edition fallback toggle: use the engine's compiled-in touch controls instead of ZL2 overlay
      */
     val rustUseEngineTouchFallback = boolSetting("rustUseEngineTouchFallback", false)
+
+    /**
+     * Rust Edition: draw the input diagnostics counters on screen
+     */
+    val rustInputDebugOverlay = boolSetting("rustInputDebugOverlay", false)
 }

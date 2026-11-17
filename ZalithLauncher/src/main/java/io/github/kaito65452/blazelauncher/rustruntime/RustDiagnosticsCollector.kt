@@ -95,20 +95,29 @@ object RustDiagnosticsCollector {
         "input_mode: zl2_desktop_jni (ZL2 overlay + RustInputBridge -> desktop key/mouse queue)"
     }
 
-    fun recordInputBridgeStats(context: Context, bridgeSummary: String, nativeDiagnostics: String) {
-        recordInputBridgeStatsToDir(statusDir(context), bridgeSummary, nativeDiagnostics)
+    fun recordInputBridgeStats(
+        context: Context,
+        bridgeSummary: String,
+        nativeDiagnostics: String,
+        touchDiagnostics: String = ""
+    ) {
+        recordInputBridgeStatsToDir(statusDir(context), bridgeSummary, nativeDiagnostics, touchDiagnostics)
     }
 
     internal fun recordInputBridgeStatsToDir(
         statusDir: File,
         bridgeSummary: String,
-        nativeDiagnostics: String
+        nativeDiagnostics: String,
+        touchDiagnostics: String = ""
     ) {
         val stamp = formatTimestamp(System.currentTimeMillis())
         val body = buildString {
             appendLine("updated_at=$stamp")
             appendLine("kotlin_bridge: ${redactDiagnosticText(bridgeSummary.trim())}")
             appendLine("native_queue: ${redactDiagnosticText(nativeDiagnostics.trim())}")
+            if (touchDiagnostics.isNotBlank()) {
+                appendLine("touch_overlay: ${redactDiagnosticText(touchDiagnostics.trim())}")
+            }
         }
         runCatching {
             statusDir.mkdirs()

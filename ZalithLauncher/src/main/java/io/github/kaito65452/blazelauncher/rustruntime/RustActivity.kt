@@ -22,6 +22,7 @@ import android.app.Activity
 import android.app.NativeActivity
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
@@ -46,6 +47,7 @@ import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.activity.setViewTreeOnBackPressedDispatcherOwner
 import androidx.annotation.Keep
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -74,6 +76,8 @@ import com.movtery.zalithlauncher.viewmodel.GamepadViewModel
 import dev.horizon.android.bridge.BlazeNativeBridge
 import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter
 import io.github.kaito65452.blazelauncher.rustruntime.input.RustGameOverlay
+import io.github.kaito65452.blazelauncher.rustruntime.input.RustInputDiagnostics
+import io.github.kaito65452.blazelauncher.rustruntime.input.RustTouchRouting
 import io.github.kaito65452.blazelauncher.rustruntime.input.RustInputBridge
 import java.io.File
 import kotlin.math.roundToInt
@@ -90,6 +94,8 @@ class RustActivity : NativeActivity() {
     private var initialProbeDispatched = false
     private var directLaunchMode = false
     private var desktopOverlayAttached = false
+    private var overlayRoot: DesktopOverlayRoot? = null
+    private var overlayWindowAdded = false
     private var textInputMode by mutableStateOf(TextInputMode.DISABLE)
     private var activeLayoutFile by mutableStateOf<File?>(null)
     private val composeHost by lazy { NativeActivityComposeHost() }
@@ -324,54 +330,185 @@ class RustActivity : NativeActivity() {
         }
     }
 
+    /**
+     * NativeActivity hands the window surface AND the window input queue to native code
+     * (`takeSurface`/`takeInputQueue`), so Views added to the activity window via addContentView are never
+     * drawn and never receive touches. The ZL2 overlay therefore lives in its own sub-window
+     * (TYPE_APPLICATION_PANEL) which has its own surface and input channel and sits above the engine surface.
+     */
     private fun attachDesktopInputOverlay(savedInstanceState: Bundle?) {
-        PhysicalMouseChecker.initChecker(this)
-        composeHost.attachToDecorView(window.decorView)
-        composeHost.onCreate(savedInstanceState)
-        composeHost.onBackPressedDispatcher.addCallback(
-            composeHost,
-            object : OnBackPressedCallback(true) {
-                override fun handleOnBackPressed() {
-                    RustInputBridge.sendAndroidBack()
+        RustInputDiagnostics.reset()
+        try {
+            PhysicalMouseChecker.initChecker(this)
+            composeHost.onCreate(savedInstanceState)
+            composeHost.onBackPressedDispatcher.addCallback(
+                composeHost,
+                object : OnBackPressedCallback(true) {
+                    override fun handleOnBackPressed() {
+                        RustInputBridge.sendAndroidBack()
+                    }
+                }
+            )
+
+            val root = DesktopOverlayRoot(this)
+            applySafeDisplayInsets(root)
+            applyGestureExclusionOnLayout(root, resources.displayMetrics.density)
+            composeHost.attachToDecorView(root)
+
+            val composeView = ComposeView(this).apply {
+                setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+                setContent {
+                    SideEffect { RustInputDiagnostics.overlayComposedCount.incrementAndGet() }
+                    ZalithLauncherTheme {
+                        RustGameOverlay(
+                            initialLayoutFile = activeLayoutFile,
+                            gamepadViewModel = gamepadViewModel,
+                            textInputMode = textInputMode,
+                            onTextInputModeChange = { textInputMode = it },
+                            onLayoutChanged = { newFile -> activeLayoutFile = newFile },
+                            onForceClose = ::exitRustProcess
+                        )
+                    }
                 }
             }
-        )
+            root.addView(
+                composeView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            val showDebug = runCatching { AllSettings.rustInputDebugOverlay.getValue() }.getOrDefault(false)
+            if (showDebug) {
+                attachInputDebugText(root)
+            }
+            root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayGeometry(root, composeView) }
+            overlayRoot = root
+            desktopOverlayAttached = true
 
-        val container = FrameLayout(this)
-        applySafeDisplayInsets(container)
-        applyGestureExclusionOnLayout(container, resources.displayMetrics.density)
+            val decor = window.decorView
+            if (decor.windowToken != null) {
+                decor.post { addOverlayWindow(root) }
+            } else {
+                decor.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) {
+                        v.removeOnAttachStateChangeListener(this)
+                        v.post { addOverlayWindow(root) }
+                    }
 
-        val composeView = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
-            setContent {
-                ZalithLauncherTheme {
-                    RustGameOverlay(
-                        initialLayoutFile = activeLayoutFile,
-                        gamepadViewModel = gamepadViewModel,
-                        textInputMode = textInputMode,
-                        onTextInputModeChange = { textInputMode = it },
-                        onLayoutChanged = { newFile -> activeLayoutFile = newFile },
-                        onForceClose = ::exitRustProcess
-                    )
+                    override fun onViewDetachedFromWindow(v: View) = Unit
+                })
+            }
+        } catch (t: Throwable) {
+            recordOverlayError("attach_failed ${t.javaClass.simpleName}: ${t.message}", t)
+        }
+    }
+
+    private fun addOverlayWindow(root: DesktopOverlayRoot) {
+        if (overlayWindowAdded || isFinishing || isDestroyed) return
+        try {
+            val lp = WindowManager.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                 }
+            }
+            windowManager.addView(root, lp)
+            overlayWindowAdded = true
+            RustInputDiagnostics.overlayAttached = true
+            RustInputDiagnostics.overlayWindowType = lp.type
+            RustInputDiagnostics.overlayZOrderAboveSurface = true
+            RustDiagnosticsCollector.recordRustEvent(this, "overlay_window_added type=${lp.type}")
+            root.requestApplyInsets()
+        } catch (t: Throwable) {
+            recordOverlayError("add_window_failed ${t.javaClass.simpleName}: ${t.message}", t)
+        }
+    }
+
+    private fun recordOverlayError(message: String, t: Throwable) {
+        val clean = RustDiagnosticsCollector.redactDiagnosticText(message).take(160)
+        RustInputDiagnostics.overlayError = clean
+        Log.e(TAG, "Desktop overlay failure: $clean", t)
+        RustDiagnosticsCollector.recordRustEvent(this, "overlay_error $clean")
+    }
+
+    private fun updateOverlayGeometry(root: View, content: View) {
+        val decor = window.decorView
+        val rootLoc = IntArray(2)
+        val decorLoc = IntArray(2)
+        content.getLocationOnScreen(rootLoc)
+        decor.getLocationOnScreen(decorLoc)
+        RustInputBridge.updateOverlayGeometry(
+            rootLoc[0] - decorLoc[0],
+            rootLoc[1] - decorLoc[1],
+            decor.width,
+            decor.height
+        )
+        RustInputDiagnostics.overlayWidth = root.width
+        RustInputDiagnostics.overlayHeight = root.height
+        RustInputDiagnostics.overlayVisible = root.visibility == View.VISIBLE && root.width > 0 && root.height > 0
+    }
+
+    private fun attachInputDebugText(root: FrameLayout) {
+        val text = TextView(this).apply {
+            setTextColor(Color.GREEN)
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            textSize = 10f
+            isClickable = false
+            isFocusable = false
+        }
+        root.addView(
+            text,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START
+            )
+        )
+        val tick = object : Runnable {
+            override fun run() {
+                text.text = RustInputDiagnostics.format(0L).replace(" ", "\n")
+                text.postDelayed(this, 500L)
             }
         }
+        text.post(tick)
+    }
 
-        container.addView(
-            composeView,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        addContentView(
-            container,
-            ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        desktopOverlayAttached = true
+    /** Overlay window root: counts and routes every touch into the ZL2 Compose tree; never to the engine. */
+    private class DesktopOverlayRoot(context: Activity) : FrameLayout(context) {
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            RustInputDiagnostics.touchSeenByOverlay.incrementAndGet()
+            RustInputDiagnostics.lastTouchRawX = ev.x
+            RustInputDiagnostics.lastTouchRawY = ev.y
+            val handled = super.dispatchTouchEvent(ev)
+            if (handled) RustInputDiagnostics.touchRoutedToZl2.incrementAndGet()
+            return true
+        }
+    }
+
+    /**
+     * Single touch door in desktop mode. With NativeActivity the system normally bypasses this method
+     * (input goes to the native queue), but if it is ever called the event is forwarded to the ZL2 overlay
+     * and consumed; it is never passed to `super` (which would reach the native touch path).
+     */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (!RustTouchRouting.consumeAtActivity(directLaunchMode && RustInputBridge.desktopInputEnabled)) {
+            return super.dispatchTouchEvent(ev)
+        }
+        RustInputDiagnostics.touchSeenByActivity.incrementAndGet()
+        val route = RustTouchRouting.route(RustInputBridge.desktopInputEnabled, overlayRoot != null)
+        if (route == RustTouchRouting.Route.ZL2_OVERLAY) {
+            overlayRoot?.dispatchTouchEvent(ev)
+        }
+        return true
     }
 
     private fun persistInputBridgeDiagnostics() {
@@ -380,7 +517,10 @@ class RustActivity : NativeActivity() {
         RustDiagnosticsCollector.recordInputBridgeStats(
             context = this,
             bridgeSummary = RustInputBridge.formatCountersSummary(),
-            nativeDiagnostics = nativeDiag
+            nativeDiagnostics = nativeDiag,
+            touchDiagnostics = RustInputDiagnostics.format(
+                RustInputDiagnostics.parseNativeRawTouch(nativeDiag)
+            )
         )
     }
 
@@ -610,6 +750,11 @@ class RustActivity : NativeActivity() {
         if (directLaunchMode) {
             BlazeInputRouter.currentSink().resetInputState()
             persistInputBridgeDiagnostics()
+        }
+        if (overlayWindowAdded) {
+            runCatching { windowManager.removeViewImmediate(overlayRoot) }
+            overlayWindowAdded = false
+            RustInputDiagnostics.overlayAttached = false
         }
         if (desktopOverlayAttached) {
             composeHost.onDestroy()

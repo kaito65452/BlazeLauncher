@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -946,6 +946,40 @@ fi
 if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
     echo "Checking repository for zero-filled or NUL-corrupted files..."
     bash scripts/check_no_zero_files.sh
+fi
+
+# --- Check 16 (Stage L-B2): raw engine touch path must not be registered in desktop mode ---
+# Native activity owns the window input queue, so Java views in the activity window never get touches.
+# Desktop overlay must live in its own panel window, and the engine must drop WindowEvent::Touch.
+check16_run() {
+    local activity="$1" patch="$2"
+    local body
+    body="$(awk '/private fun attachDesktopInputOverlay/{f=1} /private fun persistInputBridgeDiagnostics/{f=0} f' "$activity")"
+    if [ -z "$body" ]; then
+        echo "ERROR: Check 16: attachDesktopInputOverlay not found in $activity" >&2
+        return 1
+    fi
+    if printf '%s\n' "$body" | grep -q -F "addContentView("; then
+        echo "ERROR: Check 16: desktop overlay uses addContentView in the NativeActivity window (never receives touches/draws)" >&2
+        return 1
+    fi
+    if ! printf '%s\n' "$body" | grep -q -F "TYPE_APPLICATION_PANEL"; then
+        echo "ERROR: Check 16: desktop overlay must be attached as TYPE_APPLICATION_PANEL window" >&2
+        return 1
+    fi
+    if ! grep -q -F -A1 "WindowEvent::Touch(_) =>" "$patch" || ! grep -q -F "record_raw_touch_ignored();" "$patch"; then
+        echo "ERROR: Check 16: engine patch must ignore WindowEvent::Touch in desktop mode" >&2
+        return 1
+    fi
+    echo "✓ Check 16: raw touch path not registered in desktop mode (panel overlay + engine touch drop)."
+}
+if [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ]; then
+    check16_run "$GUARD_CHECK16_ACTIVITY" "${GUARD_CHECK16_PATCH:?GUARD_CHECK16_PATCH required}"
+    exit $?
+fi
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
+    check16_run "ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/rustruntime/RustActivity.kt" \
+        "engine/patches/0009-blaze-input-injector.patch"
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
