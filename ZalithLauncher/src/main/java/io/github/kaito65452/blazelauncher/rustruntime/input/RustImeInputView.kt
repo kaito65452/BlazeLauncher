@@ -41,6 +41,7 @@ import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
  */
 class RustImeTextProcessor {
     private var pendingBeforeSlice: String = ""
+    private var composingShadow: String = ""
 
     fun onBeforeTextChanged(s: CharSequence?, start: Int, count: Int) {
         if (s == null || count <= 0 || start < 0 || start + count > s.length) {
@@ -61,8 +62,50 @@ class RustImeTextProcessor {
         return applyDiff(beforeSlice, afterSlice, sink)
     }
 
+    /** Shadow-buffer composing step: sends minimal backspaces + new codepoints against prior composing. */
+    fun onSetComposingText(text: CharSequence?, sink: BlazeInputSink): Boolean {
+        val next = text?.toString().orEmpty()
+        val prev = composingShadow
+        composingShadow = next
+        return applyDiff(prev, next, sink)
+    }
+
+    /** Commits text (replacing any active shadow composition) and clears composing state. */
+    fun onCommitText(text: CharSequence?, sink: BlazeInputSink): Boolean {
+        val committed = text?.toString().orEmpty()
+        val prev = composingShadow
+        composingShadow = ""
+        return applyDiff(prev, committed, sink)
+    }
+
+    /** Finalizes current shadow composition without re-emitting already sent codepoints. */
+    fun onFinishComposingText() {
+        composingShadow = ""
+    }
+
+    /** Deletes codepoints before cursor (trimming shadow composition if active). */
+    fun onDeleteSurroundingCodepoints(beforeCount: Int, sink: BlazeInputSink): Boolean {
+        if (beforeCount <= 0) return false
+        for (i in 0 until beforeCount) {
+            sink.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
+        }
+        if (composingShadow.isNotEmpty()) {
+            val cps = toCodepoints(composingShadow)
+            val keep = (cps.size - beforeCount).coerceAtLeast(0)
+            composingShadow = if (keep == 0) {
+                ""
+            } else {
+                buildString {
+                    for (i in 0 until keep) appendCodePoint(cps[i])
+                }
+            }
+        }
+        return true
+    }
+
     fun reset() {
         pendingBeforeSlice = ""
+        composingShadow = ""
     }
 
     companion object {
@@ -165,9 +208,9 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
             override fun afterTextChanged(s: Editable?) {
                 if (internalChange) return
                 // Keep the buffer topped up so backspace always has something to delete,
-                // but never while the keyboard is still composing a word.
+                // without resetting mid-composition or wiping Gboard swipe word context.
                 if (s != null && !hasComposing(s) &&
-                    (s.length < TEXT_FILLER.length / 2 || s.toString().indexOf('\n') >= 0)
+                    (s.length <= 2 || s.toString().indexOf('\n') >= 0)
                 ) {
                     resetBuffer()
                 }
@@ -189,11 +232,13 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         val base = super.onCreateInputConnection(outAttrs) ?: return null
         RustImeDiagnostics.createInputConnection.incrementAndGet()
+        RustImeDiagnostics.startInputSessions.incrementAndGet()
         outAttrs.imeOptions = outAttrs.imeOptions or EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI
         RustImeDiagnostics.editorInputType = outAttrs.inputType
         RustImeDiagnostics.editorImeOptions = outAttrs.imeOptions
         RustImeDiagnostics.record("create_input_connection")
+        refreshDiagnostics()
         return object : InputConnectionWrapper(base, true) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 RustImeDiagnostics.commitTextCalls.incrementAndGet()
@@ -214,6 +259,13 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
                 RustImeDiagnostics.deleteSurroundingCalls.incrementAndGet()
+                if (beforeLength > 0 && selectionStart <= 0) {
+                    for (i in 0 until beforeLength) {
+                        BlazeInputRouter.currentSink()
+                            .sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
+                    }
+                    return true
+                }
                 return super.deleteSurroundingText(beforeLength, afterLength)
             }
 
@@ -224,30 +276,69 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
                     if (event.action == KeyEvent.ACTION_DOWN) sendEnter()
                     return true
                 }
+                // Handle soft-keyboard Backspace here so it never double-dispatches via Activity.dispatchKeyEvent.
+                if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        val sel = selectionStart
+                        val currentText = text
+                        if (currentText != null && sel > 0) {
+                            val cp = Character.codePointBefore(currentText, sel)
+                            val charCount = Character.charCount(cp)
+                            deleteSurroundingText(charCount, 0)
+                        } else {
+                            BlazeInputRouter.currentSink()
+                                .sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
+                        }
+                    }
+                    return true
+                }
                 return super.sendKeyEvent(event)
             }
         }
     }
 
     /** Make this view the IME target and ask for the keyboard (called only by RustImeController). */
-    fun enableIme() {
+    fun enableIme(nativeView: View? = null) {
         imeActive = true
         resetBuffer()
+        hostWindow?.clearFlags(
+            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+        )
+        nativeView?.clearFocus()
+        visibility = View.VISIBLE
         isEnabled = true
         isFocusable = true
         isFocusableInTouchMode = true
         requestFocus()
         post {
             if (!imeActive) return@post
+            nativeView?.clearFocus()
             requestFocus()
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                 ?: return@post
             imm.restartInput(this)
             hostWindow?.let { WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime()) }
-            if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
+            val shown = imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            if (shown) {
                 onImeShown?.invoke()
+                refreshDiagnostics()
+            } else {
+                refreshDiagnostics()
+                postDelayed({
+                    if (!imeActive) return@postDelayed
+                    nativeView?.clearFocus()
+                    requestFocus()
+                    imm.restartInput(this)
+                    hostWindow?.let {
+                        WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime())
+                    }
+                    if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
+                        onImeShown?.invoke()
+                    }
+                    refreshDiagnostics()
+                }, 60L)
             }
-            refreshDiagnostics()
         }
     }
 
@@ -263,8 +354,9 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
         restoreFocusView?.requestFocus()
     }
 
-    /** UI-thread snapshot for the Copy report. */
-    fun refreshDiagnostics() {
+    /** UI-thread snapshot for the Copy report. Set [onlyIfUnset] at exit to preserve active snapshot. */
+    fun refreshDiagnostics(onlyIfUnset: Boolean = false) {
+        if (onlyIfUnset && !imeActive && RustImeDiagnostics.targetViewClass != "none") return
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         RustImeDiagnostics.targetViewClass = javaClass.simpleName
         RustImeDiagnostics.viewHasFocus = hasFocus()

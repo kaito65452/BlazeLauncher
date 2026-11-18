@@ -70,6 +70,7 @@ import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
 import com.movtery.zalithlauncher.game.input.EfficientAndroidLWJGLKeycode
 import com.movtery.zalithlauncher.game.input.LWJGLCharSender
 import com.movtery.zalithlauncher.setting.AllSettings
+import com.movtery.zalithlauncher.ui.activities.MainActivity
 import com.movtery.zalithlauncher.ui.control.gamepad.isGamepadKeyEvent
 import com.movtery.zalithlauncher.ui.control.input.TextInputMode
 import com.movtery.zalithlauncher.ui.theme.ZalithLauncherTheme
@@ -102,20 +103,22 @@ class RustActivity : NativeActivity() {
     private var desktopOverlayAttached = false
     private var overlayRoot: DesktopOverlayRoot? = null
     private var overlayComposeView: ComposeView? = null
+    private var overlayLayoutParams: WindowManager.LayoutParams? = null
     private var overlayWindowAdded = false
     private var imeEditText: BlazeImeEditText? = null
-    @Volatile
-    private var engineTextInputActive = false
     private var lastImeVisible = false
     private val imeController by lazy {
         RustImeController(object : RustImeController.Host {
             override fun showIme() {
-                imeEditText?.enableIme()
+                updateOverlayImeWindowFlags(imeActive = true)
+                val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+                imeEditText?.enableIme(nativeView)
             }
 
             override fun hideIme() {
                 val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
                 imeEditText?.disableIme(nativeView)
+                updateOverlayImeWindowFlags(imeActive = false)
             }
         })
     }
@@ -203,7 +206,6 @@ class RustActivity : NativeActivity() {
     @Keep
     fun onTextInputActiveChanged(active: Boolean) {
         RustInputDiagnostics.textInputActiveSignals.incrementAndGet()
-        engineTextInputActive = active
         runOnUiThread {
             imeController.onEngineSignal(active)
             syncTextInputMode()
@@ -296,15 +298,21 @@ class RustActivity : NativeActivity() {
             return true
         }
 
-        if (textInputMode == TextInputMode.ENABLE && handleComposeTextModeKey(event, isDown)) {
+        val imeHasFocus = imeEditText?.hasFocus() == true
+        if (textInputMode == TextInputMode.ENABLE && handleComposeTextModeKey(event, isDown, imeHasFocus)) {
             return true
         }
 
-        if ((event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD &&
+        if (!imeHasFocus &&
+            (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD &&
             event.keyCode == KeyEvent.KEYCODE_ENTER && isDown
         ) {
             LWJGLCharSender.sendEnter()
             return true
+        }
+
+        if (imeHasFocus && (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD) {
+            return super.dispatchKeyEvent(event)
         }
 
         val index = EfficientAndroidLWJGLKeycode.getIndexByKey(event.keyCode)
@@ -321,7 +329,12 @@ class RustActivity : NativeActivity() {
         }
     }
 
-    private fun handleComposeTextModeKey(event: KeyEvent, isDown: Boolean): Boolean {
+    private fun handleComposeTextModeKey(
+        event: KeyEvent,
+        isDown: Boolean,
+        imeHasFocus: Boolean
+    ): Boolean {
+        val isSoftKey = (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD
         return when (event.keyCode) {
             KeyEvent.KEYCODE_SHIFT_LEFT,
             KeyEvent.KEYCODE_SHIFT_RIGHT -> {
@@ -354,12 +367,20 @@ class RustActivity : NativeActivity() {
                 true
             }
             KeyEvent.KEYCODE_ENTER -> {
-                if (isDown) LWJGLCharSender.sendEnter()
-                true
+                if (imeHasFocus && isSoftKey) {
+                    false
+                } else {
+                    if (isDown) LWJGLCharSender.sendEnter()
+                    true
+                }
             }
             KeyEvent.KEYCODE_DEL -> {
-                if (isDown) LWJGLCharSender.sendBackspace()
-                true
+                if (imeHasFocus && isSoftKey) {
+                    false
+                } else {
+                    if (isDown) LWJGLCharSender.sendBackspace()
+                    true
+                }
             }
             else -> false
         }
@@ -449,15 +470,17 @@ class RustActivity : NativeActivity() {
     private fun addOverlayWindow(root: DesktopOverlayRoot) {
         if (overlayWindowAdded || isFinishing || isDestroyed) return
         try {
+            val baseFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
             val lp = WindowManager.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
-                // ALT_FOCUSABLE_IM: without it a NOT_FOCUSABLE window is Z-ordered ABOVE the
-                // keyboard and swallows its touches (Gboard shown but dead).
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                if (imeController.wanted) {
+                    baseFlags or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+                } else {
+                    baseFlags
+                },
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -470,14 +493,44 @@ class RustActivity : NativeActivity() {
                 }
             }
             windowManager.addView(root, lp)
+            overlayLayoutParams = lp
             overlayWindowAdded = true
             RustInputDiagnostics.overlayAttached = true
             RustInputDiagnostics.overlayWindowType = lp.type
             RustInputDiagnostics.overlayZOrderAboveSurface = true
+            RustImeDiagnostics.overlayWindowFlags = lp.flags
             RustDiagnosticsCollector.recordRustEvent(this, "overlay_window_added type=${lp.type}")
             root.requestApplyInsets()
         } catch (t: Throwable) {
             recordOverlayError("add_window_failed ${t.javaClass.simpleName}: ${t.message}", t)
+        }
+    }
+
+    /**
+     * When IME is active, add FLAG_ALT_FOCUSABLE_IM alongside FLAG_NOT_FOCUSABLE on the overlay
+     * sub-window so Android Z-orders the overlay BEHIND the soft keyboard (letting Gboard receive
+     * touches and swipes) while keeping key/IME focus on BlazeImeEditText in the main window and
+     * keeping all non-keyboard touches routed through the ZL2 overlay (touch_leaked_to_engine=0).
+     * When IME closes, restore the normal overlay flags.
+     */
+    private fun updateOverlayImeWindowFlags(imeActive: Boolean) {
+        val root = overlayRoot ?: return
+        val lp = overlayLayoutParams ?: return
+        if (!overlayWindowAdded) return
+        val desiredFlags = if (imeActive) {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        } else {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        }
+        if (lp.flags != desiredFlags) {
+            lp.flags = desiredFlags
+            runCatching { windowManager.updateViewLayout(root, lp) }
+        }
+        if (imeActive || RustImeDiagnostics.overlayWindowFlags == 0) {
+            RustImeDiagnostics.overlayWindowFlags = lp.flags
         }
     }
 
@@ -578,7 +631,7 @@ class RustActivity : NativeActivity() {
     }
 
     private fun persistInputBridgeDiagnostics() {
-        imeEditText?.refreshDiagnostics()
+        imeEditText?.refreshDiagnostics(onlyIfUnset = true)
         val nativeDiag = runCatching { BlazeNativeBridge.inputDiagnostics() }
             .getOrElse { "unavailable (${it.javaClass.simpleName})" }
         RustDiagnosticsCollector.recordInputBridgeStats(
@@ -603,9 +656,19 @@ class RustActivity : NativeActivity() {
         RustDiagnosticsCollector.recordExitReason(this, reasonCode, cleanMsg)
         RustDiagnosticsCollector.recordRustEvent(this, "onEngineExit code=$reasonCode msg=$cleanMsg")
         runOnUiThread {
-            if (!isFinishing) {
-                finish()
+            returnToLauncherAndFinish()
+        }
+    }
+
+    private fun returnToLauncherAndFinish() {
+        runCatching {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
+            startActivity(intent)
+        }
+        if (!isFinishing) {
+            finish()
         }
     }
 
@@ -630,7 +693,6 @@ class RustActivity : NativeActivity() {
             onImeShown = { RustInputDiagnostics.imeShownCount.incrementAndGet() }
             onImeBackPressed = {
                 imeController.onUserDismissed()
-                imeEditText?.disableIme(findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0))
                 syncTextInputMode()
             }
             onEnterAction = {
@@ -646,6 +708,9 @@ class RustActivity : NativeActivity() {
             val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
             lastImeVisible = visible
             imeController.onImeVisibility(visible)
+            if (visible) {
+                imeEditText?.refreshDiagnostics()
+            }
             syncTextInputMode()
             ViewCompat.onApplyWindowInsets(v, insets)
         }
@@ -854,8 +919,8 @@ class RustActivity : NativeActivity() {
         BlazeInputRouter.selectJava()
         runCatching { BlazeNativeBridge.signalEngineExit() }
         RustSessionHandoff.clearPendingSessionFiles(this)
-        finish()
-        Process.killProcess(pid)
+        returnToLauncherAndFinish()
+        window.decorView.postDelayed({ Process.killProcess(pid) }, 150L)
     }
 
     override fun onDestroy() {

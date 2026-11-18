@@ -41,6 +41,7 @@ object RustImeDiagnostics {
     val hideRequests = AtomicLong(0)
     val ignoredShowRequests = AtomicLong(0)
     val createInputConnection = AtomicLong(0)
+    val startInputSessions = AtomicLong(0)
     val commitTextCalls = AtomicLong(0)
     val commitTextChars = AtomicLong(0)
     val composingCalls = AtomicLong(0)
@@ -55,6 +56,7 @@ object RustImeDiagnostics {
     @Volatile var viewHasFocus: Boolean = false
     @Volatile var windowHasFocus: Boolean = false
     @Volatile var windowFlags: Int = 0
+    @Volatile var overlayWindowFlags: Int = 0
     @Volatile var immActive: Boolean = false
     @Volatile var immAcceptingText: Boolean = false
     @Volatile var editorInputType: Int = 0
@@ -74,9 +76,9 @@ object RustImeDiagnostics {
     @Synchronized
     fun reset() {
         listOf(
-            showRequests, hideRequests, ignoredShowRequests, createInputConnection, commitTextCalls,
-            commitTextChars, composingCalls, composingChars, finishComposingCalls,
-            deleteSurroundingCalls, sendKeyEventCalls
+            showRequests, hideRequests, ignoredShowRequests, createInputConnection,
+            startInputSessions, commitTextCalls, commitTextChars, composingCalls, composingChars,
+            finishComposingCalls, deleteSurroundingCalls, sendKeyEventCalls
         ).forEach { it.set(0) }
         engineTextInputActive = false
         imeVisibleObserved = false
@@ -84,6 +86,7 @@ object RustImeDiagnostics {
         viewHasFocus = false
         windowHasFocus = false
         windowFlags = 0
+        overlayWindowFlags = 0
         immActive = false
         immAcceptingText = false
         editorInputType = 0
@@ -93,8 +96,11 @@ object RustImeDiagnostics {
 
     fun format(): String =
         "ime_target_view=$targetViewClass view_has_focus=$viewHasFocus window_has_focus=$windowHasFocus " +
-            "window_flags=0x${Integer.toHexString(windowFlags)} imm_is_active=$immActive " +
-            "imm_is_accepting_text=$immAcceptingText on_create_input_connection=${createInputConnection.get()} " +
+            "window_flags=0x${Integer.toHexString(windowFlags)} " +
+            "overlay_window_flags=0x${Integer.toHexString(overlayWindowFlags)} " +
+            "imm_is_active=$immActive imm_is_accepting_text=$immAcceptingText " +
+            "on_create_input_connection=${createInputConnection.get()} " +
+            "on_start_input=${startInputSessions.get()} " +
             "editor_input_type=0x${Integer.toHexString(editorInputType)} " +
             "editor_ime_options=0x${Integer.toHexString(editorImeOptions)} " +
             "ime_show_requests=${showRequests.get()} ime_hide_requests=${hideRequests.get()} " +
@@ -148,11 +154,13 @@ class RustImeController(
         if (engineActive && !wanted) show(ImeSource.CHAT_TAP)
     }
 
-    /** Gboard hide button or Back closed the keyboard: respect it. */
+    /** Gboard hide button or Back closed the keyboard: respect it and release IME focus. */
     fun onUserDismissed() {
         if (!wanted) return
         wanted = false
-        RustImeDiagnostics.record("dismissed_by_user", clock())
+        RustImeDiagnostics.hideRequests.incrementAndGet()
+        RustImeDiagnostics.record("hide:${ImeSource.USER_DISMISS.label}", clock())
+        host.hideIme()
     }
 
     /** Any non-sanctioned caller lands here; it never shows the keyboard. */

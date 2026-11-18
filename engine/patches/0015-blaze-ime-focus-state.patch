@@ -1,0 +1,129 @@
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index 437c603a63..191f4252aa 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -546,6 +546,24 @@ pub struct BlazeInputCounters {
+     pub ui_overlay_cache_active: bool,
+ }
+ 
++static BLAZE_TEXT_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
++
++pub fn blaze_text_input_active() -> bool {
++    BLAZE_TEXT_INPUT_ACTIVE.load(Ordering::Acquire)
++}
++
++/// Updates the engine text-input-active state and returns `true` only on an actual
++/// `false -> true` or `true -> false` transition (initial state is `false`).
++pub fn update_text_input_active_state(active: bool) -> bool {
++    let prev = BLAZE_TEXT_INPUT_ACTIVE.swap(active, Ordering::AcqRel);
++    if prev != active {
++        record_text_input_active_signal();
++        true
++    } else {
++        false
++    }
++}
++
+ struct BlazeInputQueue {
+     ring: [BlazeInputEvent; BLAZE_INPUT_QUEUE_CAP],
+     head: usize,
+@@ -693,6 +711,7 @@ pub fn clear_input_queue() {
+ }
+ 
+ pub fn reset_input_metrics_for_test() {
++    BLAZE_TEXT_INPUT_ACTIVE.store(false, Ordering::Release);
+     let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+     *guard = BlazeInputQueue::new();
+ }
+@@ -791,6 +810,7 @@ pub fn input_diagnostics_json() -> String {
+     let surface_rect = blaze_surface_rect();
+     serde_json::json!({
+         "desktop_input_enabled": blaze_desktop_input_enabled(),
++        "text_input_active": blaze_text_input_active(),
+         "surface_rect": surface_rect,
+         "counters": counters,
+     })
+@@ -1128,9 +1148,20 @@ mod input_bridge_tests {
+     #[test]
+     fn text_input_active_signal_increments_counter() {
+         reset_input_metrics_for_test();
++        assert!(!blaze_text_input_active());
+         assert_eq!(input_counters().text_input_active_signals, 0);
+-        record_text_input_active_signal();
+-        record_text_input_active_signal();
++        // Repeated false at startup (initial state is false) must not emit a signal.
++        assert!(!update_text_input_active_state(false));
++        assert_eq!(input_counters().text_input_active_signals, 0);
++        // false -> true emits once; duplicate true is suppressed.
++        assert!(update_text_input_active_state(true));
++        assert!(blaze_text_input_active());
++        assert!(!update_text_input_active_state(true));
++        assert_eq!(input_counters().text_input_active_signals, 1);
++        // true -> false emits once; duplicate false is suppressed.
++        assert!(update_text_input_active_state(false));
++        assert!(!blaze_text_input_active());
++        assert!(!update_text_input_active_state(false));
+         assert_eq!(input_counters().text_input_active_signals, 2);
+         reset_input_metrics_for_test();
+     }
+diff --git a/crates/horizon-client/src/android/platform.rs b/crates/horizon-client/src/android/platform.rs
+index da82a7396b..ea20c1169c 100644
+--- a/crates/horizon-client/src/android/platform.rs
++++ b/crates/horizon-client/src/android/platform.rs
+@@ -513,7 +513,9 @@ pub fn notify_cursor_grab(grabbing: bool) {
+ }
+ 
+ pub fn notify_text_input_active(active: bool) {
+-    horizon_client::android_runtime::record_text_input_active_signal();
++    if !horizon_client::android_runtime::update_text_input_active_state(active) {
++        return;
++    }
+     let _ = with_context(|env, activity| {
+         let arg = u8::from(active);
+         if let Err(err) = env.call_method(
+diff --git a/crates/horizon-client/src/game/ime.rs b/crates/horizon-client/src/game/ime.rs
+index 5f194ea48a..e2c2aaa8fc 100644
+--- a/crates/horizon-client/src/game/ime.rs
++++ b/crates/horizon-client/src/game/ime.rs
+@@ -12,6 +12,10 @@ impl Game<'_> {
+     /// Whether a text box has focus right now (the fields `ime_commit` can fill).
+     pub(super) fn text_field_focused(&mut self) -> bool {
+         if self.dialog_open() {
++            #[cfg(target_os = "android")]
++            if horizon_client::android_runtime::blaze_desktop_input_enabled() {
++                return self.dialog_typing();
++            }
+             return self.dialog_has_text_field();
+         }
+         if let Some(title) = self.title.as_mut() {
+diff --git a/crates/horizon-client/src/title.rs b/crates/horizon-client/src/title.rs
+index 58d1e14f3b..a4322d1072 100644
+--- a/crates/horizon-client/src/title.rs
++++ b/crates/horizon-client/src/title.rs
+@@ -716,7 +716,7 @@ impl Title {
+     /// Vanilla bypasses the selector when there are no saves.
+     pub fn enter_singleplayer(&mut self) {
+         self.search.clear();
+-        self.search_focused = true;
++        self.search_focused = !crate::android_runtime::blaze_desktop_input_enabled();
+         self.scroll.set(crate::ui::Scroll::default());
+         let worlds = list_worlds(&self.saves);
+         self.create_return_to_main = worlds.is_empty();
+@@ -742,6 +742,9 @@ impl Title {
+     /// back empty (the last world deleted, say) opens a fresh Create New
+     /// World, whose Cancel goes to the title screen.
+     fn return_to_list(&mut self, folder: Option<&str>) {
++        if crate::android_runtime::blaze_desktop_input_enabled() {
++            self.search_focused = false;
++        }
+         let worlds = list_worlds(&self.saves);
+         *self.recent.borrow_mut() = None;
+         if worlds.is_empty() {
+@@ -3357,6 +3360,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
+                 Action::None
+             }
+             (Mode::Select { .. }, Some(12)) => {
++                self.search_focused = false;
+                 self.mode = Mode::Main;
+                 Action::None
+             }
