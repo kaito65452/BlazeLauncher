@@ -41,3 +41,13 @@
 Root cause: NativeActivity owns window surface + input queue, so the addContentView ZL2 overlay never drew or got touches.
 Fix: overlay in a TYPE_APPLICATION_PANEL sub-window, geometry-aware coordinate mapping, engine patch 0010, guard Check 16,
 new Input Bridge touch diagnostics + "Input debug overlay" toggle. See docs/STAGE_LB2.md. All device behavior UNVERIFIED.
+
+## Stage L-B3 (branch feat/stage-l-b3 @ `d93af0a0`)
+- **CI**: https://github.com/kaito65452/BlazeLauncher/actions/runs/44274084049 (`success`), `Parallel Fast Checks`: https://github.com/kaito65452/BlazeLauncher/actions/runs/44274083804 (`success`)
+- **`signed-apks` Artifact ID**: `14417260358` (`385,734,228` bytes), **`versionCode`**: `27769346`
+- **Fixes**:
+  1. Bug 1 (`00851c49`, patch `0011`): single touch-to-surface mapping via engine `nativeGetSurfaceRect`, `fitInsetsTypes = 0` on panel window, paired `last_touch_xy_raw`/`last_touch_xy_mapped` + `overlay_offset`/`surface_size`/`mapped_px`/`raw_vs_mapped_check`.
+  2. Bug 2 (`df479919`, patch `0012`): `native_ime` disabled in desktop mode, engine `sync_ime` emits `onTextInputActiveChanged(Boolean)` (`text_input_active_signals`), launcher hosts `BlazeImeEditText` in `RustActivity`'s focused window with codepoint diffing (`RustImeTextProcessor`), `ime_shown_count` + `char_events`.
+  3. Bug 3 (`5c4c2ba7`, patches `0013` & `0014`, Guard Check 17): removed `in_world_stationary_overlay`; blur cache strictly gated by `should_cache_menu_blur(singleplayer_paused, shows_panorama, has_menu_blur)`; ported `gui_item_cache`; added `world_frames_while_ui_open` & `ui_overlay_cache_active`.
+  4. Render Startup Summary (`689a50a5`) + 26.3 pin refresh in `0007` (`d93af0a0`).
+- **Details**: [`docs/STAGE_LB3.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB3.md). On-device SM-N975F behavior remains `UNVERIFIED`.
