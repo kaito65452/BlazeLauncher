@@ -191,6 +191,7 @@ object RustDiagnosticsCollector {
         statusDir: File,
         historicalExits: String = "",
         logcatProvider: () -> String = { readSameUidLogcat() },
+        renderPerfLogcatProvider: () -> String = { readRenderPerfLogcat() },
         jvmWorkerLogFile: File? = null,
         useEngineTouchFallback: Boolean = false,
         nowMs: Long = System.currentTimeMillis()
@@ -242,13 +243,17 @@ object RustDiagnosticsCollector {
 
         val engineDiag = readStarlingDiagnosticTail(filesDir)
         val logcatRaw = logcatProvider().trim()
+        val renderPerfLogcat = renderPerfLogcatProvider().trim()
+        val combinedPerfLogcat = listOf(renderPerfLogcat, logcatRaw)
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
 
         appendLine()
         appendLine("=== Render Startup & Exit Summary ===")
         appendLine(
             redactDiagnosticText(
                 extractRenderStartupSummary(
-                    logcatText = logcatRaw,
+                    logcatText = combinedPerfLogcat,
                     diagText = engineDiag,
                     historicalExitsText = historicalExits
                 )
@@ -407,6 +412,28 @@ object RustDiagnosticsCollector {
         }
         process.waitFor()
         output.takeLast(MAX_LOGCAT_LINES).joinToString("\n")
+    }.getOrDefault("")
+
+    private fun readRenderPerfLogcat(): String = runCatching {
+        val process = ProcessBuilder(
+            "logcat",
+            "-d",
+            "-v",
+            "threadtime",
+            "-s",
+            "Horizon:I"
+        ).redirectErrorStream(true).start()
+        val matches = process.inputStream.bufferedReader().use { reader ->
+            reader.lineSequence()
+                .filter { line ->
+                    line.contains("BlazePerf") ||
+                        line.contains("Horizon renderer:") ||
+                        line.contains("Horizon: first frame after")
+                }
+                .toList()
+        }
+        process.waitFor()
+        matches.takeLast(20).joinToString("\n")
     }.getOrDefault("")
 
     private fun statusDir(context: Context): File =

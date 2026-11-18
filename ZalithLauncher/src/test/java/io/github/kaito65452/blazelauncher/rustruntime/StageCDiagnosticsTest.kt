@@ -114,4 +114,28 @@ class StageCDiagnosticsTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun extractRenderStartupSummary_recoversStartupPerfWhenTailEvictedStartupLogs() {
+        val tempRoot = Files.createTempDirectory("stagec_perf_recover").toFile()
+        try {
+            val filesDir = File(tempRoot, "files").apply { mkdirs() }
+            val statusDir = File(tempRoot, "no_backup").apply { mkdirs() }
+            val report = RustDiagnosticsCollector.collectRustDiagnosticsFromDirs(
+                filesDir = filesDir,
+                statusDir = statusDir,
+                logcatProvider = { "01-01 12:05:00.000 1234 1234 I Horizon : gameplay frame log only" },
+                renderPerfLogcatProvider = {
+                    listOf(
+                        "01-01 12:00:01.000 1234 1234 I Horizon : BlazePerf pipelines_created_ms=510 initial=true multi_draw=on occlusion_culling=on gpu_timer=off",
+                        "01-01 12:00:02.000 1234 1234 I Horizon : BlazePerf surface_to_first_frame_ms=920 backend=Vulkan adapter=Mali-G76 MC12"
+                    ).joinToString("\n")
+                }
+            )
+            assertTrue(report.contains("pipelines_created_ms=510"))
+            assertTrue(report.contains("surface_to_first_frame_ms=920 backend=Vulkan adapter=Mali-G76 MC12"))
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }
