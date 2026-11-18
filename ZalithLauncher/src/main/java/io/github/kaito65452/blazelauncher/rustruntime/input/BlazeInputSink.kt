@@ -36,6 +36,11 @@ interface BlazeInputSink {
     fun sendCursorDelta(dx: Float, dy: Float)
     fun sendKeycode(keycode: Int, keychar: Char, scancode: Int, modifiers: Int, isDown: Boolean)
     fun sendChar(keychar: Char, modifiers: Int)
+    fun sendCodepoint(codepoint: Int) {
+        if (codepoint in 0..0xFFFF) {
+            sendChar(codepoint.toChar(), 0)
+        }
+    }
     fun sendKeyPress(keyCode: Int, scancode: Int, modifiers: Int, status: Boolean) {
         sendKeycode(keyCode, '\u0000', scancode, modifiers, status)
     }

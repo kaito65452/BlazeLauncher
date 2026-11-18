@@ -115,6 +115,8 @@ object RustInputDiagnostics {
     val touchSeenByOverlay = AtomicLong(0)
     val touchRoutedToZl2 = AtomicLong(0)
     val overlayComposedCount = AtomicLong(0)
+    val textInputActiveSignals = AtomicLong(0)
+    val imeShownCount = AtomicLong(0)
 
     @Volatile var overlayAttached: Boolean = false
     @Volatile var overlayVisible: Boolean = false
@@ -143,6 +145,8 @@ object RustInputDiagnostics {
         touchSeenByOverlay.set(0)
         touchRoutedToZl2.set(0)
         overlayComposedCount.set(0)
+        textInputActiveSignals.set(0)
+        imeShownCount.set(0)
         overlayAttached = false
         overlayVisible = false
         overlayWidth = 0
@@ -221,7 +225,9 @@ object RustInputDiagnostics {
             "last_touch_xy_raw=${fmt(lastTouchRawX)},${fmt(lastTouchRawY)} " +
             "last_touch_xy_mapped=${fmt4(lastMappedX)},${fmt4(lastMappedY)} " +
             "mapped_px=${fmt(lastMappedPxX)},${fmt(lastMappedPxY)} " +
-            "raw_vs_mapped_check=${computeRawVsMappedCheck()}" +
+            "raw_vs_mapped_check=${computeRawVsMappedCheck()} " +
+            "text_input_active_signals=${textInputActiveSignals.get()} " +
+            "ime_shown_count=${imeShownCount.get()}" +
             if (overlayError.isNotBlank()) " overlay_error=$overlayError" else ""
 
     private val RAW_TOUCH_REGEX = Regex("\"raw_touch_ignored\"\\s*:\\s*(\\d+)")

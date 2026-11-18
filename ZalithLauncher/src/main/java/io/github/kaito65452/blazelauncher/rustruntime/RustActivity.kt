@@ -74,6 +74,7 @@ import com.movtery.zalithlauncher.ui.theme.ZalithLauncherTheme
 import com.movtery.zalithlauncher.utils.device.PhysicalMouseChecker
 import com.movtery.zalithlauncher.viewmodel.GamepadViewModel
 import dev.horizon.android.bridge.BlazeNativeBridge
+import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeImeEditText
 import io.github.kaito65452.blazelauncher.rustruntime.input.BlazeInputRouter
 import io.github.kaito65452.blazelauncher.rustruntime.input.RustGameOverlay
 import io.github.kaito65452.blazelauncher.rustruntime.input.RustInputDiagnostics
@@ -97,6 +98,10 @@ class RustActivity : NativeActivity() {
     private var overlayRoot: DesktopOverlayRoot? = null
     private var overlayComposeView: ComposeView? = null
     private var overlayWindowAdded = false
+    private var imeEditText: BlazeImeEditText? = null
+    @Volatile
+    private var engineTextInputActive = false
+    private var lastImeVisible = false
     private var textInputMode by mutableStateOf(TextInputMode.DISABLE)
     private var activeLayoutFile by mutableStateOf<File?>(null)
     private val composeHost by lazy { NativeActivityComposeHost() }
@@ -141,6 +146,7 @@ class RustActivity : NativeActivity() {
                 RustInputBridge.configureDesktopInputMode(desktopInputActive)
                 super.onCreate(savedInstanceState)
                 if (desktopInputActive) {
+                    attachDesktopImeHost()
                     attachDesktopInputOverlay(savedInstanceState)
                 } else if (!directLaunchMode) {
                     attachSpikeOverlay()
@@ -174,6 +180,16 @@ class RustActivity : NativeActivity() {
         val root = overlayRoot ?: return
         val content = overlayComposeView ?: return
         root.post { updateOverlayGeometry(root, content) }
+    }
+
+    @Suppress("unused")
+    @Keep
+    fun onTextInputActiveChanged(active: Boolean) {
+        RustInputDiagnostics.textInputActiveSignals.incrementAndGet()
+        engineTextInputActive = active
+        runOnUiThread {
+            setDesktopTextInputMode(if (active) TextInputMode.ENABLE else TextInputMode.DISABLE)
+        }
     }
 
     override fun onStart() {
@@ -257,11 +273,12 @@ class RustActivity : NativeActivity() {
         }
 
         if (isDown && event.keyCode == AllSettings.physicalKeyImeCode.state) {
-            textInputMode = if (textInputMode == TextInputMode.ENABLE) {
+            val next = if (textInputMode == TextInputMode.ENABLE) {
                 TextInputMode.DISABLE
             } else {
                 TextInputMode.ENABLE
             }
+            setDesktopTextInputMode(next)
             return true
         }
 
@@ -368,7 +385,7 @@ class RustActivity : NativeActivity() {
                             initialLayoutFile = activeLayoutFile,
                             gamepadViewModel = gamepadViewModel,
                             textInputMode = textInputMode,
-                            onTextInputModeChange = { textInputMode = it },
+                            onTextInputModeChange = ::setDesktopTextInputMode,
                             onLayoutChanged = { newFile -> activeLayoutFile = newFile },
                             onForceClose = ::exitRustProcess
                         )
@@ -568,6 +585,54 @@ class RustActivity : NativeActivity() {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
+        }
+    }
+
+    /**
+     * Hosts an invisible 1x1 EditText in the Activity's own focused window so Android grants a real
+     * InputConnection and shows the soft keyboard without taking window focus from NativeActivity
+     * (which would trigger WindowEvent::Focused(false) and pause singleplayer).
+     */
+    private fun attachDesktopImeHost() {
+        if (imeEditText != null) return
+        val edit = BlazeImeEditText(this).apply {
+            onImeShown = { RustInputDiagnostics.imeShownCount.incrementAndGet() }
+            onImeBackPressed = { setDesktopTextInputMode(TextInputMode.DISABLE) }
+            onEnterAction = {
+                if (!engineTextInputActive) {
+                    setDesktopTextInputMode(TextInputMode.DISABLE)
+                }
+            }
+        }
+        addContentView(edit, FrameLayout.LayoutParams(1, 1))
+        imeEditText = edit
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.decorView.setOnApplyWindowInsetsListener { v, insets ->
+                val visible = insets.isVisible(WindowInsets.Type.ime())
+                if (lastImeVisible && !visible && textInputMode == TextInputMode.ENABLE) {
+                    setDesktopTextInputMode(TextInputMode.DISABLE)
+                }
+                lastImeVisible = visible
+                v.onApplyWindowInsets(insets)
+            }
+        }
+    }
+
+    private fun setDesktopTextInputMode(mode: TextInputMode) {
+        if (textInputMode == mode) {
+            if (mode == TextInputMode.ENABLE) {
+                imeEditText?.enableIme()
+            }
+            return
+        }
+        textInputMode = mode
+        val edit = imeEditText ?: return
+        if (mode == TextInputMode.ENABLE) {
+            edit.enableIme()
+        } else {
+            val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+            edit.disableIme(nativeView)
         }
     }
 
@@ -781,6 +846,8 @@ class RustActivity : NativeActivity() {
         if (desktopOverlayAttached) {
             composeHost.onDestroy()
         }
+        imeEditText?.disableIme(null)
+        imeEditText = null
         BlazeInputRouter.selectJava()
         super.onDestroy()
         if (isFinishing) {

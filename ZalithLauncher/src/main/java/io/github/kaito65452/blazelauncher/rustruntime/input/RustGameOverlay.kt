@@ -71,7 +71,6 @@ import com.movtery.zalithlauncher.ui.control.gamepad.SimpleGamepadCapture
 import com.movtery.zalithlauncher.ui.control.gyroscope.GyroscopeReader
 import com.movtery.zalithlauncher.ui.control.gyroscope.isGyroscopeAvailable
 import com.movtery.zalithlauncher.ui.control.hotbarPercentage
-import com.movtery.zalithlauncher.ui.control.input.HidableInputLayout
 import com.movtery.zalithlauncher.ui.control.input.TextInputMode
 import com.movtery.zalithlauncher.ui.control.mouse.SwitchableMouseLayout
 import com.movtery.zalithlauncher.ui.screens.game.elements.DraggableGameBall
@@ -507,17 +506,6 @@ fun RustGameOverlay(
                         gamepadViewModel.confirmModePrompt(mode)
                     }
                 }
-            )
-        }
-
-        if (textInputMode == TextInputMode.ENABLE) {
-            HidableInputLayout(
-                onSend = { text ->
-                    text.forEach { ch -> LWJGLCharSender.sendChar(ch) }
-                },
-                onBackspace = { LWJGLCharSender.sendBackspace() },
-                onEnter = { LWJGLCharSender.sendEnter() },
-                onClose = { onTextInputModeChange(TextInputMode.DISABLE) }
             )
         }
 

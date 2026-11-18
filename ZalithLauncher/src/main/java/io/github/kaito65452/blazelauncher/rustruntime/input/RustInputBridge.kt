@@ -230,6 +230,12 @@ class RustInputBridgeImpl(
         transport.injectChar(keychar.code)
     }
 
+    override fun sendCodepoint(codepoint: Int) {
+        if (codepoint <= 0 || Character.isISOControl(codepoint)) return
+        charCount.incrementAndGet()
+        transport.injectChar(codepoint)
+    }
+
     override fun sendMouseKeycode(button: Int, modifiers: Int, isDown: Boolean) {
         if (GlfwKeycodeMapping.toWinitMouseButtonName(button) == null) return
         mouseButtonCount.incrementAndGet()
