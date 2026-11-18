@@ -1,0 +1,119 @@
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index b69b56f3c0..834a07ac3f 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -715,6 +715,37 @@ pub fn record_raw_touch_ignored() {
+     }
+ }
+ 
++static BLAZE_SURFACE_RECT: [std::sync::atomic::AtomicI32; 6] = [
++    std::sync::atomic::AtomicI32::new(0),
++    std::sync::atomic::AtomicI32::new(0),
++    std::sync::atomic::AtomicI32::new(0),
++    std::sync::atomic::AtomicI32::new(0),
++    std::sync::atomic::AtomicI32::new(0),
++    std::sync::atomic::AtomicI32::new(0),
++];
++
++pub fn update_blaze_surface_rect(
++    surf_x: i32,
++    surf_y: i32,
++    surf_w: i32,
++    surf_h: i32,
++    buf_w: i32,
++    buf_h: i32,
++) {
++    let vals = [surf_x, surf_y, surf_w, surf_h, buf_w, buf_h];
++    for (slot, val) in BLAZE_SURFACE_RECT.iter().zip(vals) {
++        slot.store(val, Ordering::Release);
++    }
++}
++
++pub fn blaze_surface_rect() -> [i32; 6] {
++    let mut out = [0; 6];
++    for (dst, slot) in out.iter_mut().zip(BLAZE_SURFACE_RECT.iter()) {
++        *dst = slot.load(Ordering::Acquire);
++    }
++    out
++}
++
+ pub fn input_counters() -> BlazeInputCounters {
+     let guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+     guard.counters
+@@ -722,8 +753,10 @@ pub fn input_counters() -> BlazeInputCounters {
+ 
+ pub fn input_diagnostics_json() -> String {
+     let counters = input_counters();
++    let surface_rect = blaze_surface_rect();
+     serde_json::json!({
+         "desktop_input_enabled": blaze_desktop_input_enabled(),
++        "surface_rect": surface_rect,
+         "counters": counters,
+     })
+     .to_string()
+@@ -1048,4 +1081,12 @@ mod input_bridge_tests {
+             }
+         );
+     }
++
++    #[test]
++    fn surface_rect_tracks_presentation_and_buffer_sizes() {
++        update_blaze_surface_rect(0, 0, 1520, 694, 1520, 694);
++        assert_eq!(blaze_surface_rect(), [0, 0, 1520, 694, 1520, 694]);
++        update_blaze_surface_rect(57, 0, 1463, 720, 1097, 540);
++        assert_eq!(blaze_surface_rect(), [57, 0, 1463, 720, 1097, 540]);
++    }
+ }
+diff --git a/crates/horizon-client/src/android/jni_bridge.rs b/crates/horizon-client/src/android/jni_bridge.rs
+index e8274b52bf..f162a69723 100644
+--- a/crates/horizon-client/src/android/jni_bridge.rs
++++ b/crates/horizon-client/src/android/jni_bridge.rs
+@@ -1008,3 +1008,14 @@ pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeI
+     let json = horizon_client::android_runtime::input_diagnostics_json();
+     str_to_jstring(&mut env, &json)
+ }
++
++/// Active presentation rectangle and render buffer size as "surfX,surfY,surfW,surfH,bufW,bufH".
++#[unsafe(no_mangle)]
++pub extern "system" fn Java_dev_horizon_android_bridge_BlazeNativeBridge_nativeGetSurfaceRect(
++    mut env: JNIEnv<'_>,
++    _class: JClass<'_>,
++) -> jstring {
++    let [sx, sy, sw, sh, bw, bh] = horizon_client::android_runtime::blaze_surface_rect();
++    let s = format!("{sx},{sy},{sw},{sh},{bw},{bh}");
++    str_to_jstring(&mut env, &s)
++}
+diff --git a/crates/horizon-client/src/game/android_input.rs b/crates/horizon-client/src/game/android_input.rs
+index 94cd825660..f52ef88d57 100644
+--- a/crates/horizon-client/src/game/android_input.rs
++++ b/crates/horizon-client/src/game/android_input.rs
+@@ -9,11 +9,24 @@ use winit::event::{Touch, TouchPhase};
+ 
+ impl Game<'_> {
+     pub(crate) fn android_apply_display_scale(&mut self) {
+-        if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer)
+-            && let Err(error) = crate::display::apply(window, renderer)
+-        {
+-            crate::display::set_scale(crate::display::RenderScale::default());
+-            log::warn!("Android display scale: {error}");
++        if let (Some(window), Some(renderer)) = (&self.window, &mut self.renderer) {
++            if let Err(error) = crate::display::apply(window, renderer) {
++                crate::display::set_scale(crate::display::RenderScale::default());
++                log::warn!("Android display scale: {error}");
++            }
++            let outer = window.outer_size();
++            let [sx, sy, sw, sh] = winit::platform::android::native_content_rect([
++                outer.width.max(1),
++                outer.height.max(1),
++            ]);
++            horizon_client::android_runtime::update_blaze_surface_rect(
++                sx as i32,
++                sy as i32,
++                sw as i32,
++                sh as i32,
++                renderer.config.width as i32,
++                renderer.config.height as i32,
++            );
+         }
+     }
+ 

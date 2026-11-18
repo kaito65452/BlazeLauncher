@@ -21,12 +21,54 @@ package io.github.kaito65452.blazelauncher.rustruntime.input
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Pure mapping from overlay-local touch coordinates to the normalized (0..1) cursor position that the
- * engine multiplies by its own surface size. The overlay area (Kotlin viewport, e.g. 1463x694) can differ
- * from the engine surface (e.g. 1520x720), so we normalize against the full window when known.
+ * Pure mapping from overlay-local touch coordinates to normalized `[0..1]` coordinates and engine
+ * buffer pixels.
+ *
+ * Single source of truth:
+ * `surfacePoint = overlayPoint - surfaceOffsetRelativeToOverlay`
+ * (equivalently `overlayPoint + overlayOffsetRelativeToSurface`),
+ * normalized by the engine presentation surface size (`surfaceWidth x surfaceHeight`), and scaled
+ * into engine buffer pixels (`bufferWidth x bufferHeight`).
  */
 object RustTouchGeometry {
     data class Normalized(val x: Float, val y: Float)
+
+    data class SurfaceGeometry(
+        val overlayOffsetX: Int = 0,
+        val overlayOffsetY: Int = 0,
+        val overlayWidth: Int = 0,
+        val overlayHeight: Int = 0,
+        val surfaceWidth: Int = 0,
+        val surfaceHeight: Int = 0,
+        val bufferWidth: Int = 0,
+        val bufferHeight: Int = 0
+    )
+
+    data class MappedPoint(
+        val normX: Float,
+        val normY: Float,
+        val enginePxX: Float,
+        val enginePxY: Float
+    )
+
+    fun map(x: Float, y: Float, geometry: SurfaceGeometry): MappedPoint {
+        val hasSurface = geometry.surfaceWidth > 0 && geometry.surfaceHeight > 0
+        val targetW = (if (hasSurface) geometry.surfaceWidth else geometry.overlayWidth).coerceAtLeast(1).toFloat()
+        val targetH = (if (hasSurface) geometry.surfaceHeight else geometry.overlayHeight).coerceAtLeast(1).toFloat()
+        val ox = if (hasSurface) geometry.overlayOffsetX else 0
+        val oy = if (hasSurface) geometry.overlayOffsetY else 0
+        val bufW = (if (geometry.bufferWidth > 0) geometry.bufferWidth else targetW.toInt()).coerceAtLeast(1).toFloat()
+        val bufH = (if (geometry.bufferHeight > 0) geometry.bufferHeight else targetH.toInt()).coerceAtLeast(1).toFloat()
+
+        val nx = if (x.isFinite()) ((x + ox) / targetW).coerceIn(0f, 1f) else 0.5f
+        val ny = if (y.isFinite()) ((y + oy) / targetH).coerceIn(0f, 1f) else 0.5f
+        return MappedPoint(
+            normX = nx,
+            normY = ny,
+            enginePxX = nx * bufW,
+            enginePxY = ny * bufH
+        )
+    }
 
     fun normalize(
         x: Float,
@@ -38,14 +80,21 @@ object RustTouchGeometry {
         windowWidth: Int = 0,
         windowHeight: Int = 0
     ): Normalized {
-        val useWindow = windowWidth > 0 && windowHeight > 0
-        val w = (if (useWindow) windowWidth else areaWidth).coerceAtLeast(1).toFloat()
-        val h = (if (useWindow) windowHeight else areaHeight).coerceAtLeast(1).toFloat()
-        val ox = if (useWindow) offsetX else 0
-        val oy = if (useWindow) offsetY else 0
-        val nx = if (x.isFinite()) ((x + ox) / w).coerceIn(0f, 1f) else 0.5f
-        val ny = if (y.isFinite()) ((y + oy) / h).coerceIn(0f, 1f) else 0.5f
-        return Normalized(nx, ny)
+        val mapped = map(
+            x = x,
+            y = y,
+            geometry = SurfaceGeometry(
+                overlayOffsetX = offsetX,
+                overlayOffsetY = offsetY,
+                overlayWidth = areaWidth,
+                overlayHeight = areaHeight,
+                surfaceWidth = windowWidth,
+                surfaceHeight = windowHeight,
+                bufferWidth = windowWidth,
+                bufferHeight = windowHeight
+            )
+        )
+        return Normalized(mapped.normX, mapped.normY)
     }
 }
 
@@ -71,6 +120,12 @@ object RustInputDiagnostics {
     @Volatile var overlayVisible: Boolean = false
     @Volatile var overlayWidth: Int = 0
     @Volatile var overlayHeight: Int = 0
+    @Volatile var overlayOffsetX: Int = 0
+    @Volatile var overlayOffsetY: Int = 0
+    @Volatile var surfaceWidth: Int = 0
+    @Volatile var surfaceHeight: Int = 0
+    @Volatile var bufferWidth: Int = 0
+    @Volatile var bufferHeight: Int = 0
     @Volatile var overlayWindowType: Int = 0
     @Volatile var overlayZOrderAboveSurface: Boolean = false
     @Volatile var overlayError: String = ""
@@ -78,6 +133,10 @@ object RustInputDiagnostics {
     @Volatile var lastTouchRawY: Float = Float.NaN
     @Volatile var lastMappedX: Float = Float.NaN
     @Volatile var lastMappedY: Float = Float.NaN
+    @Volatile var lastMappedPxX: Float = Float.NaN
+    @Volatile var lastMappedPxY: Float = Float.NaN
+    @Volatile var lastGeometrySnapshot: RustTouchGeometry.SurfaceGeometry =
+        RustTouchGeometry.SurfaceGeometry()
 
     fun reset() {
         touchSeenByActivity.set(0)
@@ -88,6 +147,12 @@ object RustInputDiagnostics {
         overlayVisible = false
         overlayWidth = 0
         overlayHeight = 0
+        overlayOffsetX = 0
+        overlayOffsetY = 0
+        surfaceWidth = 0
+        surfaceHeight = 0
+        bufferWidth = 0
+        bufferHeight = 0
         overlayWindowType = 0
         overlayZOrderAboveSurface = false
         overlayError = ""
@@ -95,6 +160,47 @@ object RustInputDiagnostics {
         lastTouchRawY = Float.NaN
         lastMappedX = Float.NaN
         lastMappedY = Float.NaN
+        lastMappedPxX = Float.NaN
+        lastMappedPxY = Float.NaN
+        lastGeometrySnapshot = RustTouchGeometry.SurfaceGeometry()
+    }
+
+    fun recordMappedCursor(
+        rawX: Float,
+        rawY: Float,
+        mapped: RustTouchGeometry.MappedPoint,
+        geometry: RustTouchGeometry.SurfaceGeometry
+    ) {
+        lastGeometrySnapshot = geometry
+        lastTouchRawX = rawX
+        lastTouchRawY = rawY
+        lastMappedX = mapped.normX
+        lastMappedY = mapped.normY
+        lastMappedPxX = mapped.enginePxX
+        lastMappedPxY = mapped.enginePxY
+    }
+
+    fun computeRawVsMappedCheck(): String {
+        if (!lastTouchRawX.isFinite() || !lastTouchRawY.isFinite() ||
+            !lastMappedX.isFinite() || !lastMappedY.isFinite()
+        ) {
+            return "none"
+        }
+        val expected = RustTouchGeometry.map(lastTouchRawX, lastTouchRawY, lastGeometrySnapshot)
+        val bw = lastGeometrySnapshot.bufferWidth
+            .coerceAtLeast(lastGeometrySnapshot.surfaceWidth)
+            .coerceAtLeast(1)
+        val bh = lastGeometrySnapshot.bufferHeight
+            .coerceAtLeast(lastGeometrySnapshot.surfaceHeight)
+            .coerceAtLeast(1)
+        val dx = kotlin.math.abs(expected.normX - lastMappedX) * bw
+        val dy = kotlin.math.abs(expected.normY - lastMappedY) * bh
+        val delta = maxOf(dx, dy)
+        return if (delta <= 0.5f) {
+            "ok(delta=${fmt(delta)}px)"
+        } else {
+            "mismatch(delta=${fmt(delta)}px expected=${fmt4(expected.normX)},${fmt4(expected.normY)})"
+        }
     }
 
     private fun fmt(v: Float): String = if (v.isFinite()) "%.1f".format(java.util.Locale.ROOT, v) else "-"
@@ -108,10 +214,14 @@ object RustInputDiagnostics {
             "touch_leaked_to_engine=$leakedToEngine " +
             "overlay_attached=$overlayAttached overlay_visible=$overlayVisible " +
             "overlay_size=${overlayWidth}x$overlayHeight " +
+            "overlay_offset=${overlayOffsetX},$overlayOffsetY " +
+            "surface_size=${surfaceWidth}x$surfaceHeight " +
             "overlay_zorder_above_surface=$overlayZOrderAboveSurface (window_type=$overlayWindowType) " +
             "overlay_composed_count=${overlayComposedCount.get()} " +
             "last_touch_xy_raw=${fmt(lastTouchRawX)},${fmt(lastTouchRawY)} " +
-            "last_touch_xy_mapped=${fmt4(lastMappedX)},${fmt4(lastMappedY)}" +
+            "last_touch_xy_mapped=${fmt4(lastMappedX)},${fmt4(lastMappedY)} " +
+            "mapped_px=${fmt(lastMappedPxX)},${fmt(lastMappedPxY)} " +
+            "raw_vs_mapped_check=${computeRawVsMappedCheck()}" +
             if (overlayError.isNotBlank()) " overlay_error=$overlayError" else ""
 
     private val RAW_TOUCH_REGEX = Regex("\"raw_touch_ignored\"\\s*:\\s*(\\d+)")

@@ -267,6 +267,16 @@ object BlazeNativeBridge {
     external fun nativeResetInputState()
     external fun nativeSetDesktopInputMode(enabled: Boolean)
     external fun nativeInputDiagnostics(): String
+    external fun nativeGetSurfaceRect(): String
+
+    data class EngineSurfaceRect(
+        val surfX: Int,
+        val surfY: Int,
+        val surfWidth: Int,
+        val surfHeight: Int,
+        val bufferWidth: Int,
+        val bufferHeight: Int
+    )
 
     fun injectKey(keyCode: Int, unicodeChar: Int, mods: Int, pressed: Boolean) {
         if (!loaded) return
@@ -316,6 +326,25 @@ object BlazeNativeBridge {
     fun inputDiagnostics(): String {
         if (!loaded) return ""
         return runCatching { nativeInputDiagnostics() }.getOrDefault("")
+    }
+
+    fun getSurfaceRect(): EngineSurfaceRect? {
+        if (!loaded) return null
+        val raw = runCatching { nativeGetSurfaceRect() }.getOrDefault("")
+        val parts = raw.split(',')
+        if (parts.size != 6) return null
+        val nums = parts.map { it.trim().toIntOrNull() ?: return null }
+        val sw = nums[2]
+        val sh = nums[3]
+        if (sw <= 0 || sh <= 0) return null
+        return EngineSurfaceRect(
+            surfX = nums[0],
+            surfY = nums[1],
+            surfWidth = sw,
+            surfHeight = sh,
+            bufferWidth = nums[4].coerceAtLeast(1),
+            bufferHeight = nums[5].coerceAtLeast(1)
+        )
     }
 }
 

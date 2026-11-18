@@ -95,6 +95,7 @@ class RustActivity : NativeActivity() {
     private var directLaunchMode = false
     private var desktopOverlayAttached = false
     private var overlayRoot: DesktopOverlayRoot? = null
+    private var overlayComposeView: ComposeView? = null
     private var overlayWindowAdded = false
     private var textInputMode by mutableStateOf(TextInputMode.DISABLE)
     private var activeLayoutFile by mutableStateOf<File?>(null)
@@ -170,6 +171,9 @@ class RustActivity : NativeActivity() {
     @Keep
     fun onCursorGrabChanged(grabbing: Boolean) {
         RustInputBridge.onCursorGrabChanged(grabbing)
+        val root = overlayRoot ?: return
+        val content = overlayComposeView ?: return
+        root.post { updateOverlayGeometry(root, content) }
     }
 
     override fun onStart() {
@@ -383,7 +387,10 @@ class RustActivity : NativeActivity() {
                 attachInputDebugText(root)
             }
             root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayGeometry(root, composeView) }
+            composeView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayGeometry(root, composeView) }
+            window.decorView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateOverlayGeometry(root, composeView) }
             overlayRoot = root
+            overlayComposeView = composeView
             desktopOverlayAttached = true
 
             val decor = window.decorView
@@ -420,6 +427,9 @@ class RustActivity : NativeActivity() {
                     layoutInDisplayCutoutMode =
                         WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                 }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    fitInsetsTypes = 0
+                }
             }
             windowManager.addView(root, lp)
             overlayWindowAdded = true
@@ -442,19 +452,33 @@ class RustActivity : NativeActivity() {
 
     private fun updateOverlayGeometry(root: View, content: View) {
         val decor = window.decorView
-        val rootLoc = IntArray(2)
+        val contentLoc = IntArray(2)
         val decorLoc = IntArray(2)
-        content.getLocationOnScreen(rootLoc)
+        content.getLocationOnScreen(contentLoc)
         decor.getLocationOnScreen(decorLoc)
+        val engineRect = BlazeNativeBridge.getSurfaceRect()
+        val surfX = engineRect?.surfX ?: 0
+        val surfY = engineRect?.surfY ?: 0
+        val surfW = engineRect?.surfWidth ?: decor.width
+        val surfH = engineRect?.surfHeight ?: decor.height
+        val bufW = engineRect?.bufferWidth ?: surfW
+        val bufH = engineRect?.bufferHeight ?: surfH
+        val surfaceScreenX = decorLoc[0] + surfX
+        val surfaceScreenY = decorLoc[1] + surfY
         RustInputBridge.updateOverlayGeometry(
-            rootLoc[0] - decorLoc[0],
-            rootLoc[1] - decorLoc[1],
-            decor.width,
-            decor.height
+            offsetX = contentLoc[0] - surfaceScreenX,
+            offsetY = contentLoc[1] - surfaceScreenY,
+            surfaceWidth = surfW,
+            surfaceHeight = surfH,
+            overlayWidth = content.width,
+            overlayHeight = content.height,
+            bufferWidth = bufW,
+            bufferHeight = bufH
         )
-        RustInputDiagnostics.overlayWidth = root.width
-        RustInputDiagnostics.overlayHeight = root.height
-        RustInputDiagnostics.overlayVisible = root.visibility == View.VISIBLE && root.width > 0 && root.height > 0
+        RustInputDiagnostics.overlayWidth = content.width
+        RustInputDiagnostics.overlayHeight = content.height
+        RustInputDiagnostics.overlayVisible =
+            root.visibility == View.VISIBLE && content.width > 0 && content.height > 0
     }
 
     private fun attachInputDebugText(root: FrameLayout) {
@@ -486,8 +510,6 @@ class RustActivity : NativeActivity() {
     private class DesktopOverlayRoot(context: Activity) : FrameLayout(context) {
         override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
             RustInputDiagnostics.touchSeenByOverlay.incrementAndGet()
-            RustInputDiagnostics.lastTouchRawX = ev.x
-            RustInputDiagnostics.lastTouchRawY = ev.y
             val handled = super.dispatchTouchEvent(ev)
             if (handled) RustInputDiagnostics.touchRoutedToZl2.incrementAndGet()
             return true

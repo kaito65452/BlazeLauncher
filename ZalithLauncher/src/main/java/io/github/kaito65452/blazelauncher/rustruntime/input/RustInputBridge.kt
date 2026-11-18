@@ -150,36 +150,53 @@ class RustInputBridgeImpl(
     }
 
     @Volatile
-    private var overlayOffsetX: Int = 0
+    private var geometrySnapshot: RustTouchGeometry.SurfaceGeometry =
+        RustTouchGeometry.SurfaceGeometry()
 
-    @Volatile
-    private var overlayOffsetY: Int = 0
-
-    @Volatile
-    private var windowWidth: Int = 0
-
-    @Volatile
-    private var windowHeight: Int = 0
-
-    /** Overlay content origin inside the activity window and that window's size (== engine surface aspect). */
-    fun updateOverlayGeometry(offsetX: Int, offsetY: Int, winWidth: Int, winHeight: Int) {
-        overlayOffsetX = offsetX
-        overlayOffsetY = offsetY
-        windowWidth = winWidth
-        windowHeight = winHeight
+    /** Single source of truth for overlay-to-surface coordinate geometry. */
+    fun updateOverlayGeometry(
+        offsetX: Int,
+        offsetY: Int,
+        surfaceWidth: Int,
+        surfaceHeight: Int,
+        overlayWidth: Int = viewportWidth,
+        overlayHeight: Int = viewportHeight,
+        bufferWidth: Int = surfaceWidth,
+        bufferHeight: Int = surfaceHeight
+    ) {
+        val next = RustTouchGeometry.SurfaceGeometry(
+            overlayOffsetX = offsetX,
+            overlayOffsetY = offsetY,
+            overlayWidth = overlayWidth.coerceAtLeast(1),
+            overlayHeight = overlayHeight.coerceAtLeast(1),
+            surfaceWidth = surfaceWidth.coerceAtLeast(0),
+            surfaceHeight = surfaceHeight.coerceAtLeast(0),
+            bufferWidth = bufferWidth.coerceAtLeast(0),
+            bufferHeight = bufferHeight.coerceAtLeast(0)
+        )
+        geometrySnapshot = next
+        RustInputDiagnostics.overlayOffsetX = next.overlayOffsetX
+        RustInputDiagnostics.overlayOffsetY = next.overlayOffsetY
+        RustInputDiagnostics.surfaceWidth = next.surfaceWidth
+        RustInputDiagnostics.surfaceHeight = next.surfaceHeight
+        RustInputDiagnostics.bufferWidth = next.bufferWidth
+        RustInputDiagnostics.bufferHeight = next.bufferHeight
     }
 
     override fun sendCursorPos(x: Float, y: Float) {
-        val n = RustTouchGeometry.normalize(
-            x, y, viewportWidth, viewportHeight,
-            overlayOffsetX, overlayOffsetY, windowWidth, windowHeight
-        )
-        RustInputDiagnostics.lastTouchRawX = x
-        RustInputDiagnostics.lastTouchRawY = y
-        RustInputDiagnostics.lastMappedX = n.x
-        RustInputDiagnostics.lastMappedY = n.y
+        val current = geometrySnapshot
+        val effective = if (current.overlayWidth == viewportWidth && current.overlayHeight == viewportHeight) {
+            current
+        } else {
+            current.copy(
+                overlayWidth = viewportWidth.coerceAtLeast(1),
+                overlayHeight = viewportHeight.coerceAtLeast(1)
+            )
+        }
+        val mapped = RustTouchGeometry.map(x, y, effective)
+        RustInputDiagnostics.recordMappedCursor(x, y, mapped, effective)
         cursorPosCount.incrementAndGet()
-        transport.injectCursorPos(n.x, n.y)
+        transport.injectCursorPos(mapped.normX, mapped.normY)
     }
 
     override fun sendCursorDelta(dx: Float, dy: Float) {
@@ -282,7 +299,8 @@ class RustInputBridgeImpl(
 
     fun formatCountersSummary(): String {
         val mode = if (desktopInputEnabled) "zl2_desktop_jni" else "engine_touch_fallback"
-        return "path=$mode viewport=${viewportWidth}x${viewportHeight} window=${windowWidth}x$windowHeight " +
+        val g = geometrySnapshot
+        return "path=$mode viewport=${viewportWidth}x${viewportHeight} window=${g.surfaceWidth}x${g.surfaceHeight} " +
             "grab=$grabbingState " +
             "keys=${keyCount.get()} mouseBtns=${mouseButtonCount.get()} pos=${cursorPosCount.get()} " +
             "delta=${cursorDeltaCount.get()} scroll=${scrollCount.get()} chars=${charCount.get()}"
