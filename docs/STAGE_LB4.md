@@ -1,6 +1,6 @@
 # Stage L-B4 (Revisi 2): IME Fixes, Diagnostics & Return to ZL2 Menu on Quit
 
-Status: implemented on `feat/stage-l-b4`; verified in CI (on-device SM-N975F behavior UNVERIFIED until installed).
+Status: implemented on `feat/stage-l-b4` (`dcb56e03`); CI green (`44416739951`, `signed-apks` artifact `14482228465`, `versionCode=27818824`); on-device SM-N975F behavior UNVERIFIED until installed.
 
 ## Root Causes Found in Code
 

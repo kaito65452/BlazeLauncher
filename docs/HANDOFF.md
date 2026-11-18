@@ -52,7 +52,9 @@ new Input Bridge touch diagnostics + "Input debug overlay" toggle. See docs/STAG
   4. Render Startup Summary (`689a50a5`) + 26.3 pin refresh in `0007` (`d93af0a0`).
 - **Details**: [`docs/STAGE_LB3.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB3.md). On-device SM-N975F behavior remains `UNVERIFIED`.
 
-## Stage L-B4 (branch feat/stage-l-b4)
+## Stage L-B4 (branch feat/stage-l-b4 @ `dcb56e03`)
+- **CI**: https://github.com/kaito65452/BlazeLauncher/actions/runs/44416739951 (`success`), `Parallel Fast Checks`: https://github.com/kaito65452/BlazeLauncher/actions/runs/44416739868 (`success`)
+- **`signed-apks` Artifact ID**: `14482228465` (`385,743,650` bytes), **`versionCode`**: `27818824`
 - **IME**: dynamic `FLAG_ALT_FOCUSABLE_IM` on overlay sub-window while IME is active (preventing overlay from Z-ordering above Gboard and swallowing touches/swipes), `RustImeController` single state machine, `BlazeImeEditText` with `TYPE_CLASS_TEXT` + `IME_ACTION_SEND` + counting `InputConnectionWrapper` (no `KeyEvent` double-dispatch), `adjustResize|stateHidden`, full A1 diagnostics in Copy report & Developer overlay, plus engine patch `0015-blaze-ime-focus-state.patch` (no initial `search_focused=true` in desktop input mode, `dialog_typing()`, deduplicated `BLAZE_TEXT_INPUT_ACTIVE`).
 - **Exit**: `GameLaunchFlow` keeps `MainActivity` alive for `GameRuntime.RUST` AND `RustActivity.returnToLauncherAndFinish()` explicitly returns to `MainActivity` (`FLAG_ACTIVITY_CLEAR_TOP | FLAG_ACTIVITY_SINGLE_TOP`) on quit/exit.
 - **Pin refresh**: added republished 26.3 manifest `ead839cbccf0ddf013c3f935f2840080b5cb0d26` / asset index `f3df28b441565ca4e5deb9cda856d90df62e1433` to `0007-pin-refresh-26.3.patch`.
