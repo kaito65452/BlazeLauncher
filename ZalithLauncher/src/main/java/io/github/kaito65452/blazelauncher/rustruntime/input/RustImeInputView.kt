@@ -25,6 +25,10 @@ import android.text.TextWatcher
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputConnectionWrapper
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import android.view.inputmethod.InputMethodManager
 import androidx.appcompat.widget.AppCompatEditText
 import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
@@ -106,9 +110,10 @@ class RustImeTextProcessor {
 }
 
 /**
- * Invisible 1x1 EditText hosted inside `RustActivity`'s focused window (so Android grants
- * `InputConnection` and soft-keyboard focus without taking window focus away from `NativeActivity`
- * or triggering `WindowEvent::Focused(false)`).
+ * Real, IME-focusable 1x1 EditText hosted in `RustActivity`'s main window (never the overlay
+ * sub-window). Same proven approach as ZL2's TouchCharInput (filler text + TextWatcher diff), but
+ * with a swipe-friendly input type (no NO_SUGGESTIONS / FILTER) and an InputConnection wrapper
+ * that counts what the keyboard delivers (counts and lengths only, never the text).
  */
 class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     private val processor = RustImeTextProcessor()
@@ -118,33 +123,28 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     var onEnterAction: (() -> Unit)? = null
     var onImeBackPressed: (() -> Unit)? = null
     var onImeShown: (() -> Unit)? = null
+    var hostWindow: android.view.Window? = null
 
     init {
         alpha = 0f
         isSaveEnabled = false
         setBackgroundDrawable(null)
         setPadding(0, 0, 0, 0)
-        inputType = InputType.TYPE_CLASS_TEXT or
-            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-            InputType.TYPE_TEXT_VARIATION_FILTER
+        inputType = InputType.TYPE_CLASS_TEXT
         imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-            EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
-            EditorInfo.IME_ACTION_DONE
+            EditorInfo.IME_ACTION_SEND
         isFocusable = false
         isFocusableInTouchMode = false
-        visibility = View.GONE
 
         setOnEditorActionListener { _, actionId, event ->
-            val isAction = actionId == EditorInfo.IME_ACTION_DONE ||
-                actionId == EditorInfo.IME_ACTION_SEND ||
+            val isAction = actionId == EditorInfo.IME_ACTION_SEND ||
+                actionId == EditorInfo.IME_ACTION_DONE ||
                 actionId == EditorInfo.IME_ACTION_GO ||
                 actionId == EditorInfo.IME_ACTION_UNSPECIFIED ||
                 (event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN)
             if (isAction) {
-                BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
-                resetBuffer()
-                onEnterAction?.invoke()
+                sendEnter()
                 true
             } else {
                 false
@@ -164,9 +164,11 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
 
             override fun afterTextChanged(s: Editable?) {
                 if (internalChange) return
-                if (s == null || s.isEmpty()) {
-                    resetBuffer()
-                } else if (s.toString().indexOf('\n') >= 0) {
+                // Keep the buffer topped up so backspace always has something to delete,
+                // but never while the keyboard is still composing a word.
+                if (s != null && !hasComposing(s) &&
+                    (s.length < TEXT_FILLER.length / 2 || s.toString().indexOf('\n') >= 0)
+                ) {
                     resetBuffer()
                 }
             }
@@ -175,28 +177,77 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
         resetBuffer()
     }
 
+    private fun hasComposing(s: Editable): Boolean =
+        android.view.inputmethod.BaseInputConnection.getComposingSpanStart(s) >= 0
+
+    private fun sendEnter() {
+        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
+        resetBuffer()
+        onEnterAction?.invoke()
+    }
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        val base = super.onCreateInputConnection(outAttrs) ?: return null
+        RustImeDiagnostics.createInputConnection.incrementAndGet()
+        outAttrs.imeOptions = outAttrs.imeOptions or EditorInfo.IME_FLAG_NO_FULLSCREEN or
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        RustImeDiagnostics.editorInputType = outAttrs.inputType
+        RustImeDiagnostics.editorImeOptions = outAttrs.imeOptions
+        RustImeDiagnostics.record("create_input_connection")
+        return object : InputConnectionWrapper(base, true) {
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                RustImeDiagnostics.commitTextCalls.incrementAndGet()
+                RustImeDiagnostics.commitTextChars.addAndGet((text?.length ?: 0).toLong())
+                return super.commitText(text, newCursorPosition)
+            }
+
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                RustImeDiagnostics.composingCalls.incrementAndGet()
+                RustImeDiagnostics.composingChars.addAndGet((text?.length ?: 0).toLong())
+                return super.setComposingText(text, newCursorPosition)
+            }
+
+            override fun finishComposingText(): Boolean {
+                RustImeDiagnostics.finishComposingCalls.incrementAndGet()
+                return super.finishComposingText()
+            }
+
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                RustImeDiagnostics.deleteSurroundingCalls.incrementAndGet()
+                return super.deleteSurroundingText(beforeLength, afterLength)
+            }
+
+            override fun sendKeyEvent(event: KeyEvent): Boolean {
+                RustImeDiagnostics.sendKeyEventCalls.incrementAndGet()
+                // Enter arrives either here or as an editor action, never both: handle it once.
+                if (event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                    if (event.action == KeyEvent.ACTION_DOWN) sendEnter()
+                    return true
+                }
+                return super.sendKeyEvent(event)
+            }
+        }
+    }
+
+    /** Make this view the IME target and ask for the keyboard (called only by RustImeController). */
     fun enableIme() {
         imeActive = true
         resetBuffer()
         isEnabled = true
         isFocusable = true
         isFocusableInTouchMode = true
-        visibility = View.VISIBLE
         requestFocus()
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
-        imm.restartInput(this)
-        val shown = imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-        if (shown) {
-            onImeShown?.invoke()
-        } else {
-            post {
-                if (!imeActive) return@post
-                requestFocus()
-                imm.restartInput(this)
-                if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
-                    onImeShown?.invoke()
-                }
+        post {
+            if (!imeActive) return@post
+            requestFocus()
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                ?: return@post
+            imm.restartInput(this)
+            hostWindow?.let { WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime()) }
+            if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
+                onImeShown?.invoke()
             }
+            refreshDiagnostics()
         }
     }
 
@@ -204,12 +255,23 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
         imeActive = false
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(windowToken, 0)
+        hostWindow?.let { WindowCompat.getInsetsController(it, this).hide(WindowInsetsCompat.Type.ime()) }
         clearFocus()
         isFocusable = false
         isFocusableInTouchMode = false
-        visibility = View.GONE
         resetBuffer()
         restoreFocusView?.requestFocus()
+    }
+
+    /** UI-thread snapshot for the Copy report. */
+    fun refreshDiagnostics() {
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        RustImeDiagnostics.targetViewClass = javaClass.simpleName
+        RustImeDiagnostics.viewHasFocus = hasFocus()
+        RustImeDiagnostics.windowHasFocus = hasWindowFocus()
+        RustImeDiagnostics.windowFlags = hostWindow?.attributes?.flags ?: 0
+        RustImeDiagnostics.immActive = imm?.isActive(this) == true
+        RustImeDiagnostics.immAcceptingText = imm?.isAcceptingText == true
     }
 
     override fun onKeyPreIme(keyCode: Int, event: KeyEvent?): Boolean {

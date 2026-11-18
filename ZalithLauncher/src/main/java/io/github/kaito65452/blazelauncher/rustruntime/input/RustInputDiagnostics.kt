@@ -147,6 +147,7 @@ object RustInputDiagnostics {
         overlayComposedCount.set(0)
         textInputActiveSignals.set(0)
         imeShownCount.set(0)
+        RustImeDiagnostics.reset()
         overlayAttached = false
         overlayVisible = false
         overlayWidth = 0
@@ -233,7 +234,8 @@ object RustInputDiagnostics {
             "text_input_active_signals=${textInputActiveSignals.get()} " +
             "ime_shown_count=${imeShownCount.get()} " +
             "world_frames_while_ui_open=$worldFramesWhileUiOpen " +
-            "ui_overlay_cache_active=$uiOverlayCacheActive" +
+            "ui_overlay_cache_active=$uiOverlayCacheActive " +
+            RustImeDiagnostics.format() +
             if (overlayError.isNotBlank()) " overlay_error=$overlayError" else ""
 
     private val RAW_TOUCH_REGEX = Regex("\"raw_touch_ignored\"\\s*:\\s*(\\d+)")

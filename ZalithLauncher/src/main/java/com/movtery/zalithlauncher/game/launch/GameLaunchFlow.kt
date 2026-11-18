@@ -239,7 +239,9 @@ class GameLaunchFlow(scope: CoroutineScope) {
 
                     runGame(context, version, account)
                 }
-                exitActivity()
+                // Rust Edition runs in :rust and never relaunches the launcher, so keep
+                // MainActivity alive beneath RustActivity: finishing RustActivity returns to it.
+                if (!isRustRuntime) exitActivity()
             }
         }
     }

@@ -51,3 +51,8 @@ new Input Bridge touch diagnostics + "Input debug overlay" toggle. See docs/STAG
   3. Bug 3 (`5c4c2ba7`, patches `0013` & `0014`, Guard Check 17): removed `in_world_stationary_overlay`; blur cache strictly gated by `should_cache_menu_blur(singleplayer_paused, shows_panorama, has_menu_blur)`; ported `gui_item_cache`; added `world_frames_while_ui_open` & `ui_overlay_cache_active`.
   4. Render Startup Summary (`689a50a5`) + 26.3 pin refresh in `0007` (`d93af0a0`).
 - **Details**: [`docs/STAGE_LB3.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB3.md). On-device SM-N975F behavior remains `UNVERIFIED`.
+
+## Stage L-B4 (branch feat/stage-l-b4)
+- IME: overlay window gets `FLAG_ALT_FOCUSABLE_IM` (it was layered above Gboard and swallowed its touches), `RustImeController` state machine, `BlazeImeEditText` with swipe-friendly input type + counting `InputConnectionWrapper`, `stateHidden`, IME diagnostics in Copy report.
+- Exit: `GameLaunchFlow` no longer finishes `MainActivity` for Rust runtime, so quitting returns to the ZL2 menu.
+- Details and caller table: [`docs/STAGE_LB4.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB4.md). No engine patch. All device behavior UNVERIFIED.
