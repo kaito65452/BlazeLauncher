@@ -864,6 +864,15 @@ expect_fail "Check 16 rejects addContentView desktop overlay" "uses addContentVi
 expect_fail "Check 16 rejects engine patch without touch drop" "must ignore WindowEvent::Touch" \
     env GUARD_CHECK16_ACTIVITY="$GOOD16" GUARD_CHECK16_PATCH="$BADPATCH16" bash scripts/guard.sh
 
+GOOD17="$TMP_ROOT/good17.rs"
+printf '%s\n' 'let menu_blur_cache = should_cache_menu_blur(singleplayer_paused, self.shows_panorama(), menu_blur.is_some());' > "$GOOD17"
+BAD17="$TMP_ROOT/bad17.rs"
+printf '%s\n' 'let in_world_stationary_overlay = !self.shows_panorama();' 'let menu_blur_cache = should_cache_menu_blur(true, false, true);' > "$BAD17"
+expect_pass "Check 17 accepts game.rs without in_world_stationary_overlay" \
+    env GUARD_CHECK17_GAME_RS="$GOOD17" bash scripts/guard.sh
+expect_fail "Check 17 rejects game.rs containing in_world_stationary_overlay" "in_world_stationary_overlay found" \
+    env GUARD_CHECK17_GAME_RS="$BAD17" bash scripts/guard.sh
+
 echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then

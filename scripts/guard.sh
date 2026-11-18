@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ] || [ "${GUARD_CHECK17_GAME_RS:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -595,6 +595,23 @@ if [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ]; then
     exit 0
 fi
 
+check17_run() {
+    local game_rs="$1"
+    if [ ! -f "$game_rs" ]; then
+        echo "ERROR: Check 17: game.rs not found at $game_rs" >&2
+        return 1
+    fi
+    if grep -q -F "in_world_stationary_overlay" "$game_rs"; then
+        echo "ERROR: Check 17: in_world_stationary_overlay found in $game_rs (freezes world behind chat/inventory/multiplayer UI)" >&2
+        return 1
+    fi
+    if ! grep -q -F "should_cache_menu_blur" "$game_rs"; then
+        echo "ERROR: Check 17: $game_rs must use should_cache_menu_blur predicate for blur cache" >&2
+        return 1
+    fi
+    echo "✓ Check 17: in_world_stationary_overlay absent in patched game.rs and blur cache gated by should_cache_menu_blur."
+}
+
 if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "engine" ]; then
     echo "Checking engine/ for include_bytes!/include_str! font embedding and login neutralization..."
     TEMP_PATCHED_WORKTREE=""
@@ -609,6 +626,9 @@ if [ "$IS_ISOLATED_MODE" -eq 0 ] && [ -d "engine" ]; then
         local starling_root="$1"
         check_engine_font_embeds "$starling_root"
         check_engine_login_neutralized "$starling_root"
+        if [ -f "$starling_root/crates/horizon-client/src/game.rs" ]; then
+            check17_run "$starling_root/crates/horizon-client/src/game.rs"
+        fi
         for item in engine/*; do
             if [ "$item" != "engine/starling" ] && [ -d "$item" ]; then
                 check_engine_font_embeds "$item"
@@ -980,6 +1000,12 @@ fi
 if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
     check16_run "ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher/rustruntime/RustActivity.kt" \
         "engine/patches/0009-blaze-input-injector.patch"
+fi
+
+# --- Check 17 (Stage L-B3): world must keep rendering when UI/chat/inventory/multiplayer options are open ---
+if [ "${GUARD_CHECK17_GAME_RS:-}" != "" ]; then
+    check17_run "$GUARD_CHECK17_GAME_RS"
+    exit $?
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)

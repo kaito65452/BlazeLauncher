@@ -1,0 +1,134 @@
+diff --git a/crates/horizon-client-render/src/android_runtime.rs b/crates/horizon-client-render/src/android_runtime.rs
+index 6bf6df1633..437c603a63 100644
+--- a/crates/horizon-client-render/src/android_runtime.rs
++++ b/crates/horizon-client-render/src/android_runtime.rs
+@@ -542,6 +542,8 @@ pub struct BlazeInputCounters {
+     pub raw_touch_ignored: u64,
+     pub raw_touch_warnings: u64,
+     pub text_input_active_signals: u64,
++    pub world_frames_while_ui_open: u64,
++    pub ui_overlay_cache_active: bool,
+ }
+ 
+ struct BlazeInputQueue {
+@@ -577,6 +579,8 @@ impl BlazeInputQueue {
+                 raw_touch_ignored: 0,
+                 raw_touch_warnings: 0,
+                 text_input_active_signals: 0,
++                world_frames_while_ui_open: 0,
++                ui_overlay_cache_active: false,
+             },
+         }
+     }
+@@ -722,6 +726,30 @@ pub fn record_text_input_active_signal() {
+     guard.counters.text_input_active_signals += 1;
+ }
+ 
++/// Only singleplayer pause may cache the blurred world backdrop; chat, inventory, creative,
++/// and multiplayer UI screens must keep rendering the live world every frame.
++pub const fn should_cache_menu_blur(
++    singleplayer_paused: bool,
++    shows_panorama: bool,
++    has_menu_blur: bool,
++) -> bool {
++    singleplayer_paused && !shows_panorama && has_menu_blur
++}
++
++pub fn record_ui_frame_render_state(
++    world_rendered_with_ui: bool,
++    non_pause_ui_open: bool,
++    menu_blur_cache_active: bool,
++) {
++    let mut guard = BLAZE_INPUT_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++    if world_rendered_with_ui {
++        guard.counters.world_frames_while_ui_open += 1;
++    }
++    if non_pause_ui_open {
++        guard.counters.ui_overlay_cache_active = menu_blur_cache_active;
++    }
++}
++
+ static BLAZE_SURFACE_RECT: [std::sync::atomic::AtomicI32; 6] = [
+     std::sync::atomic::AtomicI32::new(0),
+     std::sync::atomic::AtomicI32::new(0),
+@@ -1106,4 +1134,25 @@ mod input_bridge_tests {
+         assert_eq!(input_counters().text_input_active_signals, 2);
+         reset_input_metrics_for_test();
+     }
++
++    #[test]
++    fn blur_cache_disabled_for_inventory_creative_chat_and_multiplayer() {
++        // Screen::Inventory, Screen::Creative, Screen::Chat: singleplayer_paused == false
++        assert!(!should_cache_menu_blur(false, false, true));
++        // Multiplayer (any screen, including Options or Esc menu): singleplayer_paused == false
++        assert!(!should_cache_menu_blur(false, false, false));
++        // Title/panorama: shows_panorama == true
++        assert!(!should_cache_menu_blur(true, true, true));
++        // Menu blur off: has_menu_blur == false
++        assert!(!should_cache_menu_blur(true, false, false));
++        // Singleplayer pause with menu blur enabled: allowed
++        assert!(should_cache_menu_blur(true, false, true));
++
++        reset_input_metrics_for_test();
++        record_ui_frame_render_state(true, true, should_cache_menu_blur(false, false, true));
++        let counters = input_counters();
++        assert_eq!(counters.world_frames_while_ui_open, 1);
++        assert!(!counters.ui_overlay_cache_active);
++        reset_input_metrics_for_test();
++    }
+ }
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index ba9ab0d39e..90a1115c3d 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -14868,28 +14868,13 @@ impl Game<'_> {
+         // Load the profile's scheme before drawing the first frame or outline.
+         #[cfg(target_os = "android")]
+         self.pad.touch.viewport(size[0], size[1]);
+-        let raw_menu_blur = self.menu_blur();
+-        #[cfg(target_os = "android")]
+-        let in_world_stationary_overlay = !self.shows_panorama()
+-            && self.player.is_some()
+-            && !self.pad.touch_ui.floating_menu
+-            && (self.singleplayer_paused()
+-                || self.screen != Screen::Playing
+-                || self.pad.touch.editor.is_some())
+-            && (self.singleplayer_paused()
+-                || self.pad.touch.editor.is_some()
+-                || self.pad.touch.state().left == [0.0, 0.0]);
+-        #[cfg(not(target_os = "android"))]
+-        let in_world_stationary_overlay = false;
+-        let menu_blur = if in_world_stationary_overlay {
+-            raw_menu_blur.or(Some(0.0))
+-        } else {
+-            raw_menu_blur
+-        };
+-        let menu_blur_cache = ((self.singleplayer_paused() || self.screen == Screen::Options)
+-            && !self.shows_panorama()
+-            && menu_blur.is_some())
+-            || in_world_stationary_overlay;
++        let menu_blur = self.menu_blur();
++        let singleplayer_paused = self.singleplayer_paused();
++        let menu_blur_cache = horizon_client::android_runtime::should_cache_menu_blur(
++            singleplayer_paused,
++            self.shows_panorama(),
++            menu_blur.is_some(),
++        );
+         if !menu_blur_cache || !self.was_menu_blurred {
+             if let Some(renderer) = self.renderer.as_mut() {
+                 renderer.invalidate_menu_blur();
+@@ -14902,6 +14887,14 @@ impl Game<'_> {
+                     .as_ref()
+                     .is_some_and(|renderer| renderer.has_cached_menu_blur(r))
+             });
++        #[cfg(target_os = "android")]
++        if self.player.is_some() && !self.shows_panorama() && self.screen != Screen::Playing {
++            horizon_client::android_runtime::record_ui_frame_render_state(
++                !skip_world_for_blur,
++                !singleplayer_paused,
++                menu_blur_cache,
++            );
++        }
+         let alpha = self.clock.fraction();
+         // Camera.getCameraEntityPartialTicks: the view, the hand and the
+         // player's own model stay smooth while the level is frozen.

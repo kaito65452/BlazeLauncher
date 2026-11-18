@@ -211,7 +211,11 @@ object RustInputDiagnostics {
     private fun fmt4(v: Float): String = if (v.isFinite()) "%.4f".format(java.util.Locale.ROOT, v) else "-"
 
     /** [leakedToEngine] = native raw_touch_ignored (touches that still reached winit); expected 0. */
-    fun format(leakedToEngine: Long): String =
+    fun format(
+        leakedToEngine: Long,
+        worldFramesWhileUiOpen: Long = 0L,
+        uiOverlayCacheActive: Boolean = false
+    ): String =
         "touch_seen_by_activity=${touchSeenByActivity.get()} " +
             "touch_seen_by_overlay=${touchSeenByOverlay.get()} " +
             "touch_routed_to_zl2=${touchRoutedToZl2.get()} " +
@@ -227,11 +231,21 @@ object RustInputDiagnostics {
             "mapped_px=${fmt(lastMappedPxX)},${fmt(lastMappedPxY)} " +
             "raw_vs_mapped_check=${computeRawVsMappedCheck()} " +
             "text_input_active_signals=${textInputActiveSignals.get()} " +
-            "ime_shown_count=${imeShownCount.get()}" +
+            "ime_shown_count=${imeShownCount.get()} " +
+            "world_frames_while_ui_open=$worldFramesWhileUiOpen " +
+            "ui_overlay_cache_active=$uiOverlayCacheActive" +
             if (overlayError.isNotBlank()) " overlay_error=$overlayError" else ""
 
     private val RAW_TOUCH_REGEX = Regex("\"raw_touch_ignored\"\\s*:\\s*(\\d+)")
+    private val WORLD_FRAMES_UI_REGEX = Regex("\"world_frames_while_ui_open\"\\s*:\\s*(\\d+)")
+    private val UI_CACHE_ACTIVE_REGEX = Regex("\"ui_overlay_cache_active\"\\s*:\\s*(true|false)")
 
     fun parseNativeRawTouch(nativeDiagnostics: String): Long =
         RAW_TOUCH_REGEX.find(nativeDiagnostics)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+
+    fun parseNativeWorldFramesWhileUiOpen(nativeDiagnostics: String): Long =
+        WORLD_FRAMES_UI_REGEX.find(nativeDiagnostics)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+
+    fun parseNativeUiOverlayCacheActive(nativeDiagnostics: String): Boolean =
+        UI_CACHE_ACTIVE_REGEX.find(nativeDiagnostics)?.groupValues?.get(1) == "true"
 }

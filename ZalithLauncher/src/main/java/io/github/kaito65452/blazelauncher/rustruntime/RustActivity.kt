@@ -558,7 +558,9 @@ class RustActivity : NativeActivity() {
             bridgeSummary = RustInputBridge.formatCountersSummary(),
             nativeDiagnostics = nativeDiag,
             touchDiagnostics = RustInputDiagnostics.format(
-                RustInputDiagnostics.parseNativeRawTouch(nativeDiag)
+                leakedToEngine = RustInputDiagnostics.parseNativeRawTouch(nativeDiag),
+                worldFramesWhileUiOpen = RustInputDiagnostics.parseNativeWorldFramesWhileUiOpen(nativeDiag),
+                uiOverlayCacheActive = RustInputDiagnostics.parseNativeUiOverlayCacheActive(nativeDiag)
             )
         )
     }
