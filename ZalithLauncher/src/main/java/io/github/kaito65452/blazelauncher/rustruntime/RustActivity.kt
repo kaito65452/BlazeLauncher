@@ -108,7 +108,7 @@ class RustActivity : NativeActivity() {
     private var imeEditText: BlazeImeEditText? = null
     private var lastImeVisible = false
     private var engineTextInputActiveUi by mutableStateOf(false)
-    private val imeController by lazy {
+    private val imeController: RustImeController by lazy {
         RustImeController(
             host = object : RustImeController.Host {
                 override fun showIme() {

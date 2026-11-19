@@ -66,6 +66,7 @@ import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
 import com.movtery.inputmap.keycodes.OPEN_CHAT
 import com.movtery.inputmap.keycodes.OPEN_CHAT_VALUE
 import com.movtery.layer_controller.ControlBoxLayout
+import com.movtery.layer_controller.data.ButtonSize
 import com.movtery.layer_controller.data.HideLayerWhen
 import com.movtery.layer_controller.data.VisibilityType
 import com.movtery.layer_controller.event.ClickEvent
@@ -695,20 +696,39 @@ private fun ImePulseCueOverlay(
         if (imeButtons.isNotEmpty() && screenSize.width > 0 && screenSize.height > 0) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 imeButtons.forEach { btn ->
-                    val w = btn.internalRenderSize.width
-                    val h = btn.internalRenderSize.height
-                    if (w > 0 && h > 0) {
+                    val bSize = btn.buttonSize
+                    val (wPx, hPx) = when (bSize.type) {
+                        ButtonSize.Type.Dp -> bSize.widthDp.dp.toPx() to bSize.heightDp.dp.toPx()
+                        ButtonSize.Type.Percentage -> {
+                            val wRef = if (bSize.widthReference == ButtonSize.Reference.ScreenWidth) {
+                                screenSize.width
+                            } else {
+                                screenSize.height
+                            }
+                            val hRef = if (bSize.heightReference == ButtonSize.Reference.ScreenWidth) {
+                                screenSize.width
+                            } else {
+                                screenSize.height
+                            }
+                            (wRef * (bSize.widthPercentage / 10000f)) to
+                                (hRef * (bSize.heightPercentage / 10000f))
+                        }
+                        ButtonSize.Type.WrapContent -> 50.dp.toPx() to 50.dp.toPx()
+                    }
+                    val wInt = wPx.toInt()
+                    val hInt = hPx.toInt()
+                    if (wInt > 0 && hInt > 0) {
                         val pos = widgetPosition(
-                            xPercentage = btn.internalRenderPosition.xPercentage(),
-                            yPercentage = btn.internalRenderPosition.yPercentage(),
-                            widgetSize = btn.internalRenderSize,
+                            xPercentage = btn.position.xPercentage(),
+                            yPercentage = btn.position.yPercentage(),
+                            widgetSize = IntSize(wInt, hInt),
                             screenSize = screenSize
                         )
                         val pad = 4.dp.toPx() * (0.6f + 0.4f * pulse)
                         drawRoundRect(
                             color = Color(0xFF38BDF8).copy(alpha = pulse),
                             topLeft = Offset(pos.x - pad, pos.y - pad),
-                            size = Size(w + pad * 2f, h + pad * 2f),
+                            size = Size(wPx + pad * 2f, hPx + pad * 2f),
                             cornerRadius = CornerRadius(10.dp.toPx(), 10.dp.toPx()),
                             style = Stroke(width = 3.dp.toPx())
                         )
