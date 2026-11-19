@@ -190,6 +190,20 @@ class InactiveDropCountingSink(
         }
         delegate.sendKeycode(keycode, keychar, scancode, modifiers, isDown)
     }
+
+    override fun sendKeyPress(keyCode: Int, scancode: Int, modifiers: Int, status: Boolean) {
+        sendKeycode(keyCode, '\u0000', scancode, modifiers, status)
+    }
+
+    override fun sendKeyPress(keyCode: Int, modifiers: Int, status: Boolean) {
+        sendKeycode(keyCode, '\u0000', 0, modifiers, status)
+    }
+
+    override fun sendKeyPress(keyCode: Int) {
+        val mods = delegate.getCurrentMods()
+        sendKeycode(keyCode, '\u0000', 0, mods, true)
+        sendKeycode(keyCode, '\u0000', 0, mods, false)
+    }
 }
 
 /**

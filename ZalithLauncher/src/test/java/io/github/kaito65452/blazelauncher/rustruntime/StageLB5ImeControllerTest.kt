@@ -152,11 +152,11 @@ class StageLB5ImeControllerTest {
         controller.onImeVisibility(true)
         assertTrue("Overlay must stay behind IME while still visible", overlayKeepBehind)
 
-        // Bounded reconciliation retries up to MAX_RECONCILE_ATTEMPTS (3) hides, then stops.
+        // 1 initial hide from transitionToHide + bounded 3 reconcile retries = 4 total hides
         repeat(5) {
             scheduler.advanceAndRun(RustImeController.RECONCILE_DELAY_MS)
         }
-        assertEquals(3, hides)
+        assertEquals(4, hides)
         assertEquals(3L, RustImeDiagnostics.reconcileAttempts.get())
         assertTrue(
             RustImeDiagnostics.reconcileLastSource,
