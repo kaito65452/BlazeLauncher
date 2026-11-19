@@ -224,6 +224,14 @@ fun DeveloperSettingsSection(
             summary = stringResource(R.string.developer_rust_input_debug_summary)
         )
 
+        SwitchSettingsCard(
+            modifier = Modifier.fillMaxWidth(),
+            position = CardPosition.Middle,
+            unit = AllSettings.rustAutoShowIme,
+            title = stringResource(R.string.developer_rust_auto_show_ime_title),
+            summary = stringResource(R.string.developer_rust_auto_show_ime_summary)
+        )
+
         val latestSummary = DeveloperDiagnosticsStore.lastReportOutput?.lineSequence()?.firstOrNull()
             ?: stringResource(R.string.developer_copy_report_summary)
         SettingsCard(

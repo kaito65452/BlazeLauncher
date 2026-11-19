@@ -107,20 +107,32 @@ class RustActivity : NativeActivity() {
     private var overlayWindowAdded = false
     private var imeEditText: BlazeImeEditText? = null
     private var lastImeVisible = false
+    private var engineTextInputActiveUi by mutableStateOf(false)
     private val imeController by lazy {
-        RustImeController(object : RustImeController.Host {
-            override fun showIme() {
-                updateOverlayImeWindowFlags(imeActive = true)
-                val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
-                imeEditText?.enableIme(nativeView)
-            }
+        RustImeController(
+            host = object : RustImeController.Host {
+                override fun showIme() {
+                    updateOverlayImeWindowFlags(imeActive = true)
+                    val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+                    imeEditText?.enableIme(nativeView)
+                }
 
-            override fun hideIme() {
-                val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
-                imeEditText?.disableIme(nativeView)
-                updateOverlayImeWindowFlags(imeActive = false)
+                override fun hideIme() {
+                    val nativeView = findViewById<ViewGroup>(android.R.id.content)?.getChildAt(0)
+                    imeEditText?.disableIme(nativeView)
+                    updateOverlayImeWindowFlags(
+                        imeActive = imeController.wanted || RustImeDiagnostics.imeVisibleObserved
+                    )
+                }
+
+                override fun onOverlayImeStateChanged(keepBehindIme: Boolean) {
+                    updateOverlayImeWindowFlags(imeActive = keepBehindIme)
+                }
+            },
+            autoShowProvider = {
+                runCatching { AllSettings.rustAutoShowIme.getValue() }.getOrDefault(false)
             }
-        })
+        )
     }
     private var textInputMode by mutableStateOf(TextInputMode.DISABLE)
     private var activeLayoutFile by mutableStateOf<File?>(null)
@@ -205,9 +217,16 @@ class RustActivity : NativeActivity() {
     @Suppress("unused")
     @Keep
     fun onTextInputActiveChanged(active: Boolean) {
+        onTextInputActiveWithSource(active, if (active) "unknown" else "none")
+    }
+
+    @Suppress("unused")
+    @Keep
+    fun onTextInputActiveWithSource(active: Boolean, source: String?) {
         RustInputDiagnostics.textInputActiveSignals.incrementAndGet()
+        val safeSource = source.orEmpty().ifBlank { if (active) "unknown" else "none" }
         runOnUiThread {
-            imeController.onEngineSignal(active)
+            imeController.onEngineSignal(active, safeSource)
             syncTextInputMode()
         }
     }
@@ -288,7 +307,12 @@ class RustActivity : NativeActivity() {
 
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
             if (event.action == KeyEvent.ACTION_UP) {
-                composeHost.onBackPressedDispatcher.onBackPressed()
+                if (imeController.wanted || RustImeDiagnostics.imeVisibleObserved) {
+                    imeController.onUserDismissed()
+                    syncTextInputMode()
+                } else {
+                    composeHost.onBackPressedDispatcher.onBackPressed()
+                }
             }
             return true
         }
@@ -299,19 +323,28 @@ class RustActivity : NativeActivity() {
         }
 
         val imeHasFocus = imeEditText?.hasFocus() == true
+        val isSoftKey = (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD
+        if (isSoftKey && !imeController.engineActive) {
+            if (isDown) {
+                RustImeDiagnostics.keysDroppedInactive.incrementAndGet()
+            }
+            imeController.onTextWhileEngineInactive()
+            syncTextInputMode()
+            return true
+        }
         if (textInputMode == TextInputMode.ENABLE && handleComposeTextModeKey(event, isDown, imeHasFocus)) {
             return true
         }
 
         if (!imeHasFocus &&
-            (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD &&
+            isSoftKey &&
             event.keyCode == KeyEvent.KEYCODE_ENTER && isDown
         ) {
             LWJGLCharSender.sendEnter()
             return true
         }
 
-        if (imeHasFocus && (event.flags and KeyEvent.FLAG_SOFT_KEYBOARD) == KeyEvent.FLAG_SOFT_KEYBOARD) {
+        if (imeHasFocus && isSoftKey) {
             return super.dispatchKeyEvent(event)
         }
 
@@ -406,7 +439,10 @@ class RustActivity : NativeActivity() {
                 }
             )
 
-            val root = DesktopOverlayRoot(this)
+            val root = DesktopOverlayRoot(this).apply {
+                isFocusable = false
+                isFocusableInTouchMode = false
+            }
             root.onBottomTap = {
                 imeController.onChatTap()
                 syncTextInputMode()
@@ -416,6 +452,8 @@ class RustActivity : NativeActivity() {
             composeHost.attachToDecorView(root)
 
             val composeView = ComposeView(this).apply {
+                isFocusable = false
+                isFocusableInTouchMode = false
                 setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
                 setContent {
                     SideEffect { RustInputDiagnostics.overlayComposedCount.incrementAndGet() }
@@ -424,6 +462,7 @@ class RustActivity : NativeActivity() {
                             initialLayoutFile = activeLayoutFile,
                             gamepadViewModel = gamepadViewModel,
                             textInputMode = textInputMode,
+                            engineTextInputActive = engineTextInputActiveUi,
                             onTextInputModeChange = { toggleDesktopIme() },
                             onLayoutChanged = { newFile -> activeLayoutFile = newFile },
                             onForceClose = ::exitRustProcess
@@ -529,9 +568,7 @@ class RustActivity : NativeActivity() {
             lp.flags = desiredFlags
             runCatching { windowManager.updateViewLayout(root, lp) }
         }
-        if (imeActive || RustImeDiagnostics.overlayWindowFlags == 0) {
-            RustImeDiagnostics.overlayWindowFlags = lp.flags
-        }
+        RustImeDiagnostics.overlayWindowFlags = lp.flags
     }
 
     private fun recordOverlayError(message: String, t: Throwable) {
@@ -631,7 +668,7 @@ class RustActivity : NativeActivity() {
     }
 
     private fun persistInputBridgeDiagnostics() {
-        imeEditText?.refreshDiagnostics(onlyIfUnset = true)
+        imeEditText?.refreshDiagnostics()
         val nativeDiag = runCatching { BlazeNativeBridge.inputDiagnostics() }
             .getOrElse { "unavailable (${it.javaClass.simpleName})" }
         RustDiagnosticsCollector.recordInputBridgeStats(
@@ -690,33 +727,38 @@ class RustActivity : NativeActivity() {
         if (imeEditText != null) return
         val edit = BlazeImeEditText(this).apply {
             hostWindow = window
+            isEngineActive = { imeController.engineActive }
+            onInactiveTextInput = {
+                runOnUiThread {
+                    imeController.onTextWhileEngineInactive()
+                    syncTextInputMode()
+                }
+            }
             onImeShown = { RustInputDiagnostics.imeShownCount.incrementAndGet() }
             onImeBackPressed = {
                 imeController.onUserDismissed()
                 syncTextInputMode()
             }
             onEnterAction = {
-                imeController.onTextCommitted()
                 syncTextInputMode()
             }
         }
         addContentView(edit, FrameLayout.LayoutParams(1, 1))
         imeEditText = edit
 
-        // Visibility truth source: WindowInsetsCompat. A user dismissal via Gboard is respected.
+        // Visibility truth source: WindowInsetsCompat. Also drives bounded desired-vs-observed reconciliation.
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { v, insets ->
             val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
             lastImeVisible = visible
             imeController.onImeVisibility(visible)
-            if (visible) {
-                imeEditText?.refreshDiagnostics()
-            }
+            imeEditText?.refreshDiagnostics()
             syncTextInputMode()
             ViewCompat.onApplyWindowInsets(v, insets)
         }
     }
 
     private fun syncTextInputMode() {
+        engineTextInputActiveUi = imeController.engineActive
         textInputMode = if (imeController.wanted) TextInputMode.ENABLE else TextInputMode.DISABLE
     }
 

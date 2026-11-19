@@ -19,9 +19,21 @@
 package io.github.kaito65452.blazelauncher.rustruntime.input
 
 import android.widget.Toast
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -32,23 +44,36 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.movtery.inputmap.keycodes.LwjglGlfwKeycode
 import com.movtery.inputmap.keycodes.OPEN_CHAT
 import com.movtery.inputmap.keycodes.OPEN_CHAT_VALUE
 import com.movtery.layer_controller.ControlBoxLayout
 import com.movtery.layer_controller.data.HideLayerWhen
+import com.movtery.layer_controller.data.VisibilityType
 import com.movtery.layer_controller.event.ClickEvent
 import com.movtery.layer_controller.event.EventHandler
 import com.movtery.layer_controller.layout.EmptyControlLayout
 import com.movtery.layer_controller.layout.loadLayoutFromFile
 import com.movtery.layer_controller.observable.ObservableControlLayout
+import com.movtery.layer_controller.utils.widgetPosition
 import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.bridge.CURSOR_DISABLED
 import com.movtery.zalithlauncher.bridge.ZLBridgeStates
@@ -62,6 +87,7 @@ import com.movtery.zalithlauncher.setting.enums.toAction
 import com.movtery.zalithlauncher.ui.components.MenuState
 import com.movtery.zalithlauncher.ui.components.rememberBoxSize
 import com.movtery.zalithlauncher.ui.control.MinecraftHotbar
+import com.movtery.zalithlauncher.ui.control.event.LAUNCHER_EVENT_SWITCH_IME
 import com.movtery.zalithlauncher.ui.control.event.launcherEvent
 import com.movtery.zalithlauncher.ui.control.event.lwjglEvent
 import com.movtery.zalithlauncher.ui.control.gamepad.GamepadKeyListener
@@ -185,6 +211,7 @@ fun RustGameOverlay(
     initialLayoutFile: File?,
     gamepadViewModel: GamepadViewModel,
     textInputMode: TextInputMode,
+    engineTextInputActive: Boolean = false,
     onTextInputModeChange: (TextInputMode) -> Unit,
     onLayoutChanged: (File) -> Unit,
     onForceClose: () -> Unit,
@@ -449,6 +476,17 @@ fun RustGameOverlay(
             }
         }
 
+        // Visual cue on the IME button whenever a game text field is focused and the keyboard is closed.
+        if (engineTextInputActive && textInputMode != TextInputMode.ENABLE) {
+            ImePulseCueOverlay(
+                observedLayout = if (showControls) observableLayout else null,
+                isCursorGrabbing = isGrabbing,
+                hideLayerWhen = hideLayerWhen,
+                screenSize = screenSize,
+                onActivateIme = ::toggleInputMethod
+            )
+        }
+
         if (AllSettings.gyroscopeControl.state && isGyroscopeAvailable(context)) {
             GyroscopeReader(
                 xEvent = { dx ->
@@ -601,6 +639,102 @@ fun RustGameOverlay(
             onForceClose = onForceClose,
             text = stringResource(R.string.game_menu_option_force_close_text)
         )
+    }
+}
+
+@Composable
+private fun ImePulseCueOverlay(
+    observedLayout: ObservableControlLayout?,
+    isCursorGrabbing: Boolean,
+    hideLayerWhen: HideLayerWhen,
+    screenSize: IntSize,
+    onActivateIme: () -> Unit
+) {
+    val transition = rememberInfiniteTransition(label = "ime_pulse")
+    val pulse by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "ime_pulse_alpha"
+    )
+    val layers = observedLayout?.layers?.collectAsStateWithLifecycle()?.value.orEmpty()
+    val imeButtons = mutableListOf<com.movtery.layer_controller.observable.ObservableNormalData>()
+    for (layer in layers) {
+        val hiddenByRule = layer.hide || when (hideLayerWhen) {
+            HideLayerWhen.WhenMouse -> layer.hideWhenMouse
+            HideLayerWhen.WhenGamepad -> layer.hideWhenGamepad
+            HideLayerWhen.None -> false
+        }
+        val layerVisible = !hiddenByRule && when (layer.visibilityType) {
+            VisibilityType.ALWAYS -> true
+            VisibilityType.IN_GAME -> isCursorGrabbing
+            VisibilityType.IN_MENU -> !isCursorGrabbing
+        }
+        if (layerVisible) {
+            val buttons by layer.normalButtons.collectAsStateWithLifecycle()
+            for (btn in buttons) {
+                val vis = when (btn.visibilityType) {
+                    VisibilityType.ALWAYS -> true
+                    VisibilityType.IN_GAME -> isCursorGrabbing
+                    VisibilityType.IN_MENU -> !isCursorGrabbing
+                }
+                if (vis && btn.clickEvents.any {
+                        it.type == ClickEvent.Type.LauncherEvent && it.key == LAUNCHER_EVENT_SWITCH_IME
+                    }
+                ) {
+                    imeButtons.add(btn)
+                }
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (imeButtons.isNotEmpty() && screenSize.width > 0 && screenSize.height > 0) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                imeButtons.forEach { btn ->
+                    val w = btn.internalRenderSize.width
+                    val h = btn.internalRenderSize.height
+                    if (w > 0 && h > 0) {
+                        val pos = widgetPosition(
+                            xPercentage = btn.internalRenderPosition.xPercentage(),
+                            yPercentage = btn.internalRenderPosition.yPercentage(),
+                            widgetSize = btn.internalRenderSize,
+                            screenSize = screenSize
+                        )
+                        val pad = 4.dp.toPx() * (0.6f + 0.4f * pulse)
+                        drawRoundRect(
+                            color = Color(0xFF38BDF8).copy(alpha = pulse),
+                            topLeft = Offset(pos.x - pad, pos.y - pad),
+                            size = Size(w + pad * 2f, h + pad * 2f),
+                            cornerRadius = CornerRadius(10.dp.toPx(), 10.dp.toPx()),
+                            style = Stroke(width = 3.dp.toPx())
+                        )
+                    }
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 14.dp)
+                    .scale(0.95f + 0.08f * pulse)
+                    .alpha(0.65f + 0.35f * pulse)
+                    .background(Color(0xCC0F172A), RoundedCornerShape(20.dp))
+                    .border(2.dp, Color(0xFF38BDF8), RoundedCornerShape(20.dp))
+                    .clickable { onActivateIme() }
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "IME",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
     }
 }
 

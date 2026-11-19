@@ -644,4 +644,9 @@ object AllSettings : SettingsRegistry() {
      * Rust Edition: draw the input diagnostics counters on screen
      */
     val rustInputDebugOverlay = boolSetting("rustInputDebugOverlay", false)
+
+    /**
+     * Rust Edition: automatically show soft keyboard when an in-game text field becomes active (default OFF)
+     */
+    val rustAutoShowIme = boolSetting("rustAutoShowIme", false)
 }

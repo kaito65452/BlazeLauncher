@@ -54,8 +54,18 @@ class StageLB4ImeControllerTest {
         override fun setDesktopInputMode(enabled: Boolean) = Unit
     }
 
+    private class ImmediateScheduler : RustImeController.Scheduler {
+        override fun post(delayMs: Long, task: Runnable): RustImeController.Cancellable {
+            if (delayMs == 0L) task.run()
+            return object : RustImeController.Cancellable {
+                override fun cancel() = Unit
+            }
+        }
+    }
+
     private var shows = 0
     private var hides = 0
+    private var autoShow = true
     private lateinit var c: RustImeController
 
     @Before
@@ -63,10 +73,15 @@ class StageLB4ImeControllerTest {
         RustImeDiagnostics.reset()
         shows = 0
         hides = 0
-        c = RustImeController(object : RustImeController.Host {
-            override fun showIme() { shows++ }
-            override fun hideIme() { hides++ }
-        })
+        autoShow = true
+        c = RustImeController(
+            host = object : RustImeController.Host {
+                override fun showIme() { shows++ }
+                override fun hideIme() { hides++ }
+            },
+            scheduler = ImmediateScheduler(),
+            autoShowProvider = { autoShow }
+        )
     }
 
     @Test
@@ -127,14 +142,17 @@ class StageLB4ImeControllerTest {
     }
 
     @Test
-    fun chatTapShowsOnlyWhenEngineWantsText() {
+    fun chatTapRespectsManualFirstAndUserDismiss() {
         c.onChatTap()
         assertEquals(0, shows)
         c.onEngineSignal(true)
         c.onImeVisibility(true)
         c.onImeVisibility(false)
         assertEquals(1, hides)
+        // L-B5 policy: chat taps do not auto-pop IME; explicit manual toggle does.
         c.onChatTap()
+        assertEquals(1, shows)
+        c.onManualToggle()
         assertEquals(2, shows)
     }
 

@@ -27,6 +27,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputConnectionWrapper
+import androidx.annotation.Keep
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import android.view.inputmethod.InputMethodManager
@@ -153,20 +154,69 @@ class RustImeTextProcessor {
 }
 
 /**
- * Real, IME-focusable 1x1 EditText hosted in `RustActivity`'s main window (never the overlay
- * sub-window). Same proven approach as ZL2's TouchCharInput (filler text + TextWatcher diff), but
- * with a swipe-friendly input type (no NO_SUGGESTIONS / FILTER) and an InputConnection wrapper
- * that counts what the keyboard delivers (counts and lengths only, never the text).
+ * Wraps a [BlazeInputSink] and drops IME character/key deliveries whenever the engine does not
+ * have an active text field, recording `chars_dropped_inactive` / `keys_dropped_inactive`.
  */
+class InactiveDropCountingSink(
+    private val delegate: BlazeInputSink,
+    private val isEngineActive: () -> Boolean,
+    private val onInactiveDropped: () -> Unit = {}
+) : BlazeInputSink by delegate {
+    override fun sendChar(keychar: Char, modifiers: Int) {
+        if (!isEngineActive()) {
+            RustImeDiagnostics.charsDroppedInactive.incrementAndGet()
+            onInactiveDropped()
+            return
+        }
+        delegate.sendChar(keychar, modifiers)
+    }
+
+    override fun sendCodepoint(codepoint: Int) {
+        if (!isEngineActive()) {
+            RustImeDiagnostics.charsDroppedInactive.incrementAndGet()
+            onInactiveDropped()
+            return
+        }
+        delegate.sendCodepoint(codepoint)
+    }
+
+    override fun sendKeycode(keycode: Int, keychar: Char, scancode: Int, modifiers: Int, isDown: Boolean) {
+        if (!isEngineActive()) {
+            if (isDown) {
+                RustImeDiagnostics.keysDroppedInactive.incrementAndGet()
+            }
+            onInactiveDropped()
+            return
+        }
+        delegate.sendKeycode(keycode, keychar, scancode, modifiers, isDown)
+    }
+}
+
+/**
+ * Real, IME-focusable 1x1 EditText hosted in `RustActivity`'s main window (never the overlay
+ * sub-window). Avoids calling `setText()` while focused so IMM does not restart InputConnection
+ * mid-session (`on_create_input_connection` stays ~1 per show), tracks restart reasons, and drops
+ * text arriving while `!isEngineActive()`.
+ */
+@Keep
 class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     private val processor = RustImeTextProcessor()
     private var internalChange = false
     private var imeActive = false
+    private var pendingRestartReason: String? = null
 
     var onEnterAction: (() -> Unit)? = null
     var onImeBackPressed: (() -> Unit)? = null
     var onImeShown: (() -> Unit)? = null
+    var onInactiveTextInput: (() -> Unit)? = null
+    var isEngineActive: () -> Boolean = { true }
     var hostWindow: android.view.Window? = null
+
+    private fun imeSink(): BlazeInputSink = InactiveDropCountingSink(
+        delegate = BlazeInputRouter.currentSink(),
+        isEngineActive = isEngineActive,
+        onInactiveDropped = { onInactiveTextInput?.invoke() }
+    )
 
     init {
         alpha = 0f
@@ -202,30 +252,44 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
 
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 if (internalChange) return
-                processor.onTextChanged(s, start, count, BlazeInputRouter.currentSink())
+                processor.onTextChanged(s, start, count, imeSink())
             }
 
             override fun afterTextChanged(s: Editable?) {
-                if (internalChange) return
-                // Keep the buffer topped up so backspace always has something to delete,
-                // without resetting mid-composition or wiping Gboard swipe word context.
-                if (s != null && !hasComposing(s) &&
-                    (s.length <= 2 || s.toString().indexOf('\n') >= 0)
-                ) {
-                    resetBuffer()
+                if (internalChange || s == null) return
+                if (hasComposing(s)) return
+                // Mutate the Editable in place instead of setText() so IMM never calls restartInput().
+                val newlineIdx = s.indexOf('\n')
+                if (newlineIdx >= 0) {
+                    internalChange = true
+                    try {
+                        s.delete(newlineIdx, newlineIdx + 1)
+                    } finally {
+                        internalChange = false
+                    }
+                }
+                if (s.length <= 2) {
+                    internalChange = true
+                    try {
+                        s.insert(0, TEXT_FILLER)
+                    } finally {
+                        internalChange = false
+                    }
                 }
             }
         })
 
-        resetBuffer()
+        resetBufferIfUnfocused()
     }
 
     private fun hasComposing(s: Editable): Boolean =
         android.view.inputmethod.BaseInputConnection.getComposingSpanStart(s) >= 0
 
     private fun sendEnter() {
-        BlazeInputRouter.currentSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
-        resetBuffer()
+        imeSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_ENTER.toInt())
+        if (!hasFocus()) {
+            resetBufferIfUnfocused()
+        }
         onEnterAction?.invoke()
     }
 
@@ -233,11 +297,14 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
         val base = super.onCreateInputConnection(outAttrs) ?: return null
         RustImeDiagnostics.createInputConnection.incrementAndGet()
         RustImeDiagnostics.startInputSessions.incrementAndGet()
+        val reason = pendingRestartReason ?: "system_or_gboard"
+        pendingRestartReason = null
+        RustImeDiagnostics.recordInputRestartReason(reason)
         outAttrs.imeOptions = outAttrs.imeOptions or EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI
         RustImeDiagnostics.editorInputType = outAttrs.inputType
         RustImeDiagnostics.editorImeOptions = outAttrs.imeOptions
-        RustImeDiagnostics.record("create_input_connection")
+        RustImeDiagnostics.record("create_input_connection:$reason")
         refreshDiagnostics()
         return object : InputConnectionWrapper(base, true) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
@@ -260,9 +327,9 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
                 RustImeDiagnostics.deleteSurroundingCalls.incrementAndGet()
                 if (beforeLength > 0 && selectionStart <= 0) {
+                    val sink = imeSink()
                     for (i in 0 until beforeLength) {
-                        BlazeInputRouter.currentSink()
-                            .sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
+                        sink.sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
                     }
                     return true
                 }
@@ -286,8 +353,7 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
                             val charCount = Character.charCount(cp)
                             deleteSurroundingText(charCount, 0)
                         } else {
-                            BlazeInputRouter.currentSink()
-                                .sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
+                            imeSink().sendKeyPress(LwjglGlfwKeycode.GLFW_KEY_BACKSPACE.toInt())
                         }
                     }
                     return true
@@ -298,65 +364,66 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     }
 
     /** Make this view the IME target and ask for the keyboard (called only by RustImeController). */
-    fun enableIme(nativeView: View? = null) {
+    internal fun enableIme(nativeView: View? = null) {
+        val alreadyFocused = imeActive && hasFocus()
         imeActive = true
-        resetBuffer()
-        hostWindow?.clearFlags(
-            android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
-        )
-        nativeView?.clearFocus()
-        visibility = View.VISIBLE
-        isEnabled = true
-        isFocusable = true
-        isFocusableInTouchMode = true
-        requestFocus()
-        post {
-            if (!imeActive) return@post
+        if (!alreadyFocused) {
+            resetBufferIfUnfocused()
+            hostWindow?.clearFlags(
+                android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+            )
             nativeView?.clearFocus()
+            visibility = View.VISIBLE
+            isEnabled = true
+            isFocusable = true
+            isFocusableInTouchMode = true
+            pendingRestartReason = "session_start"
             requestFocus()
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                ?: return@post
-            imm.restartInput(this)
-            hostWindow?.let { WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime()) }
-            val shown = imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-            if (shown) {
-                onImeShown?.invoke()
-                refreshDiagnostics()
-            } else {
-                refreshDiagnostics()
-                postDelayed({
-                    if (!imeActive) return@postDelayed
-                    nativeView?.clearFocus()
-                    requestFocus()
-                    imm.restartInput(this)
-                    hostWindow?.let {
-                        WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime())
-                    }
-                    if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
-                        onImeShown?.invoke()
-                    }
-                    refreshDiagnostics()
-                }, 60L)
-            }
+        } else {
+            pendingRestartReason = "reconcile_show"
         }
+
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            ?: return
+        // Only restartInput when Android hasn't already bound an InputConnection for this view.
+        if (!imm.isActive(this)) {
+            if (pendingRestartReason == null) {
+                pendingRestartReason = "imm_inactive"
+            }
+            imm.restartInput(this)
+        } else if (!alreadyFocused) {
+            pendingRestartReason = null
+        }
+        hostWindow?.let { WindowCompat.getInsetsController(it, this).show(WindowInsetsCompat.Type.ime()) }
+        if (imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)) {
+            onImeShown?.invoke()
+        }
+        refreshDiagnostics()
     }
 
-    fun disableIme(restoreFocusView: View? = null) {
+    internal fun disableIme(restoreFocusView: View? = null) {
         imeActive = false
+        pendingRestartReason = null
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.hideSoftInputFromWindow(windowToken, 0)
-        hostWindow?.let { WindowCompat.getInsetsController(it, this).hide(WindowInsetsCompat.Type.ime()) }
+        // Hide using the active IME target's window token BEFORE releasing focus from this view.
+        val token = windowToken ?: hostWindow?.decorView?.windowToken
+        if (token != null) {
+            imm?.hideSoftInputFromWindow(token, 0)
+        }
+        hostWindow?.let {
+            WindowCompat.getInsetsController(it, it.decorView).hide(WindowInsetsCompat.Type.ime())
+        }
         clearFocus()
         isFocusable = false
         isFocusableInTouchMode = false
-        resetBuffer()
+        resetBufferIfUnfocused()
         restoreFocusView?.requestFocus()
+        refreshDiagnostics()
     }
 
-    /** UI-thread snapshot for the Copy report. Set [onlyIfUnset] at exit to preserve active snapshot. */
-    fun refreshDiagnostics(onlyIfUnset: Boolean = false) {
-        if (onlyIfUnset && !imeActive && RustImeDiagnostics.targetViewClass != "none") return
+    /** UI-thread snapshot for the Copy report. */
+    fun refreshDiagnostics() {
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         RustImeDiagnostics.targetViewClass = javaClass.simpleName
         RustImeDiagnostics.viewHasFocus = hasFocus()
@@ -367,14 +434,17 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     }
 
     override fun onKeyPreIme(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_BACK && event?.action == KeyEvent.ACTION_UP && imeActive) {
+        if (keyCode == KeyEvent.KEYCODE_BACK && event?.action == KeyEvent.ACTION_UP &&
+            (imeActive || RustImeDiagnostics.imeVisibleObserved)
+        ) {
             onImeBackPressed?.invoke()
             return true
         }
         return super.onKeyPreIme(keyCode, event)
     }
 
-    fun resetBuffer() {
+    private fun resetBufferIfUnfocused() {
+        if (hasFocus()) return
         internalChange = true
         try {
             processor.reset()
@@ -386,6 +456,6 @@ class BlazeImeEditText(context: Context) : AppCompatEditText(context) {
     }
 
     companion object {
-        const val TEXT_FILLER = "                              "
+        const val TEXT_FILLER = "                                                            "
     }
 }

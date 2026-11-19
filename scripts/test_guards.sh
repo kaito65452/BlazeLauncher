@@ -873,6 +873,51 @@ expect_pass "Check 17 accepts game.rs without in_world_stationary_overlay" \
 expect_fail "Check 17 rejects game.rs containing in_world_stationary_overlay" "in_world_stationary_overlay found" \
     env GUARD_CHECK17_GAME_RS="$BAD17" bash scripts/guard.sh
 
+GOOD18="$TMP_ROOT/good18"
+mkdir -p "$GOOD18/input"
+cat > "$GOOD18/input/RustImeInputView.kt" <<'KT'
+internal fun enableIme() {
+    imm.showSoftInput(this, 0)
+}
+KT
+cat > "$GOOD18/RustActivity.kt" <<'KT'
+val host = object : RustImeController.Host {
+    override fun showIme() {
+        imeEditText?.enableIme()
+    }
+}
+KT
+expect_pass "Check 18 accepts IME show inside RustImeController.Host only" \
+    env GUARD_CHECK18_DIR="$GOOD18" bash scripts/guard.sh
+
+BAD18_DIRECT="$TMP_ROOT/bad18_direct"
+mkdir -p "$BAD18_DIRECT"
+cat > "$BAD18_DIRECT/RustActivity.kt" <<'KT'
+override fun onResume() {
+    imm.showSoftInput(edit, 0)
+}
+KT
+expect_fail "Check 18 rejects direct showSoftInput outside RustImeInputView.kt" "outside RustImeInputView\.kt" \
+    env GUARD_CHECK18_DIR="$BAD18_DIRECT" bash scripts/guard.sh
+
+BAD18_FORCED="$TMP_ROOT/bad18_forced"
+mkdir -p "$BAD18_FORCED"
+cat > "$BAD18_FORCED/Helper.kt" <<'KT'
+fun bad() { imm.toggleSoftInput(0, 0) }
+KT
+expect_fail "Check 18 rejects toggleSoftInput / SHOW_FORCED" "forbidden SHOW_FORCED / toggleSoftInput" \
+    env GUARD_CHECK18_DIR="$BAD18_FORCED" bash scripts/guard.sh
+
+BAD18_BYPASS="$TMP_ROOT/bad18_bypass"
+mkdir -p "$BAD18_BYPASS"
+cat > "$BAD18_BYPASS/RustActivity.kt" <<'KT'
+fun onWindowFocusChanged() {
+    imeEditText?.enableIme()
+}
+KT
+expect_fail "Check 18 rejects enableIme() called outside RustImeController.Host" "outside RustImeController\.Host\.showIme" \
+    env GUARD_CHECK18_DIR="$BAD18_BYPASS" bash scripts/guard.sh
+
 echo ""
 echo "=== Summary: PASS=$PASS_COUNT FAIL=$FAIL_COUNT ==="
 if [ "$FAIL_COUNT" -ne 0 ]; then

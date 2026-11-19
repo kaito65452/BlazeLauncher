@@ -1421,6 +1421,8 @@
     <string name="developer_rust_show_controls_summary">Tampilkan kontrol sentuh di dalam Rust Edition</string>
     <string name="developer_rust_touch_fallback_title">Gunakan kontrol sentuh engine (cadangan)</string>
     <string name="developer_rust_touch_fallback_summary">Kembalikan Rust Edition ke kontrol sentuh bawaan engine sebagai pengganti overlay kontrol ZL2</string>
+    <string name="developer_rust_auto_show_ime_title">Tampilkan keyboard otomatis saat kolom teks aktif</string>
+    <string name="developer_rust_auto_show_ime_summary">Buka keyboard otomatis saat chat atau kolom teks aktif (default MATI; tombol IME berdenyut sebagai isyarat)</string>
     <string name="developer_copy_report">Salin laporan</string>
     <string name="developer_copy_report_summary">Salin laporan kapabilitas perangkat dan diagnostik :rust</string>
     <string name="developer_prepare_title">Siapkan data engine (spike)</string>

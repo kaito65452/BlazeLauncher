@@ -4,7 +4,7 @@ set -euo pipefail
 echo "=== Running Guard Checks ==="
 
 IS_ISOLATED_MODE=0
-if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ] || [ "${GUARD_CHECK17_GAME_RS:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
+if [ "${GUARD_CHECK7_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK9_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK10_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK11_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK12_ONLY_PATCH:-}" != "" ] || [ "${GUARD_CHECK14_ONLY_DIR:-}" != "" ] || [ "${GUARD_CHECK16_ACTIVITY:-}" != "" ] || [ "${GUARD_CHECK17_GAME_RS:-}" != "" ] || [ "${GUARD_CHECK18_DIR:-}" != "" ] || [ "${GUARD_CHECK_ZERO_ONLY_DIR:-}" != "" ] || [ "${1:-}" = "--check-apk" ] || [ "${1:-}" = "--check-release-apk" ] || [ "${1:-}" = "--check-release-upload" ] || [ "${1:-}" = "--check-embedded-so" ]; then
     IS_ISOLATED_MODE=1
 fi
 
@@ -1006,6 +1006,57 @@ fi
 if [ "${GUARD_CHECK17_GAME_RS:-}" != "" ]; then
     check17_run "$GUARD_CHECK17_GAME_RS"
     exit $?
+fi
+
+# --- Check 18 (Stage L-B5): all IME show callers in Rust Edition must go through RustImeController ---
+check18_run() {
+    local target_dir="$1"
+    python3 - "$target_dir" <<'PY'
+import os
+import re
+import sys
+
+root = sys.argv[1]
+if not os.path.isdir(root):
+    print(f"ERROR: Check 18: directory not found: {root}", file=sys.stderr)
+    sys.exit(1)
+
+errors = []
+for dirpath, _, filenames in os.walk(root):
+    for fname in sorted(filenames):
+        if not fname.endswith((".kt", ".java")):
+            continue
+        fpath = os.path.join(dirpath, fname)
+        text = open(fpath, "r", encoding="utf-8", errors="replace").read()
+        lines = text.splitlines()
+        if "SHOW_FORCED" in text or "toggleSoftInput" in text:
+            errors.append(f"{fpath}: forbidden SHOW_FORCED / toggleSoftInput IME call")
+        for idx, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("//") or stripped.startswith("*"):
+                continue
+            if ("showSoftInput(" in line or ".show(WindowInsetsCompat.Type.ime())" in line) and fname != "RustImeInputView.kt":
+                errors.append(f"{fpath}:{idx}: direct IME show API call outside RustImeInputView.kt")
+            if "enableIme(" in line and not re.search(r'\bfun\s+enableIme\b', line):
+                # Must only be called inside RustImeController.Host.showIme()
+                ctx = "\n".join(lines[max(0, idx - 6):idx])
+                if "override fun showIme()" not in ctx and fname != "RustImeController.kt":
+                    errors.append(f"{fpath}:{idx}: enableIme() called outside RustImeController.Host.showIme()")
+
+if errors:
+    print("ERROR: Check 18 failed (IME show caller outside RustImeController):", file=sys.stderr)
+    for err in errors:
+        print(f"  - {err}", file=sys.stderr)
+    sys.exit(1)
+print("✓ Check 18: all Rust Edition IME show paths strictly gated through RustImeController.")
+PY
+}
+if [ "${GUARD_CHECK18_DIR:-}" != "" ]; then
+    check18_run "$GUARD_CHECK18_DIR"
+    exit $?
+fi
+if [ "$IS_ISOLATED_MODE" -eq 0 ]; then
+    check18_run "ZalithLauncher/src/main/java/io/github/kaito65452/blazelauncher"
 fi
 
 # 8. Optional APK inspection (--check-apk <apk_path> | --check-release-apk <apk_path>)
