@@ -1,6 +1,6 @@
 # Stage L-B5: Manual-First IME Policy, Show/Hide Race Reconciliation & Signal Debounce
 
-Status: implemented on `feat/stage-l-b5`; awaiting CI verification (SM-N975F on-device verification pending).
+Status: implemented on `feat/stage-l-b5` (`dbf94505`); CI green (`44489661640`, `Parallel Fast Checks` `44489661502`, `signed-apks` artifact `14512948737`, `versionCode=27852608`); on-device SM-N975F verification pending.
 
 ## Root Causes Diagnosed from L-B4 Copy Report (`donutsmp.net`, 2026-11-19 13:41)
 

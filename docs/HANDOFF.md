@@ -60,7 +60,9 @@ new Input Bridge touch diagnostics + "Input debug overlay" toggle. See docs/STAG
 - **Pin refresh**: added republished 26.3 manifest `ead839cbccf0ddf013c3f935f2840080b5cb0d26` / asset index `f3df28b441565ca4e5deb9cda856d90df62e1433` to `0007-pin-refresh-26.3.patch`.
 - **Details**: [`docs/STAGE_LB4.md`](file:///data/data/com.termux/files/home/BlazeLauncher/docs/STAGE_LB4.md). On-device SM-N975F behavior remains `UNVERIFIED`.
 
-## Stage L-B5 (branch feat/stage-l-b5)
+## Stage L-B5 (branch feat/stage-l-b5 @ `dbf94505`)
+- **CI**: https://github.com/kaito65452/BlazeLauncher/actions/runs/44489661640 (`success`), `Parallel Fast Checks`: https://github.com/kaito65452/BlazeLauncher/actions/runs/44489661502 (`success`)
+- **`signed-apks` Artifact ID**: `14512948737` (`385,744,659` bytes), **`versionCode`**: `27852608`
 - **Manual-first IME + race reconciliation**: `RustImeController` serialized `Scheduler` with bounded desired-vs-observed reconciliation (max 3 retries / 140 ms), pending-show cancellation, `AllSettings.rustAutoShowIme` (default `false`), and pulsing IME button cue (`ImePulseCueOverlay`) in `RustGameOverlay.kt`.
 - **Engine patch `0016-blaze-ime-l-b5.patch`**: 150 ms `BlazeTextInputDebouncer` coalesces fast 97 ms flickers (DonutSMP), deduplicates repeats, and sends `onTextInputActiveWithSource(active, source)`.
 - **Input restarts, overlay flags & drops**: `@Keep` on `BlazeImeEditText`, no `setText()` while focused, conditional `imm.restartInput`, `hideSoftInputFromWindow` before `clearFocus()`, `FLAG_ALT_FOCUSABLE_IM` cleared once insets confirm hidden, `chars_dropped_inactive` / `keys_dropped_inactive`, Check 18 in `scripts/guard.sh`.
